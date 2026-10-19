@@ -4,12 +4,17 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import psutil
 
+from .collectors import (
+    ensure_system_cpu,
+    now_in_timezone,
+    prime_process_cpu,
+    sample_system_cpu,
+)
 from .state import StateStore
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
@@ -85,16 +90,21 @@ class Sampler:
         state: StateStore,
         interval_seconds: int = 60,
         history_size: int = 180,
+        config: Any = None,
     ):
         self.state = state
+        self.config = config
         self.interval_seconds = max(15, int(interval_seconds or 60))
         self.history_size = max(30, int(history_size or 180))
         self._task: asyncio.Task | None = None
+        self._proc_task: asyncio.Task | None = None
         self._primed = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self.run_forever())
+        if self._proc_task is None or self._proc_task.done():
+            self._proc_task = asyncio.create_task(self._process_cpu_loop())
 
     async def stop(self) -> None:
         task = self._task
@@ -106,6 +116,37 @@ class Sampler:
             except asyncio.CancelledError:
                 pass
 
+        proc_task = self._proc_task
+        self._proc_task = None
+        if proc_task and not proc_task.done():
+            proc_task.cancel()
+            try:
+                await proc_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _process_cpu_loop(self) -> None:
+        """Keep fresh system/process CPU snapshots for cards and alerts."""
+
+        try:
+            await asyncio.to_thread(prime_process_cpu)
+        except Exception:
+            logger.exception("初始化进程 CPU 采样失败")
+        try:
+            await asyncio.to_thread(ensure_system_cpu)
+        except Exception:
+            logger.exception("初始化系统 CPU 采样失败")
+
+        while True:
+            await asyncio.sleep(10)
+            try:
+                await asyncio.to_thread(prime_process_cpu)
+                await asyncio.to_thread(sample_system_cpu)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("刷新 CPU 采样失败")
+
     def _prime(self) -> None:
         if self._primed:
             return
@@ -115,7 +156,7 @@ class Sampler:
         net.setdefault("last_ts", now)
         net.setdefault("last_sent", int(counters.bytes_sent))
         net.setdefault("last_recv", int(counters.bytes_recv))
-        net.setdefault("month", datetime.now().strftime("%Y-%m"))
+        net.setdefault("month", now_in_timezone(self.config).strftime("%Y-%m"))
         net.setdefault("month_up", 0)
         net.setdefault("month_down", 0)
         net.setdefault("history", [])
@@ -171,7 +212,7 @@ class Sampler:
         up_rate = sent_delta / dt
         down_rate = recv_delta / dt
 
-        month = datetime.now().strftime("%Y-%m")
+        month = now_in_timezone(self.config).strftime("%Y-%m")
         if net.get("month") != month:
             net["month"] = month
             net["month_up"] = 0

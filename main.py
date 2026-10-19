@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Final
 
@@ -12,13 +14,14 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .alerts import AlertEngine
-from .bg_provider import BackgroundRequest, resolve_background
+from .bg_provider import MAX_IMAGE_BYTES, BackgroundRequest, resolve_background
 from .collectors import (
     collect_all,
     cfg_bool,
     cfg_get,
     cfg_int,
     fetch_avatar_bytes,
+    uploaded_file_path,
 )
 from .monitor import ServiceMonitor
 from .sampler import Sampler
@@ -39,7 +42,7 @@ ALIASES: Final[set[str]] = {
     PLUGIN_NAME,
     "烬辞",
     "以华丽的图片卡片显示系统运行状态，并支持主动告警推送",
-    "1.0.0",
+    "1.2.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -49,9 +52,14 @@ class StatusCardPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state = StateStore(self.data_dir / "state.json")
         interval = cfg_int(self.config, "alerts.interval_seconds", 60)
-        self.sampler = Sampler(self.state, interval_seconds=interval)
+        self.sampler = Sampler(
+            self.state, interval_seconds=interval, config=self.config
+        )
         self.alerts = AlertEngine(self, self.state, self.config)
         self.monitor = ServiceMonitor(self, self.state, self.config)
+        self._status_cooldown: dict[str, float] = {}
+        self._status_inflight: set[str] = set()
+        self._privacy_notified: set[str] = set()
 
     async def initialize(self):
         self.sampler.start()
@@ -74,20 +82,115 @@ class StatusCardPlugin(Star):
     # status card
     # ------------------------------------------------------------------
 
+    def _status_access_allowed(self, event: AstrMessageEvent) -> bool:
+        mode = str(
+            cfg_get(self.config, "display.access", "all") or "all"
+        ).strip().lower()
+        if mode == "all":
+            return True
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+        if mode == "admin":
+            return False
+        if mode != "allowlist":
+            return True
+
+        raw = cfg_get(self.config, "display.allowlist", [])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return False
+        allowed = {
+            str(item).strip()
+            for item in raw
+            if str(item).strip()
+        }
+        values: set[str] = set()
+        try:
+            if event.unified_msg_origin:
+                values.add(str(event.unified_msg_origin))
+        except Exception:
+            pass
+        for getter in ("get_sender_id", "get_group_id"):
+            try:
+                value = getattr(event, getter)()
+                if value:
+                    values.add(str(value))
+            except Exception:
+                pass
+        return bool(allowed & values)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("状态卡", alias=ALIASES)
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
         event.should_call_llm(False)
+        if not self._status_access_allowed(event):
+            yield event.plain_result(
+                "状态卡当前仅管理员或白名单会话可用。"
+            )
+            return
+        cooldown = max(
+            0, min(3600, cfg_int(self.config, "display.cooldown_seconds", 10))
+        )
+        chat_key = str(getattr(event, "unified_msg_origin", "") or "")
+        now = time.monotonic()
+        if chat_key:
+            if chat_key in self._status_inflight:
+                yield event.plain_result("状态卡正在生成，请稍候。")
+                return
+            if cooldown:
+                last = self._status_cooldown.get(chat_key, 0.0)
+                remaining = cooldown - (now - last)
+                if remaining > 0:
+                    yield event.plain_result(
+                        f"状态卡冷却中，请 {max(1, int(remaining + 0.999))} 秒后再试。"
+                    )
+                    return
+                self._status_cooldown[chat_key] = now
+                if len(self._status_cooldown) > 200:
+                    cutoff = now - cooldown * 2
+                    self._status_cooldown = {
+                        key: ts
+                        for key, ts in self._status_cooldown.items()
+                        if ts >= cutoff
+                    }
+            self._status_inflight.add(chat_key)
+        notices: list[str] = []
+        if cfg_bool(self.config, "display.privacy_notice", True):
+            if chat_key and chat_key not in self._privacy_notified:
+                self._privacy_notified.add(chat_key)
+                if len(self._privacy_notified) > 500:
+                    self._privacy_notified.clear()
+                    self._privacy_notified.add(chat_key)
+                notices.append(
+                    "提示：状态图包含主机名/进程等信息，并会发送到 T2I 服务渲染。"
+                )
+        if cfg_bool(self.config, "display.progress_notice", True):
+            notices.append("状态卡生成中，通常需要 1–3 分钟，请稍候…")
+        if notices:
+            yield event.plain_result("\n".join(notices))
         try:
             image_url = await self._render_status_image(event)
+            if chat_key:
+                self._status_inflight.discard(chat_key)
             yield event.image_result(image_url)
         except Exception:
+            if chat_key:
+                self._status_cooldown.pop(chat_key, None)
+                self._status_inflight.discard(chat_key)
             logger.exception("生成系统状态图片失败")
             try:
                 summary = await self.build_summary_text(event=event)
             except Exception:
                 summary = "获取系统状态失败，请检查 AstrBot 后台日志。"
             yield event.plain_result("生成状态图失败，以下为文本摘要：\n" + summary)
+        finally:
+            if chat_key:
+                self._status_inflight.discard(chat_key)
 
     async def _render_status_image(self, event: AstrMessageEvent | None = None) -> str:
         collected = await collect_all(
@@ -97,20 +200,34 @@ class StatusCardPlugin(Star):
             config=self.config,
         )
         background = await self._resolve_background(event)
-        avatar = await fetch_avatar_bytes(collected["view"]["bot"], self.config)
+        avatar = await fetch_avatar_bytes(
+            collected["view"]["bot"], self.config, data_dir=self.data_dir
+        )
         html = build_default_html(
             collected,
             background.data,
             background.mime,
             avatar_bytes=avatar,
         )
+        quality = str(
+            cfg_get(self.config, "display.render_quality", "ultra") or "ultra"
+        ).strip().lower()
+        if quality not in {"normal", "high", "ultra"}:
+            quality = "ultra"
+        timeout = max(
+            30,
+            min(600, cfg_int(self.config, "display.render_timeout", 180)),
+        )
         options = {
             "type": "jpeg",
             "quality": 90,
             "full_page": True,
-            "device_scale_factor_level": "ultra",
+            "device_scale_factor_level": quality,
         }
-        return await self.html_render(html, {}, return_url=True, options=options)
+        return await asyncio.wait_for(
+            self.html_render(html, {}, return_url=True, options=options),
+            timeout=timeout,
+        )
 
     async def build_status_image(self) -> str | None:
         """Render a status image without an incoming event (daily summary)."""
@@ -136,6 +253,21 @@ class StatusCardPlugin(Star):
             except Exception:
                 bg_bytes = None
 
+        if bg_bytes is None:
+            uploaded = uploaded_file_path(
+                self.config, "background.bg_upload_files", self.data_dir
+            )
+            if uploaded is not None:
+                try:
+                    if uploaded.stat().st_size > MAX_IMAGE_BYTES:
+                        logger.warning(
+                            "上传背景超过 10 MB，已跳过: %s", uploaded
+                        )
+                    else:
+                        bg_bytes = uploaded.read_bytes() or None
+                except Exception as exc:
+                    logger.warning("读取上传背景失败 %s: %s", uploaded, exc)
+
         provider = str(
             cfg_get(self.config, "background.bg_provider", "none") or "none"
         )
@@ -158,11 +290,27 @@ class StatusCardPlugin(Star):
         request = BackgroundRequest(
             provider_chain=tuple(chain),
             local_path=Path(local_path) if local_path else None,
-            timeout=cfg_int(self.config, "background.bg_req_timeout", 10),
+            timeout=max(
+                3, min(30, cfg_int(self.config, "background.bg_req_timeout", 10))
+            ),
             proxy=proxy or None,
-            preload_count=cfg_int(self.config, "background.bg_preload_count", 1),
-            lolicon_r18_type=cfg_int(
-                self.config, "background.bg_lolicon_r18_type", 0
+            preload_count=max(
+                1,
+                min(
+                    5,
+                    cfg_int(
+                        self.config, "background.bg_preload_count", 1
+                    ),
+                ),
+            ),
+            lolicon_r18_type=max(
+                0,
+                min(
+                    2,
+                    cfg_int(
+                        self.config, "background.bg_lolicon_r18_type", 0
+                    ),
+                ),
             ),
         )
         return await resolve_background(prefer_bytes=bg_bytes, request=request)

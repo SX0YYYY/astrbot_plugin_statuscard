@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import jinja2
-from markupsafe import Markup
+from markupsafe import Markup, escape
 
 
 ROOT = Path(__file__).parent
@@ -64,7 +64,7 @@ def _auto_convert_unit(
 def _br_filter(value: Any) -> Markup:
     if value is None:
         return Markup("")
-    return Markup(str(value).replace("\n", "<br />"))
+    return Markup(str(escape(str(value))).replace("\n", "<br />"))
 
 
 def build_default_html(

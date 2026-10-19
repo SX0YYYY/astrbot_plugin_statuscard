@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import psutil
 
-from .collectors import cfg_bool, cfg_get, cfg_int, format_duration
+from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
@@ -25,8 +25,10 @@ KIND_LABELS = {
 }
 
 
-def _now_text() -> str:
-    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+def _now_text(config: Any = None) -> str:
+    if config is None:
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _normalize_targets(raw: Any, platform_id: str) -> list[str]:
@@ -58,9 +60,15 @@ class ServiceMonitor:
         self.state = state
         self.config = config
         self.enabled = cfg_bool(config, "monitors.enabled", False)
-        self.interval = max(15, cfg_int(config, "monitors.interval_seconds", 60))
-        self.fail_threshold = max(1, cfg_int(config, "monitors.fail_threshold", 2))
-        self.cooldown = max(0, cfg_int(config, "monitors.cooldown_seconds", 1800))
+        self.interval = max(
+            15, min(3600, cfg_int(config, "monitors.interval_seconds", 60))
+        )
+        self.fail_threshold = max(
+            1, min(100, cfg_int(config, "monitors.fail_threshold", 2))
+        )
+        self.cooldown = max(
+            0, min(86400, cfg_int(config, "monitors.cooldown_seconds", 1800))
+        )
         self.recover_notify = cfg_bool(config, "monitors.recover_notify", True)
         self.platform_id = str(
             cfg_get(config, "alerts.platform_id", "default") or "default"
@@ -97,6 +105,7 @@ class ServiceMonitor:
             return
         if not self.items:
             logger.warning("服务监测已启用，但没有配置任何监测目标")
+        self._prune_state()
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info(
@@ -105,6 +114,20 @@ class ServiceMonitor:
             self.interval,
             self.fail_threshold,
         )
+
+    def _prune_state(self) -> None:
+        if not self.items:
+            return
+        monitors = self.state.data.setdefault("monitors", {})
+        states = monitors.setdefault("items", {})
+        valid_keys = {self._item_key(item) for item in self.items}
+        stale_keys = [key for key in states if key not in valid_keys]
+        if not stale_keys:
+            return
+        for key in stale_keys:
+            states.pop(key, None)
+        self.state.save()
+        logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
     async def stop(self) -> None:
         self._running = False
@@ -155,6 +178,8 @@ class ServiceMonitor:
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
 
         if not ok:
+            st.pop("pending_recovery", None)
+            st.pop("recovery_attempt", None)
             fails += 1
             st["fails"] = fails
             st["last_error"] = detail
@@ -168,7 +193,7 @@ class ServiceMonitor:
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
                         f"原因: {detail}\n"
-                        f"时间: {_now_text()}\n"
+                        f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.fail_threshold} 次检测失败。"
                     )
                     sent = await self._send(text)
@@ -188,7 +213,7 @@ class ServiceMonitor:
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
                         f"原因: {detail}\n"
-                        f"时间: {_now_text()}"
+                        f"时间: {_now_text(self.config)}"
                     )
                     sent = await self._send(text)
                     st["last_attempt"] = now
@@ -200,6 +225,15 @@ class ServiceMonitor:
             st["last_checked"] = now
             st["last_ok"] = now
             st["last_error"] = ""
+            pending_text = st.get("pending_recovery")
+            if pending_text:
+                last_attempt = float(st.get("recovery_attempt") or 0)
+                if now - last_attempt >= self.cooldown:
+                    sent = await self._send(str(pending_text))
+                    st["recovery_attempt"] = now
+                    if sent:
+                        st.pop("pending_recovery", None)
+                        st.pop("recovery_attempt", None)
             if alerting:
                 duration = now - float(st.get("since") or now)
                 st["alerting"] = False
@@ -212,15 +246,18 @@ class ServiceMonitor:
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
                         f"中断时长: {format_duration(duration)}\n"
-                        f"时间: {_now_text()}{extra}"
+                        f"时间: {_now_text(self.config)}{extra}"
                     )
-                    await self._send(text)
+                    sent = await self._send(text)
+                    if not sent:
+                        st["pending_recovery"] = text
+                        st["recovery_attempt"] = now
                 st["pending"] = False
         states[key] = st
 
     async def _probe(self, item: dict[str, Any]) -> tuple[bool, str, str]:
         kind = str(item.get("__template_key") or "")
-        timeout = max(1, cfg_int(item, "timeout_seconds", 10))
+        timeout = max(1, min(60, cfg_int(item, "timeout_seconds", 10)))
         if kind == "http":
             url = str(item.get("url") or "").strip()
             if not url:
@@ -228,18 +265,47 @@ class ServiceMonitor:
             expected = cfg_int(item, "expected_status", 0)
             keyword = str(item.get("keyword") or "").strip()
             try:
+                started = time.perf_counter()
                 async with httpx.AsyncClient(
                     follow_redirects=True, timeout=timeout
                 ) as cli:
-                    resp = await cli.get(url)
-                if expected and resp.status_code != expected:
-                    return False, f"HTTP {resp.status_code}（期望 {expected}）", url
-                if not expected and resp.status_code >= 400:
-                    return False, f"HTTP {resp.status_code}", url
-                if keyword and keyword not in resp.text:
-                    return False, "响应中未找到关键字", url
-                ms = resp.elapsed.total_seconds() * 1000
-                return True, f"HTTP {resp.status_code}（{ms:.0f}ms）", url
+                    async with cli.stream("GET", url) as resp:
+                        status_code = resp.status_code
+                        if expected and status_code != expected:
+                            return (
+                                False,
+                                f"HTTP {status_code}（期望 {expected}）",
+                                url,
+                            )
+                        if not expected and status_code >= 400:
+                            return False, f"HTTP {status_code}", url
+                        if keyword:
+                            limit = max(
+                                1024,
+                                min(
+                                    10 * 1024 * 1024,
+                                    cfg_int(
+                                        self.config,
+                                        "monitors.max_response_bytes",
+                                        262144,
+                                    ),
+                                ),
+                            )
+                            body = bytearray()
+                            async for chunk in resp.aiter_bytes():
+                                body.extend(chunk)
+                                if len(body) >= limit:
+                                    body = body[:limit]
+                                    break
+                            encoding = resp.charset_encoding or "utf-8"
+                            try:
+                                text = body.decode(encoding, errors="replace")
+                            except LookupError:
+                                text = body.decode("utf-8", errors="replace")
+                            if keyword not in text:
+                                return False, "响应中未找到关键字", url
+                        ms = (time.perf_counter() - started) * 1000
+                        return True, f"HTTP {status_code}（{ms:.0f}ms）", url
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", url
 

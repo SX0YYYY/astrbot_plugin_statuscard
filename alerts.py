@@ -15,6 +15,7 @@ from .collectors import (
     _call_action,
     _get_aiocqhttp_client,
     _normalize_object,
+    cached_cpu_percent,
     cfg_bool,
     cfg_float,
     cfg_int,
@@ -22,6 +23,7 @@ from .collectors import (
     format_bytes,
     format_duration,
     memory_stat,
+    now_in_timezone,
     swap_stat,
 )
 from .state import StateStore
@@ -29,8 +31,10 @@ from .state import StateStore
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
 
-def _now_text() -> str:
-    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+def _now_text(config: Any = None) -> str:
+    if config is None:
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class AlertEngine:
@@ -43,17 +47,35 @@ class AlertEngine:
         self.plugin = plugin
         self.state = state
         self.config = config
-        self.interval = max(15, cfg_int(config, "alerts.interval_seconds", 60))
-        self.sustain = max(1, cfg_int(config, "alerts.sustain_samples", 3))
-        self.cooldown = max(0, cfg_int(config, "alerts.cooldown_seconds", 1800))
+        self.interval = max(
+            15, min(3600, cfg_int(config, "alerts.interval_seconds", 60))
+        )
+        self.sustain = max(
+            1, min(100, cfg_int(config, "alerts.sustain_samples", 3))
+        )
+        self.cooldown = max(
+            0, min(86400, cfg_int(config, "alerts.cooldown_seconds", 1800))
+        )
         self.recover_notify = cfg_bool(config, "alerts.recover_notify", True)
         self.offline_notify = cfg_bool(config, "alerts.offline_notify", True)
-        self.cpu_threshold = cfg_float(config, "alerts.cpu_threshold", 85.0)
-        self.mem_threshold = cfg_float(config, "alerts.mem_threshold", 90.0)
-        self.swap_threshold = cfg_float(config, "alerts.swap_threshold", 90.0)
-        self.disk_threshold = cfg_float(config, "alerts.disk_threshold", 85.0)
-        self.load_threshold = cfg_float(
-            config, "alerts.load_per_core_threshold", 2.0
+        self.cpu_threshold = max(
+            0.0, min(100.0, cfg_float(config, "alerts.cpu_threshold", 85.0))
+        )
+        self.mem_threshold = max(
+            0.0, min(100.0, cfg_float(config, "alerts.mem_threshold", 90.0))
+        )
+        self.swap_threshold = max(
+            0.0, min(100.0, cfg_float(config, "alerts.swap_threshold", 90.0))
+        )
+        self.disk_threshold = max(
+            0.0, min(100.0, cfg_float(config, "alerts.disk_threshold", 85.0))
+        )
+        self.load_threshold = max(
+            0.0,
+            min(
+                100.0,
+                cfg_float(config, "alerts.load_per_core_threshold", 2.0),
+            ),
         )
         self.platform_id = str(
             cfg_get(config, "alerts.platform_id", "default") or "default"
@@ -73,16 +95,24 @@ class AlertEngine:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        if not cfg_bool(self.config, "alerts.enabled", False):
-            logger.info("状态卡告警未启用（alerts.enabled=false）")
-            self._start_webhook_task()
-            return
-        self._running = True
-        self._monitor_task = asyncio.create_task(self._monitor_loop())
-        self._daily_task = asyncio.create_task(self._daily_loop())
+        alerts_on = cfg_bool(self.config, "alerts.enabled", False)
+        daily_on = cfg_bool(
+            self.config, "alerts.daily_summary.enabled", False
+        )
+        self._running = alerts_on or daily_on
+        if alerts_on:
+            self._monitor_task = asyncio.create_task(self._monitor_loop())
+        if daily_on:
+            self._daily_task = asyncio.create_task(self._daily_loop())
         self._start_webhook_task()
+        if not self._running:
+            logger.info("状态卡主动告警与每日摘要均未启用")
+            return
         logger.info(
-            "状态卡告警已启动：目标=%s，间隔=%ss，阈值 CPU %.0f%% / RAM %.0f%% / SWAP %.0f%% / DISK %.0f%%",
+            "状态卡任务已启动：阈值告警=%s，每日摘要=%s，目标=%s，间隔=%ss，"
+            "阈值 CPU %.0f%% / RAM %.0f%% / SWAP %.0f%% / DISK %.0f%%",
+            alerts_on,
+            daily_on,
             self.targets,
             self.interval,
             self.cpu_threshold,
@@ -151,7 +181,7 @@ class AlertEngine:
             "🔔 状态卡告警测试\n"
             "──────────────\n"
             f"主机: {os.uname().nodename if hasattr(os, 'uname') else os.environ.get('COMPUTERNAME', '--')}\n"
-            f"时间: {_now_text()}\n"
+            f"时间: {_now_text(self.config)}\n"
             "如果你收到这条消息，说明主动推送链路正常。"
         )
         return await self.plugin.send_text(targets, text)
@@ -161,8 +191,7 @@ class AlertEngine:
     # ------------------------------------------------------------------
 
     async def _monitor_loop(self) -> None:
-        # Prime psutil's non-blocking CPU counter.
-        psutil.cpu_percent(interval=None)
+        # Sampler owns psutil.cpu_percent(); give it a moment to seed.
         await asyncio.sleep(1)
         while self._running:
             try:
@@ -175,7 +204,7 @@ class AlertEngine:
 
     async def _sample_once(self) -> None:
         now = time.time()
-        cpu = psutil.cpu_percent(interval=None)
+        cpu = cached_cpu_percent()
         mem = memory_stat()
         swap = swap_stat()
         await self._evaluate(
@@ -262,6 +291,8 @@ class AlertEngine:
         last_sent = float(st.get("last_sent") or 0)
 
         if value >= threshold:
+            st.pop("pending_recovery", None)
+            st.pop("recovery_attempt", None)
             count += 1
             st["count"] = count
             if not alerting and count >= self.sustain:
@@ -272,7 +303,7 @@ class AlertEngine:
                         "──────────────\n"
                         f"当前: {value_text}（阈值 {threshold:.1f}{unit}）\n"
                         f"主机: {self._hostname()}\n"
-                        f"时间: {_now_text()}\n"
+                        f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.sustain} 个采样周期超过阈值。"
                     )
                     ok = await self._send(text)
@@ -288,6 +319,15 @@ class AlertEngine:
                         st["count"] = self.sustain
         else:
             st["count"] = 0
+            pending_text = st.get("pending_recovery")
+            if pending_text:
+                last_attempt = float(st.get("recovery_attempt") or 0)
+                if now - last_attempt >= self.cooldown:
+                    sent = await self._send(str(pending_text))
+                    st["recovery_attempt"] = now
+                    if sent:
+                        st.pop("pending_recovery", None)
+                        st.pop("recovery_attempt", None)
             if alerting:
                 st["alerting"] = False
                 duration = now - float(st.get("alert_since") or now)
@@ -298,12 +338,15 @@ class AlertEngine:
                         "──────────────\n"
                         f"当前: {value_text}\n"
                         f"告警持续: {format_duration(duration)}\n"
-                        f"时间: {_now_text()}"
+                        f"时间: {_now_text(self.config)}"
                     )
-                    await self._send(text)
+                    sent = await self._send(text)
+                    if not sent:
+                        st["pending_recovery"] = text
+                        st["recovery_attempt"] = now
 
     async def _check_offline(self) -> None:
-        client = _get_aiocqhttp_client(self.plugin.context)
+        client = _get_aiocqhttp_client(self.plugin.context, self.platform_id)
         if client is None:
             return
 
@@ -326,22 +369,55 @@ class AlertEngine:
 
         if online:
             st["count"] = 0
-            if st.get("alerting"):
+            pending_text = st.get("pending_recovery")
+            if pending_text:
+                last_attempt = float(st.get("recovery_attempt") or 0)
+                if now - last_attempt >= self.cooldown:
+                    sent = await self._send(str(pending_text))
+                    st["recovery_attempt"] = now
+                    if sent:
+                        st.pop("pending_recovery", None)
+                        st.pop("recovery_attempt", None)
+                        logger.info("Bot 连接恢复通知补发成功")
+                    else:
+                        logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
+            if st.get("alerting") or st.get("pending_alert_text"):
                 duration = now - float(st.get("since") or now)
+                queued = st.pop("pending_alert_text", None)
                 st["alerting"] = False
                 st["since"] = 0
-                text = (
-                    "✅ Bot 连接已恢复\n"
-                    "──────────────\n"
-                    f"离线时长: {format_duration(duration)}\n"
-                    f"时间: {_now_text()}"
-                )
-                if st.get("pending_alert"):
-                    text += "\n（离线期间有一条告警未能送达，现已恢复）"
-                    st["pending_alert"] = False
-                await self._send(text)
+                parts: list[str] = []
+                if queued:
+                    parts.append(str(queued))
+                if self.recover_notify:
+                    text = (
+                        "✅ Bot 连接已恢复\n"
+                        "──────────────\n"
+                        f"离线时长: {format_duration(duration)}\n"
+                        f"时间: {_now_text(self.config)}"
+                    )
+                    if st.get("pending_alert") and not queued:
+                        text += "\n（离线期间有一条告警未能送达，现已恢复）"
+                    parts.append(text)
+                st["pending_alert"] = False
+                if parts:
+                    text = "\n\n".join(parts)
+                    sent = await self._send(text)
+                    if sent:
+                        logger.info(
+                            "Bot 连接恢复通知已发送%s",
+                            "（含离线补发）" if queued else "",
+                        )
+                    else:
+                        st["pending_recovery"] = text
+                        st["recovery_attempt"] = now
+                        logger.warning(
+                            "Bot 连接恢复通知发送失败，已排队重试"
+                        )
             return
 
+        st.pop("pending_recovery", None)
+        st.pop("recovery_attempt", None)
         count += 1
         st["count"] = count
         if not st.get("alerting") and count >= self.sustain:
@@ -352,11 +428,19 @@ class AlertEngine:
                 "🔴 Bot 连接离线\n"
                 "──────────────\n"
                 f"主机: {self._hostname()}\n"
-                f"时间: {_now_text()}\n"
+                f"时间: {_now_text(self.config)}\n"
                 "离线告警会先排队，连接恢复后补发。"
             )
             ok = await self._send(text)
             st["pending_alert"] = not ok
+            if ok:
+                st.pop("pending_alert_text", None)
+                logger.info("Bot 连接离线告警已发送")
+            else:
+                st["pending_alert_text"] = text
+                logger.warning(
+                    "Bot 连接离线告警发送失败，已排队，恢复后补发"
+                )
 
     @staticmethod
     def _hostname() -> str:
@@ -370,6 +454,8 @@ class AlertEngine:
     # ------------------------------------------------------------------
 
     async def _daily_loop(self) -> None:
+        last_logged = None
+        warned: set[str] = set()
         while self._running:
             try:
                 if not cfg_bool(self.config, "alerts.daily_summary.enabled", False):
@@ -381,7 +467,13 @@ class AlertEngine:
                 )
                 try:
                     tz = ZoneInfo(tz_name)
+                    warned.discard("tz")
                 except Exception:
+                    if "tz" not in warned:
+                        logger.warning(
+                            "每日摘要时区非法：%s，回退到系统时区", tz_name
+                        )
+                        warned.add("tz")
                     tz = datetime.now().astimezone().tzinfo
                 time_text = str(
                     cfg_get(self.config, "alerts.daily_summary.time", "09:00")
@@ -389,26 +481,54 @@ class AlertEngine:
                 )
                 try:
                     hour, minute = [int(x) for x in time_text.split(":", 1)]
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        raise ValueError("out of range")
+                    warned.discard("time")
                 except Exception:
-                    hour, minute = 9, 0
+                    if "time" not in warned:
+                        logger.warning(
+                            "每日摘要时间格式非法：%s（应为 HH:MM）", time_text
+                        )
+                        warned.add("time")
+                    await asyncio.sleep(60)
+                    continue
                 now = datetime.now(tz)
                 target = now.replace(
                     hour=hour, minute=minute, second=0, microsecond=0
                 )
                 if target <= now:
                     target += timedelta(days=1)
+                if last_logged != target:
+                    logger.info(
+                        "状态卡每日摘要将在 %s 发送（%.0f 秒后）",
+                        target.strftime("%Y-%m-%d %H:%M"),
+                        max(1.0, (target - now).total_seconds()),
+                    )
+                    last_logged = target
                 wait = max(1.0, (target - now).total_seconds())
-                logger.info(
-                    "状态卡每日摘要将在 %s 发送（%.0f 秒后）",
-                    target.strftime("%Y-%m-%d %H:%M"),
-                    wait,
-                )
+                if wait > 60:
+                    # Re-read configuration every minute so time/timezone
+                    # changes take effect without a plugin reload.
+                    await asyncio.sleep(60)
+                    continue
                 await asyncio.sleep(wait)
                 if not cfg_bool(
                     self.config, "alerts.daily_summary.enabled", False
                 ):
                     continue
+                current_time_text = str(
+                    cfg_get(self.config, "alerts.daily_summary.time", "09:00")
+                    or "09:00"
+                )
+                current_tz_name = str(
+                    cfg_get(self.config, "display.timezone", "Asia/Shanghai")
+                    or "Asia/Shanghai"
+                )
+                if current_time_text != time_text or current_tz_name != tz_name:
+                    # 最后一分钟内改了时间/时区，重新计算，不按旧目标发送。
+                    continue
                 await self._send_daily_summary()
+                last_logged = None
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -417,6 +537,7 @@ class AlertEngine:
 
     async def _send_daily_summary(self) -> None:
         if not self.targets:
+            logger.warning("每日摘要已启用，但告警目标为空，跳过发送")
             return
         with_image = cfg_bool(
             self.config, "alerts.daily_summary.with_image", True
@@ -430,9 +551,14 @@ class AlertEngine:
             if image_url:
                 ok = await self.plugin.send_image(self.targets, image_url)
                 if ok:
+                    logger.info("状态卡每日摘要已发送（图片）：%s", self.targets)
                     return
         summary = await self.plugin.build_summary_text()
-        await self._send("📅 每日状态摘要\n──────────────\n" + summary)
+        ok = await self._send("📅 每日状态摘要\n──────────────\n" + summary)
+        if ok:
+            logger.info("状态卡每日摘要已发送（文字）：%s", self.targets)
+        else:
+            logger.warning("状态卡每日摘要发送失败：%s", self.targets)
 
     # ------------------------------------------------------------------
     # Komari webhook
@@ -481,7 +607,12 @@ class AlertEngine:
                 text = (await request.text())[:4000]
                 data = {"message": text}
             text = self._format_komari(data)
-            await self._send(text)
+            ok = await self._send(text)
+            if not ok:
+                return web.json_response(
+                    {"status": "error", "message": "delivery failed"},
+                    status=503,
+                )
             return web.json_response({"status": "ok"})
 
         app.router.add_post(path, handle)
@@ -561,6 +692,7 @@ class AlertEngine:
         alerts = self.state.get("alerts", {}) or {}
         return {
             "enabled": cfg_bool(self.config, "alerts.enabled", False),
+            "running": self._running,
             "targets": list(self.targets),
             "interval": self.interval,
             "sustain": self.sustain,
@@ -576,6 +708,9 @@ class AlertEngine:
             "offline": alerts.get("offline", {}),
             "daily_summary": bool(
                 cfg_bool(self.config, "alerts.daily_summary.enabled", False)
+            ),
+            "daily_summary_running": bool(
+                self._daily_task is not None and not self._daily_task.done()
             ),
             "komari_webhook": bool(
                 cfg_bool(self.config, "alerts.komari_webhook.enabled", False)

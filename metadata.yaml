@@ -1,7 +1,7 @@
 name: astrbot_plugin_statuscard
 display_name: 系统状态卡片
 desc: 以华丽的图片卡片显示系统运行状态，支持资源阈值、掉线恢复、每日摘要、Komari Webhook 主动告警，以及类似 Uptime Kuma 的服务监测。
-version: v1.0.0
+version: v1.2.0
 author: 烬辞
 repo: "https://github.com/SX0YYYY/astrbot_plugin_statuscard"
 support_platforms:

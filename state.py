@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,13 +26,24 @@ class StateStore:
         try:
             raw = self.path.read_text(encoding="utf-8")
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                self.data = parsed
+            if not isinstance(parsed, dict):
+                raise ValueError("state root is not an object")
+            self.data = parsed
         except FileNotFoundError:
             self.data = {}
         except Exception as exc:
             logger.warning("读取状态文件失败 %s: %s", self.path, exc)
+            self._backup_bad_file()
             self.data = {}
+
+    def _backup_bad_file(self) -> None:
+        try:
+            suffix = time.strftime("%Y%m%d_%H%M%S")
+            target = self.path.with_name(f"{self.path.name}.bad.{suffix}")
+            self.path.replace(target)
+            logger.warning("损坏的状态文件已备份到 %s", target)
+        except Exception as exc:
+            logger.warning("备份损坏状态文件失败: %s", exc)
 
     def save(self) -> None:
         try:
@@ -42,6 +54,10 @@ class StateStore:
                 encoding="utf-8",
             )
             os.replace(tmp, self.path)
+            try:
+                os.chmod(self.path, 0o600)
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("写入状态文件失败 %s: %s", self.path, exc)
 

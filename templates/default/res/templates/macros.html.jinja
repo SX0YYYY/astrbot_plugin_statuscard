@@ -183,7 +183,7 @@
 {% macro process(v) %}
 <div class="card section">
   <div class="section-title"><span class="section-icon">📋</span>进程信息</div>
-  <div class="scope-line">采集范围：宿主机</div>
+  <div class="scope-line">采集范围：宿主机；CPU 为采样区间平均（多核可超过 100%）</div>
   <div class="status-chips">
     <span class="status-chip">全部：{{ v.process.counts.all }}</span>
     <span class="status-chip chip-green">运行中：{{ v.process.counts.running }}</span>

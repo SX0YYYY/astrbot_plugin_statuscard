@@ -3,6 +3,13 @@
     "description": "头像",
     "type": "object",
     "items": {
+      "avatar_upload_files": {
+        "description": "上传头像图片",
+        "type": "file",
+        "default": [],
+        "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
+        "hint": "在配置页直接上传头像图片，上传后会自动加入列表，取列表第一张生效。优先级高于本地路径、头像 URL 和 QQ 头像。"
+      },
       "avatar_local_path": {
         "description": "自定义头像本地路径",
         "type": "string",
@@ -27,6 +34,13 @@
     "description": "背景",
     "type": "object",
     "items": {
+      "bg_upload_files": {
+        "description": "上传背景图片",
+        "type": "file",
+        "default": [],
+        "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
+        "hint": "在配置页直接上传背景图片，上传后会自动加入列表，取列表第一张生效。聊天中随命令发送的图片优先；其次是这里上传的背景；最后才使用 bg_provider。"
+      },
       "bg_provider": {
         "description": "背景获取来源（主）",
         "type": "string",
@@ -79,12 +93,63 @@
         "type": "int",
         "default": 8
       },
+      "cooldown_seconds": {
+        "description": "状态卡冷却（秒）",
+        "type": "int",
+        "default": 10,
+        "hint": "同一会话内重复触发的最小间隔；生成期间不会重复渲染；0 表示关闭冷却。"
+      },
+      "access": {
+        "description": "状态卡访问权限（管理员内部）",
+        "type": "string",
+        "default": "admin",
+        "options": ["all", "admin", "allowlist"],
+        "hint": "所有状态卡命令已强制仅 AstrBot 管理员可触发。此项只能在管理员范围内进一步收紧：all=所有管理员；admin=仅管理员；allowlist=管理员+白名单。"
+      },
+      "allowlist": {
+        "description": "状态卡白名单",
+        "type": "list",
+        "default": [],
+        "items": {"type": "string"},
+        "hint": "可填群号、用户号或完整 UMO；仅 access=allowlist 时生效，且不能放行非管理员。"
+      },
+      "redact": {
+        "description": "状态卡脱敏项",
+        "type": "list",
+        "default": [],
+        "items": {"type": "string"},
+        "hint": "可选 hostname/process/network/qq_stats；公开群建议至少 hostname,process,qq_stats。"
+      },
+      "privacy_notice": {
+        "description": "首次触发隐私提示",
+        "type": "bool",
+        "default": true,
+        "hint": "每个会话首次出图前提示状态图会发送到 T2I 服务。"
+      },
+      "progress_notice": {
+        "description": "出图前进度提示",
+        "type": "bool",
+        "default": true,
+        "hint": "T2I 较慢时建议开启；关闭后只发最终图片。"
+      },
+      "render_quality": {
+        "description": "T2I 清晰度",
+        "type": "string",
+        "default": "ultra",
+        "options": ["normal", "high", "ultra"],
+        "hint": "normal 更快，ultra 更清晰；出图慢可先降到 high 或 normal。"
+      },
+      "render_timeout": {
+        "description": "T2I 渲染超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "30-600；超时后回退为文字摘要。"
+      },
       "website_targets": {
         "description": "网站测试目标",
         "type": "template_list",
         "default": [
-          {"__template_key": "site", "name": "Baidu", "url": "https://www.baidu.com/"},
-          {"__template_key": "site", "name": "Google", "url": "https://www.google.com/"}
+          {"__template_key": "site", "name": "Baidu", "url": "https://www.baidu.com/"}
         ],
         "templates": {
           "site": {
@@ -100,10 +165,22 @@
                 "description": "URL",
                 "type": "string",
                 "default": ""
+              },
+              "timeout_seconds": {
+                "description": "超时（秒）",
+                "type": "int",
+                "default": 3,
+                "hint": "单个网站请求的超时；国内服务器不建议给 Google 之类站点设太长。"
               }
             }
           }
         }
+      },
+      "website_cache_seconds": {
+        "description": "网站测试缓存（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "同一批目标在该时间内复用结果，避免每次出图都请求外网；0 表示关闭。"
       },
       "disk_paths": {
         "description": "磁盘挂载点",
@@ -126,10 +203,10 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用主动告警",
+        "description": "启用资源阈值与掉线告警",
         "type": "bool",
         "default": false,
-        "hint": "首次部署建议保持关闭，确认状态图正常后再开启。"
+        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日摘要由独立开关控制，无需打开本项。"
       },
       "targets": {
         "description": "告警推送目标",
@@ -138,7 +215,7 @@
         "items": {
           "type": "string"
         },
-        "hint": "支持完整 UMO（platform_id:GroupMessage:群号）或纯群号；留空时不会主动发送。"
+        "hint": "支持完整 UMO（platform_id:GroupMessage:群号）或纯群号；阈值告警、每日摘要和服务监测都会复用这里。"
       },
       "platform_id": {
         "description": "默认平台实例 ID",
@@ -204,7 +281,8 @@
           "enabled": {
             "description": "启用每日摘要",
             "type": "bool",
-            "default": false
+            "default": false,
+            "hint": "独立开关，不需要打开 alerts.enabled；发送目标复用 alerts.targets。"
           },
           "time": {
             "description": "发送时间（HH:MM）",
@@ -285,6 +363,12 @@
         "description": "恢复时发送通知",
         "type": "bool",
         "default": true
+      },
+      "max_response_bytes": {
+        "description": "HTTP 探测最大读取字节数",
+        "type": "int",
+        "default": 262144,
+        "hint": "只有配置了 keyword 时才读取响应体；超过该值会截断，避免误配大文件拖垮内存。"
       },
       "targets": {
         "description": "监测告警推送目标",

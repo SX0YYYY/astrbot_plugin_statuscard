@@ -98,6 +98,26 @@ def _create_async_client(
     return httpx.AsyncClient(**base_kwargs)
 
 
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+async def _fetch_image(
+    cli: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    async with cli.stream("GET", url, headers=headers) as resp:
+        resp.raise_for_status()
+        content = bytearray()
+        async for chunk in resp.aiter_bytes():
+            content.extend(chunk)
+            if len(content) > MAX_IMAGE_BYTES:
+                raise ValueError("image exceeds 10 MB")
+        data = bytes(content)
+        mime = resp.headers.get("Content-Type") or _detect_image_mime(data)
+        return data, mime
+
+
 async def _fetch_loli(req: BackgroundRequest) -> Optional[BgBytesData]:
     """Fetch one background from loliapi.
 
@@ -106,13 +126,8 @@ async def _fetch_loli(req: BackgroundRequest) -> Optional[BgBytesData]:
     url = "https://www.loliapi.com/acg/pe/"
     try:
         async with _create_async_client(timeout=req.timeout, proxy=req.proxy) as cli:
-            resp = await cli.get(url)
-            resp.raise_for_status()
-            content = resp.content
-            return BgBytesData(
-                data=content,
-                mime=resp.headers.get("Content-Type") or _detect_image_mime(content),
-            )
+            content, mime = await _fetch_image(cli, url)
+            return BgBytesData(data=content, mime=mime)
     except Exception as e:
         logger.warning(f"fetch_loli failed: {e.__class__.__name__}: {e}")
         return None
@@ -153,14 +168,10 @@ async def _fetch_lolicon(req: BackgroundRequest) -> Optional[BgBytesData]:
             if not url:
                 return None
 
-            img_resp = await cli.get(url, headers={"Referer": "https://www.pixiv.net/"})
-            img_resp.raise_for_status()
-            content = img_resp.content
-            return BgBytesData(
-                data=content,
-                mime=img_resp.headers.get("Content-Type")
-                or _detect_image_mime(content),
+            content, mime = await _fetch_image(
+                cli, url, headers={"Referer": "https://www.pixiv.net/"}
             )
+            return BgBytesData(data=content, mime=mime)
     except Exception as e:
         logger.warning(f"fetch_lolicon failed: {e.__class__.__name__}: {e}")
         return None
@@ -174,6 +185,11 @@ def _read_local(path: Path | None = None) -> Optional[BgBytesData]:
             candidates = [x for x in target.glob("*") if _is_image_file(x)]
             target = random.choice(candidates) if candidates else DEFAULT_BG_PATH
 
+        if not target.is_file():
+            return None
+        if target.stat().st_size > MAX_IMAGE_BYTES:
+            logger.warning("本地背景超过 10 MB，已跳过: %s", target)
+            return None
         data = target.read_bytes()
         mime = _guess_mime_from_path(target)
         if mime == "application/octet-stream":
@@ -254,7 +270,7 @@ class BgPreloader:
 
     async def _fill_queue(self):
         try:
-            preload_count = max(1, int(self.request.preload_count))
+            preload_count = max(1, min(5, int(self.request.preload_count)))
         except Exception:
             preload_count = 1
         try:
