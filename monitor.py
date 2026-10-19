@@ -154,7 +154,7 @@ class ServiceMonitor:
             dependency = str(item.get("suppress_when_down") or "").strip()
             if not dependency:
                 continue
-            if self._dependency_state(dependency) is None:
+            if self._find_dependency(dependency) is None:
                 logger.warning(
                     "监测项 %r 的 suppress_when_down=%r 找不到对应监测项，抑制不会生效",
                     item.get("name") or "",
@@ -270,15 +270,21 @@ class ServiceMonitor:
             self._silence_active = silenced
         return silenced
 
-    def _dependency_state(self, name: str) -> dict[str, Any] | None:
+    def _find_dependency(self, name: str) -> dict[str, Any] | None:
         for other in self.items:
             if str(other.get("name")) == name:
-                states = self.state.get("monitors", {}).get("items", {})
-                if not isinstance(states, dict):
-                    return None
-                value = states.get(self._item_key(other))
-                return value if isinstance(value, dict) else None
+                return other
         return None
+
+    def _dependency_state(self, name: str) -> dict[str, Any] | None:
+        other = self._find_dependency(name)
+        if other is None:
+            return None
+        states = self.state.get("monitors", {}).get("items", {})
+        if not isinstance(states, dict):
+            return {}
+        value = states.get(self._item_key(other))
+        return value if isinstance(value, dict) else {}
 
     def _suppress_alert(self, item: dict[str, Any]) -> str | None:
         """Return the dependency name when an HTTP alert should be suppressed.
@@ -291,8 +297,7 @@ class ServiceMonitor:
         dependency = str(item.get("suppress_when_down") or "").strip()
         if not dependency:
             return None
-        state = self._dependency_state(dependency)
-        if state is None:
+        if self._find_dependency(dependency) is None:
             if dependency not in self._suppress_warned:
                 logger.warning(
                     "监测项 %r 的 suppress_when_down=%r 找不到对应监测项，抑制不会生效",
@@ -301,6 +306,7 @@ class ServiceMonitor:
                 )
                 self._suppress_warned.add(dependency)
             return None
+        state = self._dependency_state(dependency) or {}
         if state.get("alerting") or int(state.get("fails") or 0) >= self.fail_threshold:
             return dependency
         return None

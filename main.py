@@ -43,7 +43,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.4.0",
+    "2.4.1",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -594,7 +594,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.4.0")
+        lines.append("插件: v2.4.1")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 

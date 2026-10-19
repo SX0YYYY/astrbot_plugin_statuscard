@@ -1,7 +1,7 @@
 name: astrbot_plugin_statuscard
 display_name: 系统状态卡片
 desc: 以图片卡片显示系统运行状态，支持资源/掉线告警、每日定时状态图和服务可用性监测。
-version: v2.4.0
+version: v2.4.1
 author: 烬辞
 repo: "https://github.com/SX0YYYY/astrbot_plugin_statuscard"
 support_platforms:
