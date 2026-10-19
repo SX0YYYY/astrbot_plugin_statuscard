@@ -1,0 +1,27 @@
+{% from 'macros.html.jinja' import header, overview, resources, disk, network, websites, process, sysinfo, footer %}
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/default/res/css/index.css" />
+</head>
+<body>
+  <div class="main-background" style="background-image: url('{{ d.background_data_url }}')">
+    <div class="main-background-mask">
+      <div class="main">
+        {{ header(d) }}
+        {{ overview(d) }}
+        {{ resources(d) }}
+        {{ disk(d) }}
+        {{ network(d) }}
+        {{ websites(d) }}
+        {{ process(d) }}
+        {{ sysinfo(d) }}
+        {{ footer(d) }}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

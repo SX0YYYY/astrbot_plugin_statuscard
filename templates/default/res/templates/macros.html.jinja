@@ -1,0 +1,226 @@
+{% macro num(value) -%}
+{%- if value is none -%}--{%- else -%}{{ value }}{%- endif -%}
+{%- endmacro %}
+
+{% macro header(v) %}
+<div class="card header-card">
+  <div class="header-main">
+    <div class="avatar-wrap">
+      {% if v.bot.avatar_data_url %}
+      <img class="avatar" src="{{ v.bot.avatar_data_url }}" alt="avatar" />
+      {% else %}
+      <div class="avatar avatar-placeholder">A</div>
+      {% endif %}
+    </div>
+    <div class="header-info">
+      <div class="bot-name">{{ v.bot.nick }}</div>
+      <div class="badge-row">
+        <span class="badge badge-blue">AstrBot {{ v.bot.astrbot_version }}</span>
+        {% if v.bot.protocol_name %}
+        <span class="badge badge-purple">{{ v.bot.protocol_name }} {{ v.bot.protocol_version }}</span>
+        {% endif %}
+      </div>
+      <div class="runtime-line">🕐 Bot已运行 <b>{{ v.bot.run_time }}</b><span class="dot">·</span>{{ v.bot.online_text }}</div>
+      <div class="stat-chips">
+        <span class="chip">👥 {{ num(v.bot.friends) }} 好友</span>
+        <span class="chip">💬 {{ num(v.bot.groups) }} 群聊</span>
+        <span class="chip">🧑 {{ num(v.bot.members) }} 群员</span>
+        <span class="chip chip-recv">📥 {{ num(v.bot.recv) }} 收</span>
+        <span class="chip chip-sent">📤 {{ num(v.bot.sent) }} 发</span>
+      </div>
+    </div>
+  </div>
+  <div class="scope-note">统计口径：收 = {{ v.bot.recv_scope }} · 发 = {{ v.bot.sent_scope }} · 月流量自插件首次运行累计</div>
+</div>
+{% endmacro %}
+
+{% macro overview(v) %}
+<div class="overview-grid">
+  {% for card in v.overview %}
+  <div class="card overview-card">
+    <div class="overview-icon">{{ card.icon }}</div>
+    <div class="overview-label">{{ card.label }}</div>
+    <div class="overview-value">{{ card.value }}</div>
+    <div class="overview-sub">{{ card.sub }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro resources(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">📊</span>资源使用</div>
+  <div class="donut-row">
+    {% for r in v.resources %}
+    <div class="donut-chart">
+      <div class="chart-wrapper">
+        <svg class="chart" style="--percent: {{ r.percent / 100 }}">
+          <circle class="empty" cx="50%" cy="50%" r="67.5px" />
+          <circle class="slice {{ r.percent | percent_to_color }}" cx="50%" cy="50%" r="67.5px" />
+        </svg>
+        <div class="donut-label">{{ '%.0f'|format(r.percent) }}%</div>
+      </div>
+      <div class="donut-title">{{ r.title }}</div>
+      <div class="donut-desc">{{ r.desc | br }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro disk(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">💾</span>磁盘使用</div>
+  {% for d in v.disks %}
+  <div class="disk-row">
+    <div class="disk-path">{{ d.path }}</div>
+    <div class="disk-bar">
+      <div class="disk-fill {{ d.percent | percent_to_color }}" style="width: {{ d.percent }}%"></div>
+    </div>
+    <div class="disk-size">{{ d.used }} / {{ d.total }}</div>
+    <div class="disk-pct">{{ d.percent_text }}</div>
+  </div>
+  {% endfor %}
+  <div class="disk-io-row">
+    <span class="disk-io-label">⚡ Disk IO</span>
+    <span class="io-up">R {{ v.disk_io.read }}</span>
+    <span class="io-sep">·</span>
+    <span class="io-down">W {{ v.disk_io.write }}</span>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro network(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">🌐</span>网络状态</div>
+  <div class="chart-legend">
+    <span class="legend-up">● 上行</span>
+    <span class="legend-down">● 下行</span>
+    <span class="legend-interface">{{ v.network.interface }}</span>
+  </div>
+  <div class="chart-box">
+    <svg viewBox="0 0 {{ v.network.chart.width }} {{ v.network.chart.height }}" class="net-chart" preserveAspectRatio="none">
+      {% for y in v.network.chart.y_labels %}
+      <line class="grid-line" x1="{{ v.network.chart.left }}" y1="{{ y.y }}" x2="{{ v.network.chart.width - v.network.chart.right }}" y2="{{ y.y }}" />
+      <text class="axis-text" x="{{ v.network.chart.left - 6 }}" y="{{ y.y + 4 }}" text-anchor="end">{{ y.text }}</text>
+      {% endfor %}
+      {% for x in v.network.chart.x_labels %}
+      <text class="axis-text" x="{{ x.x }}" y="{{ v.network.chart.height - 6 }}" text-anchor="middle">{{ x.text }}</text>
+      {% endfor %}
+      {% if v.network.chart.up_area %}
+      <polygon class="area-up" points="{{ v.network.chart.up_area }}" />
+      {% endif %}
+      {% if v.network.chart.down_area %}
+      <polygon class="area-down" points="{{ v.network.chart.down_area }}" />
+      {% endif %}
+      {% if v.network.chart.up_points %}
+      <polyline class="line-up" points="{{ v.network.chart.up_points }}" />
+      {% endif %}
+      {% if v.network.chart.down_points %}
+      <polyline class="line-down" points="{{ v.network.chart.down_points }}" />
+      {% endif %}
+      {% if v.network.chart.peak_up %}
+      <g class="peak">
+        <circle class="peak-up-dot" cx="{{ v.network.chart.peak_up.x }}" cy="{{ v.network.chart.peak_up.y }}" r="3" />
+        <text class="peak-text peak-up-text" x="{{ v.network.chart.peak_up.x }}" y="{{ v.network.chart.peak_up.y - 7 }}" text-anchor="middle">{{ v.network.chart.peak_up.text }}</text>
+      </g>
+      {% endif %}
+      {% if v.network.chart.peak_down %}
+      <g class="peak">
+        <circle class="peak-down-dot" cx="{{ v.network.chart.peak_down.x }}" cy="{{ v.network.chart.peak_down.y }}" r="3" />
+        <text class="peak-text peak-down-text" x="{{ v.network.chart.peak_down.x }}" y="{{ v.network.chart.peak_down.y + 12 }}" text-anchor="middle">{{ v.network.chart.peak_down.text }}</text>
+      </g>
+      {% endif %}
+    </svg>
+  </div>
+  <div class="net-stats">
+    <div class="net-stat">
+      <div class="net-stat-label">⬆ 上传速度</div>
+      <div class="net-stat-value up">{{ v.network.up }}</div>
+    </div>
+    <div class="net-stat">
+      <div class="net-stat-label">⬇ 下载速度</div>
+      <div class="net-stat-value down">{{ v.network.down }}</div>
+    </div>
+    <div class="net-stat">
+      <div class="net-stat-label">📤 上传量</div>
+      <div class="net-stat-value">{{ v.network.up_total }}</div>
+    </div>
+    <div class="net-stat">
+      <div class="net-stat-label">📥 下载量</div>
+      <div class="net-stat-value">{{ v.network.down_total }}</div>
+    </div>
+  </div>
+  <div class="traffic-line">
+    <span class="traffic-label">Traffic</span>
+    <span class="traffic-month">{{ v.network.month }}</span>
+    <span class="traffic-up">↑ {{ v.network.month_up }}</span>
+    <span class="traffic-down">↓ {{ v.network.month_down }}</span>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro websites(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">🔗</span>网站测试</div>
+  <table class="site-table">
+    <thead>
+      <tr><th>网址</th><th class="align-right">状态码</th><th class="align-right">延迟</th></tr>
+    </thead>
+    <tbody>
+      {% for s in v.websites %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td class="align-right {{ 'ok' if s.ok else 'err' }}">{{ s.status }}</td>
+        <td class="align-right {{ 'ok' if s.ok else 'err' }}">{{ s.delay }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}
+
+{% macro process(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">📋</span>进程信息</div>
+  <div class="scope-line">采集范围：宿主机</div>
+  <div class="status-chips">
+    <span class="status-chip">全部：{{ v.process.counts.all }}</span>
+    <span class="status-chip chip-green">运行中：{{ v.process.counts.running }}</span>
+    <span class="status-chip chip-orange">阻塞：{{ v.process.counts.blocked }}</span>
+    <span class="status-chip chip-blue">休眠：{{ v.process.counts.sleeping }}</span>
+    <span class="status-chip chip-gray">未知：{{ v.process.counts.unknown }}</span>
+  </div>
+  <table class="process-table">
+    <thead>
+      <tr><th>Name</th><th>Pid</th><th class="align-right">CPU</th><th class="align-right">MEM</th></tr>
+    </thead>
+    <tbody>
+      {% for p in v.process.top %}
+      <tr>
+        <td class="proc-name">{{ p.name }}</td>
+        <td>{{ p.pid }}</td>
+        <td class="align-right">{{ p.cpu }}</td>
+        <td class="align-right">{{ p.mem }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}
+
+{% macro sysinfo(v) %}
+<div class="card section">
+  <div class="section-title"><span class="section-icon">🖥</span>系统信息</div>
+  <div class="sys-grid">
+    {% for item in v.system_info %}
+    <div class="sys-label">{{ item.label }}</div>
+    <div class="sys-value">{{ item.value }}</div>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro footer(v) %}
+<div class="footer">{{ v.footer }}</div>
+{% endmacro %}
