@@ -35,7 +35,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.1.2",
+    "2.2.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -326,40 +326,67 @@ class StatusCardPlugin(Star):
     # text / image helpers used by the alert engine
     # ------------------------------------------------------------------
 
+    async def _send_chain(
+        self,
+        target: str,
+        build_chain,
+        label: str,
+    ) -> bool:
+        """Send one message chain and retry transport errors.
+
+        A ``False`` result means AstrBot could not find a platform instance for
+        the target; retrying cannot fix that, so it is reported once. Exceptions
+        are usually transient (WebSocket closed, timeout), so retry twice with
+        a short backoff.
+        """
+
+        for attempt in range(3):
+            try:
+                sent = await self.context.send_message(target, build_chain())
+                if sent:
+                    return True
+                logger.warning("主动%s未找到匹配平台: %s", label, target)
+                return False
+            except Exception as exc:
+                detail = str(exc) or exc.__class__.__name__
+                if attempt >= 2:
+                    logger.warning(
+                        "主动发送%s到 %s 失败（已重试 %d 次）: %s",
+                        label,
+                        target,
+                        attempt,
+                        detail,
+                    )
+                    return False
+                logger.warning(
+                    "主动发送%s到 %s 失败（第 %d 次），%.0f 秒后重试: %s",
+                    label,
+                    target,
+                    attempt + 1,
+                    attempt + 1,
+                    detail,
+                )
+                await asyncio.sleep(attempt + 1)
+        return False
+
     async def send_text(self, targets: list[str], text: str) -> bool:
-        chain = MessageChain([Comp.Plain(text)])
         any_ok = False
         for target in targets:
-            try:
-                sent = await self.context.send_message(target, chain)
-                if sent:
-                    any_ok = True
-                else:
-                    logger.warning("主动消息未找到匹配平台: %s", target)
-            except Exception as exc:
-                logger.warning(
-                    "主动发送到 %s 失败: %s",
-                    target,
-                    str(exc) or exc.__class__.__name__,
-                )
+            if await self._send_chain(
+                target, lambda: MessageChain([Comp.Plain(text)]), "消息"
+            ):
+                any_ok = True
         return any_ok
 
     async def send_image(self, targets: list[str], image_url: str) -> bool:
-        chain = MessageChain([Comp.Image.fromURL(image_url)])
         any_ok = False
         for target in targets:
-            try:
-                sent = await self.context.send_message(target, chain)
-                if sent:
-                    any_ok = True
-                else:
-                    logger.warning("主动图片未找到匹配平台: %s", target)
-            except Exception as exc:
-                logger.warning(
-                    "主动发送图片到 %s 失败: %s",
-                    target,
-                    str(exc) or exc.__class__.__name__,
-                )
+            if await self._send_chain(
+                target,
+                lambda: MessageChain([Comp.Image.fromURL(image_url)]),
+                "图片",
+            ):
+                any_ok = True
         return any_ok
 
     async def build_summary_text(

@@ -956,9 +956,14 @@ async def collect_bot_info(
             data[field] = value
 
     if client is not None:
-        ok_self, _ = cached("self_id")
-        ok_nick, _ = cached("nick")
-        if not ok_self or not ok_nick:
+        # The five OneBot calls used to run serially, so a slow NapCat could
+        # add 5 seconds per field to the first card. They are independent, so
+        # run them concurrently and let each field keep its own cache state.
+        async def fetch_login() -> None:
+            ok_self, _ = cached("self_id")
+            ok_nick, _ = cached("nick")
+            if ok_self and ok_nick:
+                return
             try:
                 login = _normalize_object(
                     await _call_action(client, "get_login_info")
@@ -974,9 +979,11 @@ async def collect_bot_info(
                 store("self_id", None)
                 store("nick", None)
 
-        ok_pname, _ = cached("protocol_name")
-        ok_pver, _ = cached("protocol_version")
-        if not ok_pname or not ok_pver:
+        async def fetch_version() -> None:
+            ok_pname, _ = cached("protocol_name")
+            ok_pver, _ = cached("protocol_version")
+            if ok_pname and ok_pver:
+                return
             try:
                 version = _normalize_object(
                     await _call_action(client, "get_version_info")
@@ -998,8 +1005,10 @@ async def collect_bot_info(
                 store("protocol_name", None)
                 store("protocol_version", None)
 
-        ok_friends, _ = cached("friends")
-        if not ok_friends:
+        async def fetch_friends() -> None:
+            ok_friends, _ = cached("friends")
+            if ok_friends:
+                return
             try:
                 friends = _normalize_list(
                     await _call_action(client, "get_friend_list")
@@ -1011,9 +1020,11 @@ async def collect_bot_info(
                 logger.debug("OneBot get_friend_list 失败: %s", exc)
                 store("friends", None)
 
-        ok_groups, _ = cached("groups")
-        ok_members, _ = cached("members")
-        if not ok_groups or not ok_members:
+        async def fetch_groups() -> None:
+            ok_groups, _ = cached("groups")
+            ok_members, _ = cached("members")
+            if ok_groups and ok_members:
+                return
             try:
                 groups = _normalize_list(
                     await _call_action(client, "get_group_list")
@@ -1035,8 +1046,10 @@ async def collect_bot_info(
                 store("groups", None)
                 store("members", None)
 
-        ok_online, _ = cached("online")
-        if not ok_online:
+        async def fetch_online() -> None:
+            ok_online, _ = cached("online")
+            if ok_online:
+                return
             try:
                 status = _normalize_object(
                     await _call_action(client, "get_status")
@@ -1047,6 +1060,15 @@ async def collect_bot_info(
             except Exception as exc:
                 logger.debug("OneBot get_status 失败: %s", exc)
                 store("online", None)
+
+        await asyncio.gather(
+            fetch_login(),
+            fetch_version(),
+            fetch_friends(),
+            fetch_groups(),
+            fetch_online(),
+            return_exceptions=True,
+        )
 
     data["has_client"] = client is not None
     bot = dict(data)
@@ -1557,16 +1579,15 @@ async def collect_all(
     top_n = max(1, min(30, cfg_int(config, "display.process_top_n", 8)))
     proc = await asyncio.to_thread(process_info, top_n)
 
-    snapshot = state.snapshot() if hasattr(state, "snapshot") else {}
-    net_state = snapshot.get("net", {}) if isinstance(snapshot, dict) else {}
-    disk_state = snapshot.get("disk_io", {}) if isinstance(snapshot, dict) else {}
-    recv_state = snapshot.get("recv", {}) if isinstance(snapshot, dict) else {}
-    if not net_state and state is not None and hasattr(state, "get"):
-        net_state = state.get("net", {}) or {}
-    if not disk_state and state is not None and hasattr(state, "get"):
-        disk_state = state.get("disk_io", {}) or {}
-    if not recv_state and state is not None and hasattr(state, "get"):
-        recv_state = state.get("recv", {}) or {}
+    def state_section(key: str) -> dict[str, Any]:
+        if state is None or not hasattr(state, "get"):
+            return {}
+        value = state.get(key, {}) or {}
+        return value if isinstance(value, dict) else {}
+
+    net_state = state_section("net")
+    disk_state = state_section("disk_io")
+    recv_state = state_section("recv")
 
     bot = await collect_bot_info(context, event, config, recv_state)
 

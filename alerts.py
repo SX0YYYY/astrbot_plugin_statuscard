@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -585,6 +586,14 @@ class AlertEngine:
         if not path.startswith("/"):
             path = "/" + path
         token = str(cfg_get(self.config, "alerts.komari_webhook.token", "") or "")
+        require_token = cfg_bool(
+            self.config, "alerts.komari_webhook.require_token", False
+        )
+        if require_token and not token:
+            logger.error(
+                "Komari Webhook 已开启“强制要求 Token”，但未配置 Token，已拒绝启动"
+            )
+            return
 
         if host == "0.0.0.0" and not token:
             logger.warning(
@@ -592,20 +601,36 @@ class AlertEngine:
             )
 
         app = web.Application()
+        max_body_bytes = 64 * 1024
 
         async def handle(request: "web.Request") -> "web.Response":
             if token:
                 auth = request.headers.get("Authorization", "")
-                if auth != f"Bearer {token}":
+                if not hmac.compare_digest(
+                    auth.encode("utf-8"), f"Bearer {token}".encode("utf-8")
+                ):
                     return web.json_response(
                         {"status": "error", "message": "unauthorized"},
                         status=403,
                     )
+            length = request.content_length
+            if length is not None and length > max_body_bytes:
+                return web.json_response(
+                    {"status": "error", "message": "payload too large"},
+                    status=413,
+                )
+            raw = await request.content.read(max_body_bytes + 1)
+            if len(raw) > max_body_bytes:
+                return web.json_response(
+                    {"status": "error", "message": "payload too large"},
+                    status=413,
+                )
             try:
-                data = await request.json()
+                data = json.loads(raw.decode("utf-8"))
             except Exception:
-                text = (await request.text())[:4000]
-                data = {"message": text}
+                data = {
+                    "message": raw.decode("utf-8", errors="replace")[:4000]
+                }
             text = self._format_komari(data)
             ok = await self._send(text)
             if not ok:

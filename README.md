@@ -109,6 +109,8 @@
   - 进程：名称 + 进程名或命令行关键字
 - **显示高级监测选项**：轮询间隔、连续失败次数、冷却、恢复通知、HTTP 最大读取字节数
 
+> 监测项类型未知、或缺少网址/端口/容器名/服务名/进程关键字时，插件启动会在日志中给出 warning，不会静默跳过；填完可以用管理员命令 `立即检测` 验证。
+
 ## 常见场景
 
 ### 换头像
@@ -176,6 +178,7 @@
 3. 默认监听 `127.0.0.1:9968/webhook`
 4. 在 Komari 后台添加 Webhook，Body 用 `{"title":"{{title}}","message":"{{message}}"}`
 5. 如果设置了 Token，在请求头加 `Authorization: Bearer <token>`
+6. 如果 Webhook 需要暴露到本机以外，建议同时打开“强制要求 Token”；未配置 Token 时插件会拒绝启动 Webhook，而不是无鉴权接收
 
 ## 权限与隐私
 
@@ -192,7 +195,7 @@
 - **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON，只覆盖该插件跟踪的群，图上会标注口径
 - **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数
 - **月流量/网络折线**：插件每 60 秒采样 `psutil.net_io_counters`，从插件首次运行开始累计，状态保存在 `state.json`，重启不丢
-- **网络折线**：最近 180 个采样点（约 3 小时），纯 SVG 绘制，不依赖 JS
+- **网络折线**：图上绘制最近 60 个采样点（默认约 1 小时），采样历史最多保留 180 个点；纯 SVG 绘制，不依赖 JS
 
 ## 高级配置
 
@@ -214,6 +217,7 @@
 | `monitors.interval_seconds` | 服务监测轮询间隔，默认 60 秒 |
 | `monitors.fail_threshold` | 连续失败几次后告警，默认 2 次 |
 | `monitors.max_response_bytes` | HTTP 关键字检查最大读取字节数，默认 262144 |
+| `alerts.komari_webhook.require_token` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
 
 ### 配置文件位置
 

@@ -24,6 +24,14 @@ KIND_LABELS = {
     "systemd": "systemd",
 }
 
+REQUIRED_FIELDS = {
+    "http": "url",
+    "tcp": "port",
+    "docker": "container",
+    "process": "pattern",
+    "systemd": "unit",
+}
+
 
 def _now_text(config: Any = None) -> str:
     if config is None:
@@ -90,9 +98,23 @@ class ServiceMonitor:
                 continue
             kind = str(item.get("__template_key") or item.get("type") or "").lower()
             if kind not in KIND_LABELS:
+                logger.warning(
+                    "监测项 %r 的类型 %r 不受支持，已跳过（可用类型：%s）",
+                    str(item.get("name") or ""),
+                    kind or "(空)",
+                    "、".join(KIND_LABELS),
+                )
                 continue
             if not cfg_bool(item, "enabled", True):
                 continue
+            required = REQUIRED_FIELDS[kind]
+            if not item.get(required):
+                logger.warning(
+                    "监测项 %r（%s）缺少 %s 配置，检查时会始终判定为异常",
+                    str(item.get("name") or kind),
+                    kind,
+                    required,
+                )
             normalized = dict(item)
             normalized["__template_key"] = kind
             normalized["name"] = str(item.get("name") or kind)

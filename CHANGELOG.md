@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.2.0 — 2026-10-19
+
+### 优化
+
+- OneBot 首卡查询改为并发执行：登录信息、协议版本、好友、群、在线状态不再串行等待，慢连接下首卡最多等待一个超时周期而不是五个。
+- 主动消息发送遇到传输异常时自动重试 2 次（间隔 1/2 秒）；“未找到平台”不重试，仍记录一次日志。
+- 服务监测启动时对未知类型、缺少网址/端口/容器名/服务名/进程关键字的条目输出 warning，不再静默跳过。
+- 清理 `collect_all()` 中永远不会命中的 `state.snapshot()` 分支，统一从 `StateStore.get()` 读取采样状态。
+- `state.json` 增加 `schema_version`，为后续状态迁移留出入口。
+
+### 安全
+
+- Komari Webhook Token 改为恒时比较，避免逐字节比较带来的时序差异。
+- Komari Webhook 请求体限制为 64 KB，超出返回 413。
+- 新增 `alerts.komari_webhook.require_token`：开启后必须配置 Token，否则拒绝启动 Webhook。
+
+### 配置
+
+- `alerts.cooldown_seconds`、`monitors.cooldown_seconds`、`monitors.max_response_bytes` 以及各监测模板的 `timeout_seconds` 增加滑块范围。
+
+### 文档
+
+- 修正 README 网络折线口径：图上绘制最近 60 个采样点（约 1 小时），采样历史保留 180 个点。
+- 补充监测配置错误日志提示和 Webhook 强制 Token 说明。
+
+### 工程
+
+- 新增 `tests/`（pytest）和 GitHub Actions CI，覆盖状态存储、网络图、监测配置、Webhook 格式化、模板内联等核心逻辑。
+
 ## v2.1.2 — 2026-10-19
 
 ### 变更

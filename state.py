@@ -9,6 +9,8 @@ from typing import Any
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
+SCHEMA_VERSION = 1
+
 
 class StateStore:
     """Small JSON state store with atomic writes.
@@ -23,6 +25,7 @@ class StateStore:
         self.load()
 
     def load(self) -> None:
+        existed = self.path.is_file()
         try:
             raw = self.path.read_text(encoding="utf-8")
             parsed = json.loads(raw)
@@ -35,6 +38,16 @@ class StateStore:
             logger.warning("读取状态文件失败 %s: %s", self.path, exc)
             self._backup_bad_file()
             self.data = {}
+        self._migrate(existed)
+
+    def _migrate(self, existed: bool) -> None:
+        if not isinstance(self.data, dict):
+            self.data = {}
+        if self.data.get("schema_version") == SCHEMA_VERSION:
+            return
+        self.data["schema_version"] = SCHEMA_VERSION
+        if existed:
+            self.save()
 
     def _backup_bad_file(self) -> None:
         try:
@@ -47,6 +60,7 @@ class StateStore:
 
     def save(self) -> None:
         try:
+            self.data.setdefault("schema_version", SCHEMA_VERSION)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(f"{self.path.name}.tmp")
             tmp.write_text(

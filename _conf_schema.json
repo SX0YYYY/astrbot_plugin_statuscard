@@ -295,6 +295,7 @@
         "description": "同一规则告警冷却（秒）",
         "type": "int",
         "default": 1800,
+        "slider": {"min": 0, "max": 86400, "step": 60},
         "condition": {"show_advanced": true},
         "hint": "冷却期内不会重复发送同一条告警。"
       },
@@ -355,6 +356,13 @@
             "secret": true,
             "condition": {"enabled": true},
             "hint": "留空表示不校验；建议设置。"
+          },
+          "require_token": {
+            "description": "强制要求 Token",
+            "type": "bool",
+            "default": false,
+            "condition": {"enabled": true},
+            "hint": "开启后必须配置 Token，否则 Webhook 拒绝启动；Webhook 暴露到本机以外时建议开启。"
           }
         }
       }
@@ -425,6 +433,7 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
+                "slider": {"min": 1, "max": 60, "step": 1},
                 "condition": {"show_advanced": true}
               }
             }
@@ -464,6 +473,7 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
+                "slider": {"min": 1, "max": 60, "step": 1},
                 "condition": {"show_advanced": true}
               }
             }
@@ -497,6 +507,7 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
+                "slider": {"min": 1, "max": 60, "step": 1},
                 "condition": {"show_advanced": true}
               }
             }
@@ -552,6 +563,7 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
+                "slider": {"min": 1, "max": 60, "step": 1},
                 "condition": {"show_advanced": true}
               }
             }
@@ -583,6 +595,7 @@
         "description": "同一目标告警冷却（秒）",
         "type": "int",
         "default": 1800,
+        "slider": {"min": 0, "max": 86400, "step": 60},
         "condition": {"show_advanced": true}
       },
       "recover_notify": {
@@ -595,6 +608,7 @@
         "description": "HTTP 探测最大读取字节数",
         "type": "int",
         "default": 262144,
+        "slider": {"min": 1024, "max": 10485760, "step": 1024},
         "condition": {"show_advanced": true},
         "hint": "只在配置了“响应中必须包含的文字”时生效，避免误读大文件。"
       }
