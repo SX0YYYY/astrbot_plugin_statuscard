@@ -34,8 +34,8 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
 @register(
     PLUGIN_NAME,
     "烬辞",
-    "以华丽的图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.1.0",
+    "以图片卡片显示系统运行状态，并支持主动告警推送",
+    "2.1.1",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -337,7 +337,11 @@ class StatusCardPlugin(Star):
                 else:
                     logger.warning("主动消息未找到匹配平台: %s", target)
             except Exception as exc:
-                logger.warning("主动发送到 %s 失败: %s", target, exc)
+                logger.warning(
+                    "主动发送到 %s 失败: %s",
+                    target,
+                    str(exc) or exc.__class__.__name__,
+                )
         return any_ok
 
     async def send_image(self, targets: list[str], image_url: str) -> bool:
@@ -351,7 +355,11 @@ class StatusCardPlugin(Star):
                 else:
                     logger.warning("主动图片未找到匹配平台: %s", target)
             except Exception as exc:
-                logger.warning("主动发送图片到 %s 失败: %s", target, exc)
+                logger.warning(
+                    "主动发送图片到 %s 失败: %s",
+                    target,
+                    str(exc) or exc.__class__.__name__,
+                )
         return any_ok
 
     async def build_summary_text(
