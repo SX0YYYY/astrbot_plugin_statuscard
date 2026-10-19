@@ -106,10 +106,10 @@ class AlertEngine:
             self._daily_task = asyncio.create_task(self._daily_loop())
         self._start_webhook_task()
         if not self._running:
-            logger.info("状态卡主动告警与每日摘要均未启用")
+            logger.info("状态卡主动告警与每日定时状态图均未启用")
             return
         logger.info(
-            "状态卡任务已启动：阈值告警=%s，每日摘要=%s，目标=%s，间隔=%ss，"
+            "状态卡任务已启动：阈值告警=%s，每日定时状态图=%s，目标=%s，间隔=%ss，"
             "阈值 CPU %.0f%% / RAM %.0f%% / SWAP %.0f%% / DISK %.0f%%",
             alerts_on,
             daily_on,
@@ -450,7 +450,7 @@ class AlertEngine:
             return os.environ.get("COMPUTERNAME", "unknown")
 
     # ------------------------------------------------------------------
-    # daily summary
+    # daily status image schedule
     # ------------------------------------------------------------------
 
     async def _daily_loop(self) -> None:
@@ -471,7 +471,7 @@ class AlertEngine:
                 except Exception:
                     if "tz" not in warned:
                         logger.warning(
-                            "每日摘要时区非法：%s，回退到系统时区", tz_name
+                            "每日定时状态图时区非法：%s，回退到系统时区", tz_name
                         )
                         warned.add("tz")
                     tz = datetime.now().astimezone().tzinfo
@@ -487,7 +487,7 @@ class AlertEngine:
                 except Exception:
                     if "time" not in warned:
                         logger.warning(
-                            "每日摘要时间格式非法：%s（应为 HH:MM）", time_text
+                            "每日定时状态图时间格式非法：%s（应为 HH:MM）", time_text
                         )
                         warned.add("time")
                     await asyncio.sleep(60)
@@ -500,7 +500,7 @@ class AlertEngine:
                     target += timedelta(days=1)
                 if last_logged != target:
                     logger.info(
-                        "状态卡每日摘要将在 %s 发送（%.0f 秒后）",
+                        "每日定时状态图将在 %s 发送（%.0f 秒后）",
                         target.strftime("%Y-%m-%d %H:%M"),
                         max(1.0, (target - now).total_seconds()),
                     )
@@ -532,12 +532,12 @@ class AlertEngine:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("状态卡每日摘要任务失败")
+                logger.exception("每日定时状态图任务失败")
                 await asyncio.sleep(60)
 
     async def _send_daily_summary(self) -> None:
         if not self.targets:
-            logger.warning("每日摘要已启用，但告警目标为空，跳过发送")
+            logger.warning("每日定时状态图已启用，但告警目标为空，跳过发送")
             return
         with_image = cfg_bool(
             self.config, "alerts.daily_summary.with_image", True
@@ -546,19 +546,19 @@ class AlertEngine:
             try:
                 image_url = await self.plugin.build_status_image()
             except Exception:
-                logger.exception("每日摘要渲染状态图失败")
+                logger.exception("每日定时状态图渲染失败")
                 image_url = None
             if image_url:
                 ok = await self.plugin.send_image(self.targets, image_url)
                 if ok:
-                    logger.info("状态卡每日摘要已发送（图片）：%s", self.targets)
+                    logger.info("每日定时状态图已发送（图片）：%s", self.targets)
                     return
         summary = await self.plugin.build_summary_text()
-        ok = await self._send("📅 每日状态摘要\n──────────────\n" + summary)
+        ok = await self._send("📅 每日定时状态图\n──────────────\n" + summary)
         if ok:
-            logger.info("状态卡每日摘要已发送（文字）：%s", self.targets)
+            logger.info("每日定时状态图已发送（文字）：%s", self.targets)
         else:
-            logger.warning("状态卡每日摘要发送失败：%s", self.targets)
+            logger.warning("每日定时状态图发送失败：%s", self.targets)
 
     # ------------------------------------------------------------------
     # Komari webhook

@@ -193,28 +193,28 @@
   "alerts": {
     "description": "主动告警",
     "type": "object",
-    "hint": "默认关闭。打开后，CPU/内存/磁盘持续过高或 Bot 掉线时，往下面的 QQ 群发消息；每日摘要也可以单独开启。",
+    "hint": "默认关闭。打开后，CPU/内存/磁盘持续过高或 Bot 掉线时，往下面的 QQ 群发消息；每日定时状态图也可以单独开启。",
     "items": {
       "enabled": {
         "description": "启用资源与掉线告警",
         "type": "bool",
         "default": false,
-        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日摘要由下面的独立开关控制。"
+        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日定时状态图由下面的独立开关控制。"
       },
       "targets": {
         "description": "推送目标",
         "type": "list",
         "default": [],
         "items": {"type": "string"},
-        "hint": "填 QQ 群号即可，例如 123456789；也支持 default:GroupMessage:123456789。每日摘要和服务监测默认复用这里。"
+        "hint": "填 QQ 群号即可，例如 123456789；也支持 default:GroupMessage:123456789。每日定时状态图和服务监测默认复用这里。"
       },
       "daily_summary": {
-        "description": "每日状态摘要",
+        "description": "每日定时状态图",
         "type": "object",
         "hint": "每天固定时间自动发一张状态图到上面的推送目标。默认关闭。",
         "items": {
           "enabled": {
-            "description": "启用每日摘要",
+            "description": "启用每日定时状态图",
             "type": "bool",
             "default": false
           },
@@ -226,7 +226,7 @@
             "hint": "24 小时制，例如 09:00 或 20:00。"
           },
           "with_image": {
-            "description": "附带状态图",
+            "description": "发送状态图（关闭则发文字摘要）",
             "type": "bool",
             "default": true,
             "condition": {"enabled": true},

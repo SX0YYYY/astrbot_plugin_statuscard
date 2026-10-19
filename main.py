@@ -35,7 +35,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.1.1",
+    "2.1.2",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -269,7 +269,7 @@ class StatusCardPlugin(Star):
         )
 
     async def build_status_image(self) -> str | None:
-        """Render a status image without an incoming event (daily summary)."""
+        """Render a status image without an incoming event (scheduled daily status image)."""
         return await self._render_status_image(event=None)
 
     async def _resolve_background(self, event: AstrMessageEvent | None):
