@@ -2,148 +2,93 @@
   "avatar": {
     "description": "头像",
     "type": "object",
+    "hint": "默认使用 Bot 的 QQ 头像。想换头像时，把“头像来源”改为“自定义上传”，再上传一张图片即可。",
     "items": {
+      "avatar_source": {
+        "description": "头像来源",
+        "type": "string",
+        "default": "default",
+        "options": ["default", "upload"],
+        "labels": ["默认（QQ 头像）", "自定义上传"],
+        "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
+      },
       "avatar_upload_files": {
         "description": "上传头像图片",
         "type": "file",
         "default": [],
         "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
-        "hint": "在配置页直接上传头像图片，上传后会自动加入列表，取列表第一张生效。优先级高于本地路径、头像 URL 和 QQ 头像。"
-      },
-      "avatar_local_path": {
-        "description": "自定义头像本地路径",
-        "type": "string",
-        "default": "",
-        "hint": "填写后优先读取本地文件；读取失败会回退到 avatar_url 或 QQ 头像。"
-      },
-      "avatar_url": {
-        "description": "自定义头像图片 URL",
-        "type": "string",
-        "default": "",
-        "hint": "留空时自动使用 Bot 的 QQ 头像。"
+        "condition": {"avatar_source": "upload"},
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
       },
       "avatar_text": {
         "description": "状态图显示的 Bot 名称",
         "type": "string",
         "default": "",
-        "hint": "留空时自动读取 OneBot 登录昵称。"
+        "hint": "留空自动读取 QQ 昵称；只影响卡片上的文字。"
       }
     }
   },
   "background": {
     "description": "背景",
     "type": "object",
+    "hint": "默认使用内置背景。想换背景时，把“背景来源”改为“自定义上传”，再上传一张图片即可。",
     "items": {
+      "background_source": {
+        "description": "背景来源",
+        "type": "string",
+        "default": "default",
+        "options": ["default", "upload"],
+        "labels": ["默认（内置背景）", "自定义上传"],
+        "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
+      },
       "bg_upload_files": {
         "description": "上传背景图片",
         "type": "file",
         "default": [],
         "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
-        "hint": "在配置页直接上传背景图片，上传后会自动加入列表，取列表第一张生效。聊天中随命令发送的图片优先；其次是这里上传的背景；最后才使用 bg_provider。"
-      },
-      "bg_provider": {
-        "description": "背景获取来源（主）",
-        "type": "string",
-        "default": "none",
-        "options": ["none", "local", "loli", "lolicon", "loli&lolicon"],
-        "hint": "none=内置背景；local=本地文件/目录；loli/lolicon=在线随机二次元图。"
-      },
-      "bg_fallback_chain": {
-        "description": "背景回退链",
-        "type": "string",
-        "default": "none",
-        "hint": "逗号分隔，主来源失败后按顺序尝试。"
-      },
-      "bg_local_path": {
-        "description": "本地背景路径（文件或目录）",
-        "type": "string",
-        "default": "",
-        "hint": "目录会随机抽取其中的图片。"
-      },
-      "bg_preload_count": {
-        "description": "预加载背景数量",
-        "type": "int",
-        "default": 1
-      },
-      "bg_req_timeout": {
-        "description": "在线背景请求超时（秒）",
-        "type": "int",
-        "default": 10
-      },
-      "bg_proxy": {
-        "description": "在线背景请求代理",
-        "type": "string",
-        "default": "",
-        "hint": "留空不使用代理。"
-      },
-      "bg_lolicon_r18_type": {
-        "description": "Lolicon R18 类型",
-        "type": "int",
-        "default": 0,
-        "hint": "0=正常，1=R18，2=混合；仅 lolicon 来源生效。"
+        "condition": {"background_source": "upload"},
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。聊天中随命令发送的图片仍然优先。"
       }
     }
   },
   "display": {
     "description": "状态卡显示",
     "type": "object",
+    "hint": "默认设置即可直接使用；需要调整图片尺寸或排查问题时，再打开“显示高级选项”。",
     "items": {
+      "render_width": {
+        "description": "输出图片宽度（像素）",
+        "type": "int",
+        "default": 1170,
+        "slider": {"min": 1170, "max": 2880, "step": 30},
+        "hint": "数值越大，图片越清晰、文件越大、出图越慢；高度会随内容自动扩展。默认 1170 与旧版高清效果相当。"
+      },
       "process_top_n": {
         "description": "进程表显示条数",
         "type": "int",
-        "default": 8
-      },
-      "cooldown_seconds": {
-        "description": "状态卡冷却（秒）",
-        "type": "int",
-        "default": 10,
-        "hint": "同一会话内重复触发的最小间隔；生成期间不会重复渲染；0 表示关闭冷却。"
-      },
-      "access": {
-        "description": "状态卡访问权限（管理员内部）",
-        "type": "string",
-        "default": "admin",
-        "options": ["all", "admin", "allowlist"],
-        "hint": "所有状态卡命令已强制仅 AstrBot 管理员可触发。此项只能在管理员范围内进一步收紧：all=所有管理员；admin=仅管理员；allowlist=管理员+白名单。"
-      },
-      "allowlist": {
-        "description": "状态卡白名单",
-        "type": "list",
-        "default": [],
-        "items": {"type": "string"},
-        "hint": "可填群号、用户号或完整 UMO；仅 access=allowlist 时生效，且不能放行非管理员。"
-      },
-      "redact": {
-        "description": "状态卡脱敏项",
-        "type": "list",
-        "default": [],
-        "items": {"type": "string"},
-        "hint": "可选 hostname/process/network/qq_stats；公开群建议至少 hostname,process,qq_stats。"
-      },
-      "privacy_notice": {
-        "description": "首次触发隐私提示",
-        "type": "bool",
-        "default": true,
-        "hint": "每个会话首次出图前提示状态图会发送到 T2I 服务。"
+        "default": 8,
+        "slider": {"min": 1, "max": 30, "step": 1},
+        "hint": "卡片上展示 CPU 占用最高的前几个进程。"
       },
       "progress_notice": {
-        "description": "出图前进度提示",
+        "description": "出图前发送“生成中”提示",
         "type": "bool",
         "default": true,
-        "hint": "T2I 较慢时建议开启；关闭后只发最终图片。"
+        "hint": "建议开启；远程渲染较慢时，用户不会以为 Bot 没反应。"
       },
-      "render_quality": {
-        "description": "T2I 清晰度",
-        "type": "string",
-        "default": "ultra",
-        "options": ["normal", "high", "ultra"],
-        "hint": "normal 更快，ultra 更清晰；出图慢可先降到 high 或 normal。"
+      "show_advanced": {
+        "description": "显示高级显示选项",
+        "type": "bool",
+        "default": false,
+        "hint": "冷却、网站测试、磁盘路径、时区、隐私与权限等；通常不需要改。"
       },
-      "render_timeout": {
-        "description": "T2I 渲染超时（秒）",
+      "cooldown_seconds": {
+        "description": "同一会话冷却（秒）",
         "type": "int",
-        "default": 180,
-        "hint": "30-600；超时后回退为文字摘要。"
+        "default": 10,
+        "slider": {"min": 0, "max": 3600, "step": 5},
+        "condition": {"show_advanced": true},
+        "hint": "同一会话重复触发状态卡的最小间隔；0 表示不限制。"
       },
       "website_targets": {
         "description": "网站测试目标",
@@ -151,26 +96,29 @@
         "default": [
           {"__template_key": "site", "name": "Baidu", "url": "https://www.baidu.com/"}
         ],
+        "condition": {"show_advanced": true},
+        "hint": "状态卡上显示的网站延迟测试；默认只测百度，不需要可以保持默认。",
         "templates": {
           "site": {
             "name": "网站",
-            "display_item": "name",
             "items": {
               "name": {
                 "description": "显示名称",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 百度"
               },
               "url": {
-                "description": "URL",
+                "description": "网址",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 https://www.baidu.com/"
               },
               "timeout_seconds": {
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 3,
-                "hint": "单个网站请求的超时；国内服务器不建议给 Google 之类站点设太长。"
+                "invisible": true
               }
             }
           }
@@ -180,126 +128,201 @@
         "description": "网站测试缓存（秒）",
         "type": "int",
         "default": 60,
+        "slider": {"min": 0, "max": 3600, "step": 10},
+        "condition": {"show_advanced": true},
         "hint": "同一批目标在该时间内复用结果，避免每次出图都请求外网；0 表示关闭。"
       },
       "disk_paths": {
         "description": "磁盘挂载点",
         "type": "list",
-        "default": ["/"],
-        "items": {
-          "type": "string"
-        },
-        "hint": "例如 [\"/\"] 或 [\"/\", \"/data\"]；Windows 可填 [\"C:\\\\\"]。"
+        "default": [],
+        "items": {"type": "string"},
+        "condition": {"show_advanced": true},
+        "hint": "留空自动检测；Linux 通常填 /，Windows 填 C:\\。"
       },
       "timezone": {
-        "description": "时间与每日摘要时区",
+        "description": "时区",
         "type": "string",
-        "default": "Asia/Shanghai"
+        "default": "Asia/Shanghai",
+        "condition": {"show_advanced": true},
+        "hint": "例如 Asia/Shanghai；留空默认 Asia/Shanghai。"
+      },
+      "redact": {
+        "description": "状态卡脱敏项",
+        "type": "list",
+        "default": [],
+        "options": ["hostname", "process", "network", "qq_stats"],
+        "labels": ["主机名", "进程信息", "网络数据", "QQ 统计"],
+        "render_type": "checkbox",
+        "condition": {"show_advanced": true},
+        "hint": "勾选后，卡片上对应的信息会显示为“已隐藏”。"
+      },
+      "privacy_notice": {
+        "description": "首次触发隐私提示",
+        "type": "bool",
+        "default": true,
+        "condition": {"show_advanced": true},
+        "hint": "每个会话首次出图前提示状态图会发送到 T2I 服务。"
+      },
+      "render_timeout": {
+        "description": "渲染超时（秒）",
+        "type": "int",
+        "default": 180,
+        "slider": {"min": 30, "max": 600, "step": 10},
+        "condition": {"show_advanced": true},
+        "hint": "超时后回退为文字摘要。"
+      },
+      "access": {
+        "description": "状态卡访问权限（已废弃）",
+        "type": "string",
+        "default": "admin",
+        "options": ["all", "admin", "allowlist"],
+        "invisible": true,
+        "hint": "所有命令已强制仅 AstrBot 管理员可用；保留此字段只为兼容旧配置。"
+      },
+      "allowlist": {
+        "description": "状态卡白名单（已废弃）",
+        "type": "list",
+        "default": [],
+        "items": {"type": "string"},
+        "invisible": true,
+        "hint": "所有命令已强制仅管理员可用，此字段不再生效。"
       }
     }
   },
   "alerts": {
-    "description": "主动告警（默认关闭）",
+    "description": "主动告警",
     "type": "object",
+    "hint": "默认关闭。打开后，CPU/内存/磁盘持续过高或 Bot 掉线时，往下面的 QQ 群发消息；每日摘要也可以单独开启。",
     "items": {
       "enabled": {
-        "description": "启用资源阈值与掉线告警",
+        "description": "启用资源与掉线告警",
         "type": "bool",
         "default": false,
-        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日摘要由独立开关控制，无需打开本项。"
+        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日摘要由下面的独立开关控制。"
       },
       "targets": {
-        "description": "告警推送目标",
+        "description": "推送目标",
         "type": "list",
         "default": [],
-        "items": {
-          "type": "string"
-        },
-        "hint": "支持完整 UMO（platform_id:GroupMessage:群号）或纯群号；阈值告警、每日摘要和服务监测都会复用这里。"
-      },
-      "platform_id": {
-        "description": "默认平台实例 ID",
-        "type": "string",
-        "default": "default",
-        "hint": "纯群号会转换为 <platform_id>:GroupMessage:<群号>。"
-      },
-      "interval_seconds": {
-        "description": "告警采样间隔（秒）",
-        "type": "int",
-        "default": 60,
-        "hint": "最低 15 秒。"
-      },
-      "sustain_samples": {
-        "description": "连续超过阈值多少次才告警",
-        "type": "int",
-        "default": 3
-      },
-      "cooldown_seconds": {
-        "description": "同一规则告警冷却（秒）",
-        "type": "int",
-        "default": 1800
-      },
-      "cpu_threshold": {
-        "description": "CPU 使用率阈值（%）",
-        "type": "int",
-        "default": 85
-      },
-      "mem_threshold": {
-        "description": "内存使用率阈值（%）",
-        "type": "int",
-        "default": 90
-      },
-      "swap_threshold": {
-        "description": "SWAP 使用率阈值（%）",
-        "type": "int",
-        "default": 90
-      },
-      "disk_threshold": {
-        "description": "磁盘使用率阈值（%）",
-        "type": "int",
-        "default": 85
-      },
-      "load_per_core_threshold": {
-        "description": "每核负载阈值",
-        "type": "float",
-        "default": 2.0
-      },
-      "recover_notify": {
-        "description": "恢复时发送通知",
-        "type": "bool",
-        "default": true
-      },
-      "offline_notify": {
-        "description": "Bot 掉线/恢复通知",
-        "type": "bool",
-        "default": true
+        "items": {"type": "string"},
+        "hint": "填 QQ 群号即可，例如 123456789；也支持 default:GroupMessage:123456789。每日摘要和服务监测默认复用这里。"
       },
       "daily_summary": {
         "description": "每日状态摘要",
         "type": "object",
+        "hint": "每天固定时间自动发一张状态图到上面的推送目标。默认关闭。",
         "items": {
           "enabled": {
             "description": "启用每日摘要",
             "type": "bool",
-            "default": false,
-            "hint": "独立开关，不需要打开 alerts.enabled；发送目标复用 alerts.targets。"
+            "default": false
           },
           "time": {
-            "description": "发送时间（HH:MM）",
+            "description": "发送时间",
             "type": "string",
-            "default": "09:00"
+            "default": "09:00",
+            "condition": {"enabled": true},
+            "hint": "24 小时制，例如 09:00 或 20:00。"
           },
           "with_image": {
             "description": "附带状态图",
             "type": "bool",
             "default": true,
-            "hint": "渲染失败时自动降级为文字摘要。"
+            "condition": {"enabled": true},
+            "hint": "关闭后只发文字摘要。"
           }
         }
       },
+      "show_advanced": {
+        "description": "显示高级告警选项",
+        "type": "bool",
+        "default": false,
+        "hint": "阈值、采样间隔、冷却、掉线通知、Komari Webhook 等；通常不需要改。"
+      },
+      "cpu_threshold": {
+        "description": "CPU 告警阈值（%）",
+        "type": "int",
+        "default": 85,
+        "slider": {"min": 0, "max": 100, "step": 1},
+        "condition": {"show_advanced": true}
+      },
+      "mem_threshold": {
+        "description": "内存告警阈值（%）",
+        "type": "int",
+        "default": 90,
+        "slider": {"min": 0, "max": 100, "step": 1},
+        "condition": {"show_advanced": true}
+      },
+      "swap_threshold": {
+        "description": "SWAP 告警阈值（%）",
+        "type": "int",
+        "default": 90,
+        "slider": {"min": 0, "max": 100, "step": 1},
+        "condition": {"show_advanced": true}
+      },
+      "disk_threshold": {
+        "description": "磁盘告警阈值（%）",
+        "type": "int",
+        "default": 85,
+        "slider": {"min": 0, "max": 100, "step": 1},
+        "condition": {"show_advanced": true}
+      },
+      "load_per_core_threshold": {
+        "description": "每核负载告警阈值",
+        "type": "float",
+        "default": 2.0,
+        "slider": {"min": 0, "max": 16, "step": 0.1},
+        "condition": {"show_advanced": true},
+        "hint": "例如 2.0 表示每个 CPU 核心平均负载超过 2.0 时告警。"
+      },
+      "interval_seconds": {
+        "description": "采样间隔（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {"min": 15, "max": 600, "step": 5},
+        "condition": {"show_advanced": true}
+      },
+      "sustain_samples": {
+        "description": "连续超过阈值几次才告警",
+        "type": "int",
+        "default": 3,
+        "slider": {"min": 1, "max": 10, "step": 1},
+        "condition": {"show_advanced": true},
+        "hint": "次数越多越不容易误报，但告警也更慢。"
+      },
+      "cooldown_seconds": {
+        "description": "同一规则告警冷却（秒）",
+        "type": "int",
+        "default": 1800,
+        "condition": {"show_advanced": true},
+        "hint": "冷却期内不会重复发送同一条告警。"
+      },
+      "recover_notify": {
+        "description": "恢复时发送通知",
+        "type": "bool",
+        "default": true,
+        "condition": {"show_advanced": true}
+      },
+      "offline_notify": {
+        "description": "Bot 掉线/恢复通知",
+        "type": "bool",
+        "default": true,
+        "condition": {"show_advanced": true},
+        "hint": "依赖 OneBot 通道；整体断线时会排队，恢复后补发。"
+      },
+      "platform_id": {
+        "description": "平台实例 ID",
+        "type": "string",
+        "default": "default",
+        "condition": {"show_advanced": true},
+        "hint": "通常保持 default；只有多机器人需要指定时再改。"
+      },
       "komari_webhook": {
-        "description": "Komari Webhook 转发",
+        "description": "Komari Webhook",
         "type": "object",
+        "condition": {"show_advanced": true},
+        "hint": "接收 Komari 的 Webhook 并转发到 QQ 群；普通用户不需要配置。",
         "items": {
           "enabled": {
             "description": "启用 Webhook 接收",
@@ -310,187 +333,188 @@
             "description": "监听地址",
             "type": "string",
             "default": "127.0.0.1",
-            "hint": "Komari 与本插件同机时用 127.0.0.1 即可，避免暴露公网。"
+            "condition": {"enabled": true},
+            "hint": "建议保持 127.0.0.1，只允许本机访问。"
           },
           "port": {
             "description": "监听端口",
             "type": "int",
-            "default": 9968
+            "default": 9968,
+            "condition": {"enabled": true}
           },
           "path": {
             "description": "Webhook 路径",
             "type": "string",
-            "default": "/webhook"
+            "default": "/webhook",
+            "condition": {"enabled": true}
           },
           "token": {
             "description": "鉴权 Token",
             "type": "string",
             "default": "",
-            "is_password": true,
-            "hint": "填写后 Komari 请求头需带 Authorization: Bearer <token>。"
+            "secret": true,
+            "condition": {"enabled": true},
+            "hint": "留空表示不校验；建议设置。"
           }
         }
       }
     }
   },
   "monitors": {
-    "description": "服务监测（类似 Uptime Kuma）",
+    "description": "服务可用性监测",
     "type": "object",
+    "hint": "当网站、端口、Docker 容器或系统服务挂掉/恢复时，往 QQ 群发通知。默认关闭；需要时打开并添加目标即可。",
     "items": {
       "enabled": {
         "description": "启用服务监测",
         "type": "bool",
-        "default": false,
-        "hint": "启用后按设定间隔检查目标，连续失败会推送到 QQ 群。"
-      },
-      "interval_seconds": {
-        "description": "轮询间隔（秒）",
-        "type": "int",
-        "default": 60,
-        "hint": "最低 15 秒。"
-      },
-      "fail_threshold": {
-        "description": "连续失败多少次告警",
-        "type": "int",
-        "default": 2
-      },
-      "cooldown_seconds": {
-        "description": "同一目标告警/重试冷却（秒）",
-        "type": "int",
-        "default": 1800
-      },
-      "recover_notify": {
-        "description": "恢复时发送通知",
-        "type": "bool",
-        "default": true
-      },
-      "max_response_bytes": {
-        "description": "HTTP 探测最大读取字节数",
-        "type": "int",
-        "default": 262144,
-        "hint": "只有配置了 keyword 时才读取响应体；超过该值会截断，避免误配大文件拖垮内存。"
+        "default": false
       },
       "targets": {
-        "description": "监测告警推送目标",
+        "description": "监测推送目标",
         "type": "list",
         "default": [],
-        "items": {
-          "type": "string"
-        },
-        "hint": "支持完整 UMO 或纯群号；留空时复用 alerts.targets。"
+        "items": {"type": "string"},
+        "hint": "留空会自动使用上面的告警推送目标；通常只填一次。"
       },
       "items": {
         "description": "监测目标列表",
         "type": "template_list",
         "default": [],
+        "hint": "点“添加条目”，选择网站/端口/容器/系统服务/进程，填名称和目标即可。",
         "templates": {
           "http": {
-            "name": "HTTP 网站",
-            "display_item": "name",
+            "name": "网站 / 接口",
             "items": {
               "name": {
-                "description": "名称",
+                "description": "显示名称",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 博客"
               },
               "url": {
-                "description": "URL",
+                "description": "网址",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 https://example.com"
+              },
+              "enabled": {
+                "description": "启用",
+                "type": "bool",
+                "default": true
+              },
+              "show_advanced": {
+                "description": "显示高级检查选项",
+                "type": "bool",
+                "default": false
               },
               "expected_status": {
                 "description": "期望状态码",
                 "type": "int",
                 "default": 0,
-                "hint": "0 表示任意 2xx/3xx；填写具体值则精确匹配。"
+                "condition": {"show_advanced": true},
+                "hint": "0 表示任意 2xx/3xx 都算正常；只有接口必须返回特定状态码时才填。"
               },
               "keyword": {
-                "description": "响应关键字（可选）",
+                "description": "响应中必须包含的文字",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "condition": {"show_advanced": true}
               },
               "timeout_seconds": {
                 "description": "超时（秒）",
                 "type": "int",
-                "default": 10
-              },
-              "enabled": {
-                "description": "启用",
-                "type": "bool",
-                "default": true
+                "default": 10,
+                "condition": {"show_advanced": true}
               }
             }
           },
           "tcp": {
-            "name": "TCP 端口",
-            "display_item": "name",
+            "name": "端口",
             "items": {
               "name": {
-                "description": "名称",
+                "description": "显示名称",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 游戏服务"
               },
               "host": {
                 "description": "主机",
                 "type": "string",
-                "default": "127.0.0.1"
+                "default": "127.0.0.1",
+                "hint": "本机服务填 127.0.0.1。"
               },
               "port": {
                 "description": "端口",
                 "type": "int",
-                "default": 0
-              },
-              "timeout_seconds": {
-                "description": "超时（秒）",
-                "type": "int",
-                "default": 10
+                "default": 0,
+                "hint": "例如 8765"
               },
               "enabled": {
                 "description": "启用",
                 "type": "bool",
                 "default": true
+              },
+              "show_advanced": {
+                "description": "显示高级检查选项",
+                "type": "bool",
+                "default": false
+              },
+              "timeout_seconds": {
+                "description": "超时（秒）",
+                "type": "int",
+                "default": 10,
+                "condition": {"show_advanced": true}
               }
             }
           },
           "docker": {
             "name": "Docker 容器",
-            "display_item": "name",
             "items": {
               "name": {
-                "description": "名称",
+                "description": "显示名称",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 NapCat"
               },
               "container": {
                 "description": "容器名",
                 "type": "string",
-                "default": ""
-              },
-              "timeout_seconds": {
-                "description": "超时（秒）",
-                "type": "int",
-                "default": 10
+                "default": "",
+                "hint": "docker ps 里显示的名称，例如 napcat。"
               },
               "enabled": {
                 "description": "启用",
                 "type": "bool",
                 "default": true
+              },
+              "show_advanced": {
+                "description": "显示高级检查选项",
+                "type": "bool",
+                "default": false
+              },
+              "timeout_seconds": {
+                "description": "超时（秒）",
+                "type": "int",
+                "default": 10,
+                "condition": {"show_advanced": true}
               }
             }
           },
           "process": {
             "name": "进程",
-            "display_item": "name",
             "items": {
               "name": {
-                "description": "名称",
+                "description": "显示名称",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 AstrBot"
               },
               "pattern": {
-                "description": "进程名/命令行关键字",
+                "description": "进程名或命令行关键字",
                 "type": "string",
-                "default": ""
+                "default": "",
+                "hint": "例如 astrbot 或 python main.py。"
               },
               "enabled": {
                 "description": "启用",
@@ -500,33 +524,79 @@
             }
           },
           "systemd": {
-            "name": "systemd 服务",
-            "display_item": "name",
+            "name": "系统服务",
             "items": {
               "name": {
-                "description": "名称",
-                "type": "string",
-                "default": ""
-              },
-              "unit": {
-                "description": "unit 名称",
+                "description": "显示名称",
                 "type": "string",
                 "default": "",
-                "hint": "例如 astrbot.service、nginx.service。"
+                "hint": "例如 Nginx"
               },
-              "timeout_seconds": {
-                "description": "超时（秒）",
-                "type": "int",
-                "default": 10
+              "unit": {
+                "description": "服务名",
+                "type": "string",
+                "default": "",
+                "hint": "例如 nginx.service。"
               },
               "enabled": {
                 "description": "启用",
                 "type": "bool",
                 "default": true
+              },
+              "show_advanced": {
+                "description": "显示高级检查选项",
+                "type": "bool",
+                "default": false
+              },
+              "timeout_seconds": {
+                "description": "超时（秒）",
+                "type": "int",
+                "default": 10,
+                "condition": {"show_advanced": true}
               }
             }
           }
         }
+      },
+      "show_advanced": {
+        "description": "显示高级监测选项",
+        "type": "bool",
+        "default": false,
+        "hint": "轮询间隔、连续失败次数、冷却等；通常不需要改。"
+      },
+      "interval_seconds": {
+        "description": "轮询间隔（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {"min": 15, "max": 600, "step": 5},
+        "condition": {"show_advanced": true}
+      },
+      "fail_threshold": {
+        "description": "连续失败几次后告警",
+        "type": "int",
+        "default": 2,
+        "slider": {"min": 1, "max": 10, "step": 1},
+        "condition": {"show_advanced": true},
+        "hint": "次数越多越不容易误报，但告警也更慢。"
+      },
+      "cooldown_seconds": {
+        "description": "同一目标告警冷却（秒）",
+        "type": "int",
+        "default": 1800,
+        "condition": {"show_advanced": true}
+      },
+      "recover_notify": {
+        "description": "恢复时发送通知",
+        "type": "bool",
+        "default": true,
+        "condition": {"show_advanced": true}
+      },
+      "max_response_bytes": {
+        "description": "HTTP 探测最大读取字节数",
+        "type": "int",
+        "default": 262144,
+        "condition": {"show_advanced": true},
+        "hint": "只在配置了“响应中必须包含的文字”时生效，避免误读大文件。"
       }
     }
   }

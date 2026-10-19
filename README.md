@@ -1,277 +1,295 @@
-# 系统状态卡片（astrbot_plugin_statuscard）
+# 系统状态卡片
 
-以华丽的图片卡片展示 AstrBot 所在设备的运行状态，并支持主动告警推送。
+把服务器的 CPU、内存、磁盘、网络、进程等信息，做成一张好看的状态图发到 QQ 群；需要时还能在服务掉线、资源过高或每天固定时间主动通知你。
 
-## 功能
+> **默认就能用。** 安装并重载插件后，由管理员发送 `状态卡` 即可出图；头像默认用 QQ 头像，背景默认用内置背景，不需要先配置任何东西。
+
+## 功能特性
 
 - **状态卡**：头像、Bot 昵称、AstrBot / NapCat 版本、运行时长、好友/群聊/群员/收发统计
-- **概览卡**：系统、主机名、服务器运行时长、插件数
-- **资源**：CPU / RAM / SWAP 三环形
-- **磁盘**：挂载点进度条 + 磁盘 IO
-- **网络**：上行/下行 SVG 折线图、实时速率、累计流量、本月流量
-- **网站测试**：可配置目标，显示状态码与延迟
-- **进程**：状态统计 + TOP 进程表（Name / Pid / CPU / MEM）
-- **系统信息**：OS、Kernel、Boot、Python、Packages、Shell、CPU、GPU、Memory、Network、Arch、Disk、Platform
+- **资源概览**：CPU / 内存 / SWAP 三个环形图、系统与主机信息、磁盘占用
+- **网络与磁盘**：实时上下行速度、本月流量、网络折线图、磁盘读写速度
+- **网站测试**：在卡片上显示指定网站的访问状态和延迟（默认只测百度）
+- **进程信息**：进程状态统计 + CPU 占用最高的进程表
 - **主动告警**：资源阈值、Bot 掉线/恢复、每日状态摘要、Komari Webhook 转发
-- **服务监测**：类似 Uptime Kuma，支持 HTTP、TCP、Docker 容器、进程、systemd 服务，异常/恢复推送到 QQ 群
+- **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
 
 ## 平台支持
 
-本插件面向 **QQ / OneBot（aiocqhttp，NapCat）**。
+本插件面向 **QQ / OneBot（aiocqhttp，推荐 NapCat）**。
 
-好友数、群聊数、群员数、Bot 头像、NapCat 版本等数据都依赖 OneBot API；Telegram、Discord、飞书、钉钉、企业微信等平台没有做适配和验证，因此已从支持列表中移除。命令在其他平台上可能仍能被触发，但状态卡相关数据会缺失，不作为受支持平台。
+好友数、群聊数、群员数、Bot 头像、NapCat 版本等数据都依赖 OneBot 接口；Telegram、Discord、飞书、WebChat 等平台没有适配，状态卡里的相关数据会显示 `--`，这是预期行为。
 
-## 安装 / 快速开始
+## 安装
 
 ### 环境要求
 
-- AstrBot `>=4.26.7,<5`（已在 4.29.0 上验证）
+- AstrBot `>=4.26.7,<5`（已在 4.29.0 验证）
 - Python 3.10+
 - 一个可用的 QQ / OneBot 连接（推荐 NapCat）
 - 能访问 AstrBot 配置的 T2I 渲染服务（默认远程）
 
 ### 安装步骤
 
-1. 将 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下，或通过插件市场安装。
+1. 把 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下，或在插件市场安装。
 2. 安装依赖：`pip install -r requirements.txt`。部分 AstrBot 版本会自动处理插件依赖。
-3. 重启 AstrBot，或在 WebUI 中重载插件。
-4. 打开 WebUI 插件配置，至少确认：
-   - `display.website_targets`（默认只测 Baidu）
-   - `alerts.targets`（告警/每日摘要/监测的推送目标，纯群号或完整 UMO）
-   - 可选：在 `avatar.avatar_upload_files` / `background.bg_upload_files` 中直接上传头像和背景图片
-5. 由 AstrBot 管理员私聊发 `状态卡`，或在群聊发 `@bot 状态卡`。首次会先收到一条“生成中/隐私提示”，随后收到图片。非管理员触发会被权限拦截。
+3. 重启 AstrBot，或在 WebUI 的插件管理页重载插件。
+4. 确认 AstrBot 的 T2I 渲染服务可用（默认即可）。
+5. 由 AstrBot 管理员在私聊发 `状态卡`，或在群里发 `@bot 状态卡`。
 
-> 当前仓库为私有仓库；如果通过仓库地址安装失败，需要让仓库成员授权，或手动打包插件目录。
+> 所有命令都仅 AstrBot 管理员可用。普通群友触发不会执行，也不会出图。
 
-### 第一次使用检查
+## 快速开始
 
-- 能收到“状态卡生成中”提示，说明命令链路正常；
-- 能收到图片，说明采集 + T2I 都正常；
-- 好友/群/群员显示 `--`，通常是 OneBot 未连接或查询超时；
-- 出图很慢，通常是 T2I 服务排队，不是采集慢。
+第一次使用只需要记住三件事：
 
-## 权限与隐私
-
-- **所有命令仅 AstrBot 管理员可触发**：`状态卡`、`状态卡告警测试`、`状态卡告警状态`、`状态卡监测测试`、`状态卡监测状态` 都需要管理员权限；非管理员发送不会执行命令。
-- `display.access`：在管理员范围内进一步收紧，默认 `admin`；`all` 表示所有管理员，`allowlist` 表示管理员 + 白名单（不能放行非管理员）。
-- `display.allowlist`：可填群号、用户号或完整 UMO；仅 `allowlist` 模式生效。
-- `display.redact`：可选 `hostname`、`process`、`network`、`qq_stats`，用于隐藏主机名、进程名、网络数据、好友/群/收发统计。
-- `display.privacy_notice`：默认开启；每个会话首次出图前提示状态图会发送到 T2I 服务。
-- 状态图 HTML 会发送到 AstrBot 配置的 T2I 服务（默认 `https://t2i.soulter.top/text2img`），其中包含主机名、进程名、磁盘、网络、头像/昵称等；用户上传的自定义背景/头像也会被上传。
-- 如果不想把这些数据发往默认公共服务，可以设置自定义 `t2i_endpoint`，或把 `t2i_strategy` 改为本地渲染；服务器内存紧张时请先确认本地渲染依赖和资源占用。
-- 插件还会访问 QQ 头像地址 `q1.qlogo.cn`，以及 `display.website_targets` 中配置的网站；这些请求不包含状态图的完整内容。
-- `bg_lolicon_r18_type` 不要在有群友的群里开启；公开群建议保持 `0`。
+1. **直接发 `状态卡`**：默认配置就能出图。
+2. **想换头像/背景**：进插件配置页，把“头像来源”或“背景来源”改成“自定义上传”，上传图片后保存。
+3. **想收告警**：在“主动告警”里打开开关，填一个 QQ 群号；需要服务监测时再到“服务可用性监测”里添加目标。
 
 ## 命令
 
 | 命令 | 说明 |
 |---|---|
 | `状态卡` / `/状态卡` / `状态卡片` / `sysstatus` / `系统状态` | 生成并发送状态图（仅管理员） |
-| `状态卡告警测试`（管理员） | 向当前会话发送一条测试告警 |
-| `状态卡告警状态`（管理员） | 查看告警配置与运行状态 |
-| `状态卡监测状态`（管理员） | 查看服务监测目标与最近状态 |
-| `状态卡监测测试`（管理员） | 立即执行一轮服务监测并返回结果（不发送告警） |
+| `状态卡告警测试` | 向当前会话发送一条测试告警（仅管理员） |
+| `状态卡告警状态` | 查看告警配置与运行状态（仅管理员） |
+| `状态卡监测状态` | 查看服务监测目标与最近状态（仅管理员） |
+| `状态卡监测测试` | 立即执行一轮服务监测并返回结果（仅管理员） |
 
-### 关于唤醒前缀
+### 触发方式
 
-AstrBot 的命令触发方式受 `wake_prefix` 影响。常见的 `wake_prefix` 是 `["/"]`；如果你的配置是 `["*"]`、唤醒词或其他值，触发方式会不同：
+- 私聊：直接发 `状态卡` 或 `/状态卡`
+- 群聊：`@bot 状态卡` 或 `@bot /状态卡`
+- 插件额外注册了 `/状态卡` 别名，不需要修改 AstrBot 的全局 `wake_prefix`
 
-- 私聊：通常直接发 `状态卡` 或 `/状态卡` 都可以；
-- 群聊：通常需要 `@bot 状态卡` 或 `@bot /状态卡`；
-- 插件额外注册了带斜杠的别名 `/状态卡`，不需要修改全局 `wake_prefix`。
+## 配置页导览
 
-## 数据口径
+配置页只有五个分组，默认只显示最常用的项目；带“高级”字样的开关打开后，才会出现更多选项。
 
-- **发**：读取 AstrBot 数据库 `platform_stats` 的累计值（AstrBot 只在发送路径累加该表）。
-- **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON（只覆盖该插件跟踪的群），并在图上标注口径。
-- **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数。
-- **月流量/网络折线**：插件后台每 60 秒采样一次 `psutil.net_io_counters`，状态保存在 `data/plugin_data/astrbot_plugin_statuscard/state.json`，重启不丢。
-- **网络折线**：最近 60 个采样点（约 1 小时），纯 SVG 绘制，不依赖 JS。
+### 头像
 
-## 配置重点
+- **头像来源**
+  - `默认（QQ 头像）`：自动使用 Bot 的 QQ 头像
+  - `自定义上传`：显示上传按钮，上传一张图片即可
+- **上传头像图片**（仅自定义上传时显示）：支持 png / jpg / webp / gif，单张不超过 10 MB，取列表第一张
+- **状态图显示的 Bot 名称**：留空自动读取 QQ 昵称
 
-配置文件由 AstrBot 在首次加载时生成：`data/config/astrbot_plugin_statuscard_config.json`。
+### 背景
+
+- **背景来源**
+  - `默认（内置背景）`：使用插件自带背景
+  - `自定义上传`：显示上传按钮，上传一张图片即可
+- **上传背景图片**（仅自定义上传时显示）：支持 png / jpg / webp / gif，单张不超过 10 MB，取列表第一张
+- 聊天中随命令一起发送的图片仍然优先于这里设置的背景
 
 ### 状态卡显示
 
-- `display.website_targets`：网站测试目标，模板项支持 `name`、`url`、`timeout_seconds`（默认 3 秒）；默认只测 Baidu。
-- `display.website_cache_seconds`：网站测试缓存，默认 60 秒；0 表示每次重新请求。
-- `display.cooldown_seconds`：同一会话的状态卡冷却，默认 10 秒；0 表示关闭。同一会话已有一张卡在生成时，后续请求会直接提示“正在生成”，不会重复占用 T2I。
-- `display.process_top_n`：进程表显示条数，默认 8；表按 CPU 降序，CPU 为采样区间平均，多核可超过 100%。
-- `display.access` / `display.allowlist`：管理员内部的额外访问控制；所有命令本身已强制仅管理员，默认 `admin`。
-- `display.redact`：脱敏项，可选 `hostname`、`process`、`network`、`qq_stats`。
-- `display.privacy_notice`：每个会话首次出图前的隐私提示，默认开启。
-- `display.progress_notice`：出图前的“生成中”提示，默认开启。
-- `display.render_quality` / `display.render_timeout`：T2I 清晰度（`normal`/`high`/`ultra`）与超时（默认 180 秒）。
+- **输出图片宽度（像素）**：1170–2880，拖动滑块或直接输入数字。数值越大越清晰、文件越大、出图越慢；高度会随内容自动扩展。默认 1170，与旧版高清效果相当
+- **进程表显示条数**：卡片上展示 CPU 占用最高的前几个进程
+- **出图前发送“生成中”提示**：建议开启
+- **显示高级显示选项**：打开后可配置冷却、网站测试、磁盘路径、时区、脱敏、隐私提示、渲染超时等
 
-### 背景 / 头像
+### 主动告警
 
-- `avatar.avatar_upload_files`：在 WebUI 插件配置页直接上传头像图片，取列表第一张生效；优先级高于本地路径、头像 URL 和 QQ 头像。
-- `background.bg_upload_files`：在 WebUI 插件配置页直接上传背景图片，取列表第一张生效。优先级为：聊天中随命令发送的图片 > 上传的背景 > `bg_provider`。
-- 上传文件保存在 `data/plugin_data/astrbot_plugin_statuscard/files/...`，单张上限 10 MB；删除时可在上传对话框中操作。
-- `background.bg_provider` 默认 `none`（内置背景），可选 `local`、`loli`、`lolicon`。
-- `avatar.avatar_text` 留空时自动读取 OneBot 登录昵称；头像默认使用 QQ 头像。
+- **启用资源与掉线告警**：默认关闭
+- **推送目标**：填 QQ 群号即可，例如 `123456789`；也支持 `default:GroupMessage:123456789`
+- **每日状态摘要**：独立开关，可设置每天发送时间和是否附图
+- **显示高级告警选项**：打开后可配置 CPU/内存/SWAP/磁盘阈值、每核负载、采样间隔、连续次数、冷却、掉线通知、Komari Webhook
 
-### 主动告警（默认关闭）
+> 每日摘要和服务监测默认复用“推送目标”，通常只需要在这里填一次。
 
-```json
-"alerts": {
-  "enabled": false,
-  "targets": [],
-  "interval_seconds": 60,
-  "sustain_samples": 3,
-  "cooldown_seconds": 1800,
-  "cpu_threshold": 85,
-  "mem_threshold": 90,
-  "swap_threshold": 90,
-  "disk_threshold": 85,
-  "load_per_core_threshold": 2.0,
-  "recover_notify": true,
-  "offline_notify": true,
-  "daily_summary": {"enabled": false, "time": "09:00", "with_image": true},
-  "komari_webhook": {
-    "enabled": false,
-    "host": "127.0.0.1",
-    "port": 9968,
-    "path": "/webhook",
-    "token": ""
-  }
-}
-```
+### 服务可用性监测
 
-- `targets` 支持完整 UMO（`platform_id:GroupMessage:群号`）或纯群号；留空时不会主动发送。
-- 资源告警需要连续 `sustain_samples` 次超过阈值才会发送；恢复后发送一次“已恢复”。
-- 同一规则在 `cooldown_seconds` 内不会重复发送。
-- 掉线告警依赖 OneBot `get_status`；如果 Bot 已离线，告警会排队到恢复后补发。
-- 每日摘要由 `alerts.daily_summary.enabled` 独立控制，**不需要**打开 `alerts.enabled`；发送目标复用 `alerts.targets`。
-- Komari Webhook 可独立于资源告警开启；默认只监听 `127.0.0.1`，避免暴露公网。
-- 修改 `alerts.enabled`、`daily_summary.enabled` 或 `komari_webhook.enabled` 后，建议重启 AstrBot 或重载本插件；从关闭改为开启每日摘要时必须重载，任务才会创建。
+- **启用服务监测**：默认关闭
+- **监测推送目标**：留空自动使用上面的告警推送目标
+- **监测目标列表**：点“添加条目”，按类型填写
+  - 网站 / 接口：名称 + 网址
+  - 端口：名称 + 主机 + 端口
+  - Docker 容器：名称 + 容器名
+  - 系统服务：名称 + 服务名（如 `nginx.service`）
+  - 进程：名称 + 进程名或命令行关键字
+- **显示高级监测选项**：轮询间隔、连续失败次数、冷却、恢复通知、HTTP 最大读取字节数
 
-### 服务监测（类似 Uptime Kuma）
+## 常见场景
 
-```json
-"monitors": {
-  "enabled": true,
-  "interval_seconds": 60,
-  "fail_threshold": 2,
-  "cooldown_seconds": 1800,
-  "recover_notify": true,
-  "targets": [],
-  "items": [
-    {"__template_key": "docker", "name": "NapCat", "container": "napcat", "timeout_seconds": 10, "enabled": true},
-    {"__template_key": "systemd", "name": "Nginx", "unit": "nginx.service", "timeout_seconds": 10, "enabled": true},
-    {"__template_key": "http", "name": "Uptime Kuma", "url": "http://127.0.0.1:3002", "expected_status": 0, "timeout_seconds": 5, "enabled": true},
-    {"__template_key": "tcp", "name": "GsCore", "host": "127.0.0.1", "port": 8765, "timeout_seconds": 5, "enabled": true}
-  ]
-}
-```
+### 换头像
 
-- `items` 是 `template_list`，每一项必须带 `__template_key`，可取 `http` / `tcp` / `docker` / `process` / `systemd`。
-- `targets` 留空时复用 `alerts.targets`，即推送到同一个 QQ 群。
-- 连续 `fail_threshold` 次失败才告警；恢复后发送一次“服务恢复”。
-- HTTP 的 `expected_status` 为 `0` 时，任意 2xx/3xx 都算正常。
-- 配置了 `keyword` 时最多读取 `monitors.max_response_bytes`（默认 262144 字节），避免误配大文件占满内存。
-- Docker 检查需要运行 AstrBot 的系统用户有 Docker 权限；systemd 检查使用 `systemctl is-active`。
-- AstrBot 自身无法监测“自己进程被杀”，因为进程不在时监测任务也不会运行；这种情况建议用外部 Uptime Kuma 或 Komari 监测 AstrBot。
+1. 打开插件配置页 → “头像”
+2. 头像来源选择“自定义上传”
+3. 上传一张图片
+4. 保存并重载插件
+5. 发一张状态卡确认
 
-### Komari Webhook 配置示例
+### 换背景
 
-Komari 后台 → 通知渠道 → Webhook：
+1. 打开插件配置页 → “背景”
+2. 背景来源选择“自定义上传”
+3. 上传一张图片
+4. 保存并重载插件
 
-- URL：`http://127.0.0.1:9968/webhook`
-- Method：`POST`
-- Content-Type：`application/json`
-- Headers：若配置了 token，填 `{"Authorization":"Bearer <token>"}`
-- Body：`{"title":"{{title}}","message":"{{message}}"}`
+### 开每日摘要
 
-## 运行约束
+1. “主动告警” → “推送目标”填群号
+2. “每日状态摘要” → 打开“启用每日摘要”
+3. 设置发送时间，例如 `20:00`
+4. 保存后重载插件，日志会显示下一次发送时间
 
-- 插件内**不启动浏览器**；HTML 渲染交给 AstrBot 配置的 T2I 服务。默认使用远程 `https://t2i.soulter.top/text2img`。
-- 后台采样只做 psutil 数字计算和 JSON 读写，频率 60 秒。
-- 告警默认关闭，首次部署不会主动发送任何消息。
+### 开资源/掉线告警
 
-## 常见问题 / 排错
+1. “主动告警” → 打开“启用资源与掉线告警”
+2. 填“推送目标”
+3. 需要改阈值时，打开“显示高级告警选项”
+4. 用管理员命令 `状态卡告警测试` 验证推送链路
+
+### 加一个网站监测
+
+1. “服务可用性监测” → 打开“启用服务监测”
+2. 确认“推送目标”（留空会复用告警目标）
+3. “监测目标列表” → 添加条目 → 选择“网站 / 接口”
+4. 填名称和网址，例如 `博客`、`https://example.com`
+5. 保存后用 `状态卡监测测试` 验证
+
+### 加一个 Docker 容器监测
+
+1. 添加条目 → 选择“Docker 容器”
+2. 名称填 `NapCat`，容器名填 `napcat`
+3. 保存后测试。运行 AstrBot 的系统用户需要有 Docker 权限
+
+### 加一个系统服务监测
+
+1. 添加条目 → 选择“系统服务”
+2. 名称填 `Nginx`，服务名填 `nginx.service`
+3. 保存后测试
+
+### 接入 Komari Webhook
+
+1. 打开“主动告警” → “显示高级告警选项”
+2. 展开“Komari Webhook”，打开“启用 Webhook 接收”
+3. 默认监听 `127.0.0.1:9968/webhook`
+4. 在 Komari 后台添加 Webhook，Body 用 `{"title":"{{title}}","message":"{{message}}"}`
+5. 如果设置了 Token，在请求头加 `Authorization: Bearer <token>`
+
+## 权限与隐私
+
+- 所有命令都需要 AstrBot 管理员权限；普通用户无法触发状态卡或管理命令
+- 状态图会发送到 AstrBot 配置的 T2I 渲染服务（默认 `https://t2i.soulter.top/text2img`），其中包含主机名、进程名、磁盘、网络、头像/昵称等
+- 上传的头像/背景只保存在本机 `data/plugin_data/astrbot_plugin_statuscard/files/...`，不会上传到插件作者的服务器
+- 插件会访问 QQ 头像地址 `q1.qlogo.cn`，以及“网站测试目标”中配置的网站
+- 如果不想暴露主机名、进程名、网络或 QQ 统计，打开“显示高级显示选项”，在“状态卡脱敏项”中勾选对应项目
+- 公开群使用前，建议至少隐藏主机名和进程信息
+
+## 数据口径
+
+- **发**：读取 AstrBot 数据库 `platform_stats` 的累计值。AstrBot 只在发送路径累加该表，因此是真实的“发”
+- **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON，只覆盖该插件跟踪的群，图上会标注口径
+- **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数
+- **月流量/网络折线**：插件每 60 秒采样 `psutil.net_io_counters`，从插件首次运行开始累计，状态保存在 `state.json`，重启不丢
+- **网络折线**：最近 180 个采样点（约 3 小时），纯 SVG 绘制，不依赖 JS
+
+## 高级配置
+
+只有需要排错或精细调整时才需要看这部分。
+
+| 配置项 | 说明 |
+|---|---|
+| `display.render_width` | 输出图片宽度，1170–2880 像素；内部按 T2I 的 1.8 倍高清倍率换算 |
+| `display.render_timeout` | 渲染超时，默认 180 秒；超时后回退为文字摘要 |
+| `display.cooldown_seconds` | 同一会话冷却，默认 10 秒；0 表示不限制 |
+| `display.website_targets` | 网站测试目标；默认只测百度，可增删 |
+| `display.website_cache_seconds` | 网站测试缓存，默认 60 秒；0 表示每次重新请求 |
+| `display.disk_paths` | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
+| `display.timezone` | 时区，默认 `Asia/Shanghai` |
+| `display.redact` | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
+| `alerts.cpu_threshold` 等 | 资源阈值；打开“显示高级告警选项”后可调 |
+| `alerts.interval_seconds` | 告警采样间隔，默认 60 秒 |
+| `alerts.sustain_samples` | 连续超过阈值几次才告警，默认 3 次 |
+| `monitors.interval_seconds` | 服务监测轮询间隔，默认 60 秒 |
+| `monitors.fail_threshold` | 连续失败几次后告警，默认 2 次 |
+| `monitors.max_response_bytes` | HTTP 关键字检查最大读取字节数，默认 262144 |
+
+### 配置文件位置
+
+- 插件配置：`data/config/astrbot_plugin_statuscard_config.json`
+- 运行状态：`data/plugin_data/astrbot_plugin_statuscard/state.json`
+- 上传图片：`data/plugin_data/astrbot_plugin_statuscard/files/...`
+
+修改配置后，保存时 AstrBot 会自动热重载插件；如果修改后没有生效，可以手动重载插件或重启 AstrBot。
+
+## 常见问题
+
+### 不配置能用吗？
+
+能。默认会使用 QQ 头像、内置背景，网站测试只测百度，告警和服务监测默认关闭。
+
+### 上传头像/背景后没有生效
+
+- 确认“头像来源/背景来源”已经选择“自定义上传”
+- 确认已经保存配置并重载插件
+- 上传图片会取列表第一张；单张不能超过 10 MB
+- 支持 png / jpg / webp / gif
+- 如果来源选了“自定义上传”但没有上传文件，会回退 QQ 头像/内置背景，并在日志中提示
+
+### 出图很慢
+
+主要耗时在远程 T2I，不是采集。可以把“输出图片宽度”调小，或保留“出图前发送‘生成中’提示”。采集本身通常只需要 1 秒左右。
 
 ### 好友/群/群员显示 `--`
 
-通常是 NapCat/OneBot 未连接，或 `get_friend_list`/`get_group_list` 超时。插件会每 30 秒重试失败字段；检查：
+通常是 NapCat/OneBot 未连接，或 `get_friend_list` / `get_group_list` 超时。插件会在 30 秒后重试失败字段。检查：
 
 ```bash
 systemctl status napcat
 journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 ```
 
-### 出图很慢
-
-状态图主要耗时在远程 T2I。可以在配置里把 `display.render_quality` 从 `ultra` 降到 `high` 或 `normal`，并保留 `display.progress_notice=true`。采集本身通常只需 1 秒左右。
-
 ### 每日摘要没有发
 
 确认：
 
-- `alerts.daily_summary.enabled=true`
-- `alerts.daily_summary.time` 是 `HH:MM`
-- `display.timezone` 是合法时区
-- `alerts.targets` 不为空
+- “每日状态摘要”已启用
+- 发送时间是 `HH:MM`，例如 `20:00`
+- “推送目标”不为空
+- 时区正确（默认 `Asia/Shanghai`）
 - 日志：`journalctl -u astrbot --since "10 minutes ago" | grep 每日摘要`
 
 ### 告警/监测没有收到
 
-- 阈值告警看 `alerts.enabled`；
-- 服务监测看 `monitors.enabled` 和 `monitors.items`；
-- 目标看 `alerts.targets` / `monitors.targets`，纯群号会按 `alerts.platform_id` 转换；
-- 管理员可发 `状态卡告警测试`、`状态卡监测测试` 验证链路。
+- 资源告警看“启用资源与掉线告警”
+- 服务监测看“启用服务监测”和“监测目标列表”
+- 推送目标可以填纯群号，也可以填完整 UMO
+- 管理员可以用 `状态卡告警测试`、`状态卡监测测试` 验证链路
+- 服务监测需要连续失败达到设定次数才会告警，短暂抖动不会报
 
 ### 掉线/恢复告警为什么没收到
 
-- 掉线检测依赖同一个 QQ/OneBot 通道。如果 AstrBot、NapCat 或 QQ 连接整体断开，告警本身也发不出去。
-- 插件会在连接恢复后补发“离线 + 恢复”合并通知；如果 AstrBot 进程被重启/杀掉，插件不在运行，无法自己告警自己，请用外部 Komari/Uptime Kuma 监测 AstrBot。
-- 连续 `alerts.sustain_samples` 次检测失败才触发（默认 3 次，约 3 分钟；服务器当前设为 2 次，约 2 分钟），更短的抖动不会告警。
-- 如果只是短暂重启 NapCat，可能还没达到连续失败次数；可以在恢复后查看 `状态卡告警状态` 里的 `offline` 状态和日志 `journalctl -u astrbot | grep 离线`。
+- 掉线检测依赖同一个 QQ/OneBot 通道；AstrBot、NapCat 或 QQ 整体断开时，告警本身也发不出去
+- 插件会在连接恢复后补发“离线 + 恢复”合并通知
+- AstrBot 进程被重启或杀掉时插件不在运行，无法自己告警自己；这种情况建议用外部 Komari / Uptime Kuma 监测 AstrBot
+
+### Docker/系统服务监测失败
+
+- Docker 检查需要运行 AstrBot 的系统用户有 Docker 权限
+- 系统服务使用 `systemctl is-active` 检查，服务名要带 `.service`，例如 `nginx.service`
+- 端口监测填本机服务时，主机用 `127.0.0.1`
 
 ### WebChat/其他平台显示 `--`
 
-本插件只支持 QQ/OneBot（aiocqhttp）。其他平台可以触发命令，但好友/群/群员/昵称等 OneBot 数据不可用，这是预期行为。
+本插件只支持 QQ / OneBot（aiocqhttp）。其他平台可以触发命令，但好友/群/群员/昵称等 OneBot 数据不可用，这是预期行为。
 
-### 上传头像/背景后没有生效
-
-- 确认在 WebUI 配置页保存后已重载插件；
-- `avatar.avatar_upload_files` / `background.bg_upload_files` 取列表第一张，列表为空时会回退到原有逻辑；
-- 上传文件位于 `data/plugin_data/astrbot_plugin_statuscard/files/...`，单张上限 10 MB；
-- 头像优先级：上传头像 > 本地路径 > 头像 URL > QQ 头像；背景优先级：聊天中随命令发送的图片 > 上传背景 > `bg_provider`。
-
-### 如何填写推送目标
-
-完整 UMO 形如 `default:GroupMessage:群号`；也可以直接填纯群号。`platform_id` 是 AstrBot 平台实例 ID，默认通常是 `default`。填错时告警会静默失败，建议先用管理员测试命令验证。
-
-### 如何限制谁能看状态卡
-
-- `display.access=admin`：仅管理员；
-- `display.access=allowlist` + `display.allowlist=[群号/用户号/UMO]`：管理员 + 白名单；
-- `display.redact`：隐藏主机名、进程名、网络、QQ 统计等敏感项。
-
-### 卸载和数据清理
+### 如何卸载和数据清理
 
 删除插件目录、`data/config/astrbot_plugin_statuscard_config.json` 和 `data/plugin_data/astrbot_plugin_statuscard/` 即可。卸载前建议先备份 `state.json`。
 
-## 许可证与署名
+## 更新日志
 
-本项目基于 [astrbot_plugin_picstatus](https://github.com/exynos967/astrbot_plugin_picstatus)（作者：薄暝 / exynos967）二次开发。上游项目采用 AGPL-3.0 许可证。
+见 [CHANGELOG.md](CHANGELOG.md)。
 
-本项目的修改与新增（状态卡布局、数据采集扩展、告警引擎、Komari Webhook 等）由 烬辞 完成，同样以 **AGPL-3.0** 发布。
+## 关于
 
-详见 [LICENSE](LICENSE) 与 [ATTRIBUTION.md](ATTRIBUTION.md)。再分发时请保留上游署名与完整源代码。
+- 作者：烬辞
+- 仓库：<https://github.com/SX0YYYY/astrbot_plugin_statuscard>（私有）
+- 许可证：AGPL-3.0
+- 本项目基于 [astrbot_plugin_picstatus](https://github.com/exynos967/astrbot_plugin_picstatus)（作者：薄暝 / exynos967）二次开发，上游同样使用 AGPL-3.0；详见 [ATTRIBUTION.md](ATTRIBUTION.md) 与 [LICENSE](LICENSE)
 
-## 目录
-
-```
-main.py            插件入口、命令、渲染与发送
-collectors.py      psutil / OneBot / 数据库采集
-sampler.py         网络、磁盘 IO、接收统计采样器
-alerts.py          阈值告警、掉线恢复、每日摘要、Komari Webhook
-monitor.py         Uptime Kuma 式服务监测（HTTP/TCP/Docker/进程/systemd）
-state.py           JSON 状态存储（原子写入）
-t2i_renderer.py    Jinja2 → 单文件 HTML（CSS/图片内联）
-templates/         模板与 CSS
-res/assets/        内置背景与默认头像
-```
+再分发时请保留上游署名与完整源代码。

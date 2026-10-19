@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from pathlib import Path
 from typing import Final
 
 import astrbot.api.message_components as Comp
@@ -14,12 +13,13 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .alerts import AlertEngine
-from .bg_provider import MAX_IMAGE_BYTES, BackgroundRequest, resolve_background
+from .bg_provider import MAX_IMAGE_BYTES, resolve_background
 from .collectors import (
     collect_all,
     cfg_bool,
     cfg_get,
     cfg_int,
+    effective_media_source,
     fetch_avatar_bytes,
     uploaded_file_path,
 )
@@ -42,7 +42,7 @@ ALIASES: Final[set[str]] = {
     PLUGIN_NAME,
     "烬辞",
     "以华丽的图片卡片显示系统运行状态，并支持主动告警推送",
-    "1.2.0",
+    "2.0.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -51,6 +51,7 @@ class StatusCardPlugin(Star):
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state = StateStore(self.data_dir / "state.json")
+        self._migrate_media_sources()
         interval = cfg_int(self.config, "alerts.interval_seconds", 60)
         self.sampler = Sampler(
             self.state, interval_seconds=interval, config=self.config
@@ -60,6 +61,49 @@ class StatusCardPlugin(Star):
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
+
+    def _migrate_media_sources(self) -> None:
+        """Keep images uploaded before the source switch from being ignored.
+
+        AstrBot fills new schema defaults into existing config files before the
+        plugin sees them, so a legacy config would otherwise be treated as
+        "default" even when it still has uploaded files. Run this once and
+        persist the inferred source values.
+        """
+
+        migration = self.state.setdefault("migration", {})
+        if not isinstance(migration, dict):
+            migration = {}
+            self.state.data["migration"] = migration
+        if migration.get("media_source_v2"):
+            return
+
+        changed = False
+        for section_name, source_name, upload_key in (
+            ("avatar", "avatar_source", "avatar.avatar_upload_files"),
+            ("background", "background_source", "background.bg_upload_files"),
+        ):
+            section = self.config.get(section_name) if isinstance(self.config, dict) else None
+            if not isinstance(section, dict):
+                continue
+            desired = (
+                "upload"
+                if uploaded_file_path(self.config, upload_key, self.data_dir)
+                is not None
+                else "default"
+            )
+            if section.get(source_name) != desired:
+                section[source_name] = desired
+                changed = True
+
+        migration["media_source_v2"] = True
+        self.state.save()
+        if changed and hasattr(self.config, "save_config"):
+            try:
+                self.config.save_config()
+                logger.info("已将旧版上传头像/背景迁移为“自定义上传”来源")
+            except Exception:
+                logger.exception("写入媒体来源迁移配置失败")
 
     async def initialize(self):
         self.sampler.start()
@@ -203,17 +247,19 @@ class StatusCardPlugin(Star):
         avatar = await fetch_avatar_bytes(
             collected["view"]["bot"], self.config, data_dir=self.data_dir
         )
+        render_width = max(
+            1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
+        )
+        # The T2I service supports three fixed scale levels. "ultra" is 1.8x,
+        # so a logical width of 650 CSS px produces a 1170 px wide image.
+        logical_width = max(650, min(1600, round(render_width / 1.8)))
         html = build_default_html(
             collected,
             background.data,
             background.mime,
             avatar_bytes=avatar,
+            render_width=logical_width,
         )
-        quality = str(
-            cfg_get(self.config, "display.render_quality", "ultra") or "ultra"
-        ).strip().lower()
-        if quality not in {"normal", "high", "ultra"}:
-            quality = "ultra"
         timeout = max(
             30,
             min(600, cfg_int(self.config, "display.render_timeout", 180)),
@@ -222,7 +268,7 @@ class StatusCardPlugin(Star):
             "type": "jpeg",
             "quality": 90,
             "full_page": True,
-            "device_scale_factor_level": quality,
+            "device_scale_factor_level": "ultra",
         }
         return await asyncio.wait_for(
             self.html_render(html, {}, return_url=True, options=options),
@@ -254,66 +300,34 @@ class StatusCardPlugin(Star):
                 bg_bytes = None
 
         if bg_bytes is None:
-            uploaded = uploaded_file_path(
-                self.config, "background.bg_upload_files", self.data_dir
+            source = effective_media_source(
+                self.config,
+                "background.background_source",
+                "background.bg_upload_files",
+                self.data_dir,
             )
-            if uploaded is not None:
-                try:
-                    if uploaded.stat().st_size > MAX_IMAGE_BYTES:
+            if source == "upload":
+                uploaded = uploaded_file_path(
+                    self.config, "background.bg_upload_files", self.data_dir
+                )
+                if uploaded is not None:
+                    try:
+                        if uploaded.stat().st_size > MAX_IMAGE_BYTES:
+                            logger.warning(
+                                "上传背景超过 10 MB，已跳过: %s", uploaded
+                            )
+                        else:
+                            bg_bytes = uploaded.read_bytes() or None
+                    except Exception as exc:
                         logger.warning(
-                            "上传背景超过 10 MB，已跳过: %s", uploaded
+                            "读取上传背景失败 %s: %s", uploaded, exc
                         )
-                    else:
-                        bg_bytes = uploaded.read_bytes() or None
-                except Exception as exc:
-                    logger.warning("读取上传背景失败 %s: %s", uploaded, exc)
+                if bg_bytes is None:
+                    logger.warning(
+                        "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
+                    )
 
-        provider = str(
-            cfg_get(self.config, "background.bg_provider", "none") or "none"
-        )
-        fallback = str(
-            cfg_get(self.config, "background.bg_fallback_chain", "none") or "none"
-        )
-        chain: list[str] = []
-        for item in [provider, *fallback.split(",")]:
-            name = item.strip().lower()
-            if name and name not in chain:
-                chain.append(name)
-        if not chain:
-            chain = ["none"]
-
-        local_path = cfg_get(self.config, "background.bg_local_path", "")
-        local_path = local_path.strip() if isinstance(local_path, str) else ""
-        proxy = cfg_get(self.config, "background.bg_proxy", "")
-        proxy = proxy.strip() if isinstance(proxy, str) else ""
-
-        request = BackgroundRequest(
-            provider_chain=tuple(chain),
-            local_path=Path(local_path) if local_path else None,
-            timeout=max(
-                3, min(30, cfg_int(self.config, "background.bg_req_timeout", 10))
-            ),
-            proxy=proxy or None,
-            preload_count=max(
-                1,
-                min(
-                    5,
-                    cfg_int(
-                        self.config, "background.bg_preload_count", 1
-                    ),
-                ),
-            ),
-            lolicon_r18_type=max(
-                0,
-                min(
-                    2,
-                    cfg_int(
-                        self.config, "background.bg_lolicon_r18_type", 0
-                    ),
-                ),
-            ),
-        )
-        return await resolve_background(prefer_bytes=bg_bytes, request=request)
+        return await resolve_background(prefer_bytes=bg_bytes)
 
     # ------------------------------------------------------------------
     # text / image helpers used by the alert engine

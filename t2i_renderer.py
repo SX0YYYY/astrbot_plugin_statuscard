@@ -72,9 +72,11 @@ def build_default_html(
     bg_bytes: bytes,
     bg_mime: str = "image/jpeg",
     avatar_bytes: Optional[bytes] = None,
+    render_width: int = 650,
 ) -> str:
     view = collected.setdefault("view", {})
     view["background_data_url"] = _data_url(bg_bytes, bg_mime)
+    width = max(650, min(1600, int(render_width or 650)))
 
     if avatar_bytes is None:
         try:
@@ -100,7 +102,7 @@ def build_default_html(
 
     index = index.replace(
         'content="width=device-width, initial-scale=1.0"',
-        'content="width=650, initial-scale=1.0"',
+        f'content="width={width}, initial-scale=1.0"',
     )
     for script in (
         '<script src="/js/init-global.js"></script>',
@@ -109,7 +111,8 @@ def build_default_html(
     ):
         index = index.replace(script, "")
 
-    page_fix = "html,body{margin:0;padding:0;width:650px;}"
+    css = css.replace("width: 650px", f"width: {width}px")
+    page_fix = f"html,body{{margin:0;padding:0;width:{width}px;}}"
     index = index.replace(
         '<link rel="stylesheet" href="/default/res/css/index.css" />',
         f"<style>\n{css}\n{page_fix}\n</style>",

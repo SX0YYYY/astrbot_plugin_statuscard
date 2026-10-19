@@ -1139,37 +1139,52 @@ def uploaded_file_path(config: Any, key: str, data_dir: Any) -> Path | None:
     return None
 
 
+def effective_media_source(
+    config: Any, source_key: str, upload_key: str, data_dir: Any
+) -> str:
+    """Return ``default`` or ``upload`` for an avatar/background setting.
+
+    Older configurations had no ``*_source`` field. When such a config still
+    contains uploaded files, treat it as ``upload`` so the upgrade does not
+    silently drop the user's image.
+    """
+
+    source = str(cfg_get(config, source_key, "") or "").strip().lower()
+    if source in {"default", "upload"}:
+        return source
+    return (
+        "upload"
+        if uploaded_file_path(config, upload_key, data_dir) is not None
+        else "default"
+    )
+
+
 async def fetch_avatar_bytes(
     bot: dict[str, Any], config: Any, data_dir: Any = None
 ) -> bytes | None:
-    uploaded = uploaded_file_path(
-        config, "avatar.avatar_upload_files", data_dir
+    source = effective_media_source(
+        config,
+        "avatar.avatar_source",
+        "avatar.avatar_upload_files",
+        data_dir,
     )
-    if uploaded is not None:
-        try:
-            if uploaded.stat().st_size > MAX_IMAGE_BYTES:
-                logger.warning("上传头像超过 10 MB，已跳过: %s", uploaded)
-            else:
-                data = uploaded.read_bytes()
-                if data:
-                    return data
-        except Exception as exc:
-            logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
+    if source == "upload":
+        uploaded = uploaded_file_path(
+            config, "avatar.avatar_upload_files", data_dir
+        )
+        if uploaded is not None:
+            try:
+                if uploaded.stat().st_size > MAX_IMAGE_BYTES:
+                    logger.warning("上传头像超过 10 MB，已跳过: %s", uploaded)
+                else:
+                    data = uploaded.read_bytes()
+                    if data:
+                        return data
+            except Exception as exc:
+                logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
+        logger.warning("头像来源为自定义上传，但没有可用的上传文件，回退 QQ 头像")
 
-    local_path = cfg_get(config, "avatar.avatar_local_path", "")
-    if isinstance(local_path, str) and local_path.strip():
-        try:
-            path = Path(local_path.strip())
-            if path.stat().st_size > MAX_IMAGE_BYTES:
-                logger.warning("本地头像超过 10 MB，已跳过: %s", path)
-                return None
-            return path.read_bytes()
-        except Exception as exc:
-            logger.warning("读取本地头像失败 %s: %s", local_path, exc)
-
-    url = cfg_get(config, "avatar.avatar_url", "")
-    if not (isinstance(url, str) and url.strip()):
-        url = bot.get("avatar_url") or ""
+    url = bot.get("avatar_url") or ""
     if not url:
         return None
     try:
