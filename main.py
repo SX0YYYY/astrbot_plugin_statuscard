@@ -28,6 +28,8 @@ from .collectors import (
     uploaded_file_path,
 )
 from .monitor import ServiceMonitor
+from .report import ReportCollector
+from .report_store import ReportStore
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html
@@ -41,7 +43,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.3.0",
+    "2.4.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -51,12 +53,26 @@ class StatusCardPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state = StateStore(self.data_dir / "state.json")
         self._migrate_media_sources()
+        self.report_store = ReportStore(self.data_dir / "report.db")
         interval = cfg_int(self.config, "alerts.interval_seconds", 60)
         self.sampler = Sampler(
             self.state, interval_seconds=interval, config=self.config
         )
-        self.alerts = AlertEngine(self, self.state, self.config)
-        self.monitor = ServiceMonitor(self, self.state, self.config)
+        self.report = ReportCollector(
+            self, self.state, self.config, self.report_store
+        )
+        self.alerts = AlertEngine(
+            self,
+            self.state,
+            self.config,
+            report_store=self.report_store,
+        )
+        self.monitor = ServiceMonitor(
+            self,
+            self.state,
+            self.config,
+            report_store=self.report_store,
+        )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
@@ -131,6 +147,7 @@ class StatusCardPlugin(Star):
 
     async def initialize(self):
         self.sampler.start()
+        self.report.start()
         self.alerts.start()
         self.monitor.start()
         logger.info(
@@ -141,6 +158,7 @@ class StatusCardPlugin(Star):
         )
 
     async def terminate(self):
+        await self.report.stop()
         await self.monitor.stop()
         await self.alerts.stop()
         await self.sampler.stop()
@@ -576,7 +594,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.3.0")
+        lines.append("插件: v2.4.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -652,5 +670,14 @@ class StatusCardPlugin(Star):
             )
         else:
             lines.append("最近主动推送: 暂无记录")
+        report_status = self.report.status()
+        store_stats = report_status.get("store", {})
+        lines.append(
+            "日报数据: "
+            + ("记录中" if report_status.get("enabled") else "未记录")
+            + f"；资源 {store_stats.get('resources', 0)} 条"
+            + f" / 快照 {store_stats.get('snapshots', 0)} 天"
+            + f" / 事件 {store_stats.get('events', 0)} 条"
+        )
         lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
         yield event.plain_result("\n".join(lines))

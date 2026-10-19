@@ -44,10 +44,17 @@ class AlertEngine:
     All alerts are opt-in. The plugin ships with ``alerts.enabled = false``.
     """
 
-    def __init__(self, plugin: Any, state: StateStore, config: Any):
+    def __init__(
+        self,
+        plugin: Any,
+        state: StateStore,
+        config: Any,
+        report_store: Any = None,
+    ):
         self.plugin = plugin
         self.state = state
         self.config = config
+        self.report_store = report_store
         self.interval = max(
             15, min(3600, cfg_int(config, "alerts.interval_seconds", 60))
         )
@@ -173,6 +180,25 @@ class AlertEngine:
             logger.warning("告警发送失败：%s", text.splitlines()[0] if text else "")
             return False
         return True
+
+    def _record_event(
+        self,
+        kind: str,
+        name: str,
+        detail: str,
+        status: str,
+        target: str = "",
+    ) -> None:
+        if self.report_store is None:
+            return
+        try:
+            now = time.time()
+            day = now_in_timezone(self.config).strftime("%Y-%m-%d")
+            self.report_store.add_event(
+                int(now), day, kind, name, detail, status, target
+            )
+        except Exception:
+            logger.exception("记录告警事件失败")
 
     async def send_test(self, target_umo: str | None = None) -> bool:
         targets = [target_umo] if target_umo else self.targets
@@ -315,9 +341,21 @@ class AlertEngine:
                         st["alert_since"] = now
                         st["count"] = 0
                         st["last_sent"] = now
+                        self._record_event(
+                            "resource",
+                            name,
+                            f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                            "alert",
+                        )
                     else:
                         # Retry after the cooldown instead of on every sample.
                         st["count"] = self.sustain
+                        self._record_event(
+                            "resource",
+                            name,
+                            f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                            "failed",
+                        )
         else:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
@@ -345,6 +383,13 @@ class AlertEngine:
                     if not sent:
                         st["pending_recovery"] = text
                         st["recovery_attempt"] = now
+                    else:
+                        self._record_event(
+                            "resource",
+                            name,
+                            f"持续 {format_duration(duration)}",
+                            "recovery",
+                        )
 
     async def _check_offline(self) -> None:
         client = _get_aiocqhttp_client(self.plugin.context, self.platform_id)
@@ -409,6 +454,12 @@ class AlertEngine:
                             "Bot 连接恢复通知已发送%s",
                             "（含离线补发）" if queued else "",
                         )
+                        self._record_event(
+                            "offline",
+                            "Bot 连接",
+                            f"离线时长 {format_duration(duration)}",
+                            "recovery",
+                        )
                     else:
                         st["pending_recovery"] = text
                         st["recovery_attempt"] = now
@@ -437,10 +488,16 @@ class AlertEngine:
             if ok:
                 st.pop("pending_alert_text", None)
                 logger.info("Bot 连接离线告警已发送")
+                self._record_event(
+                    "offline", "Bot 连接", "连接离线", "alert"
+                )
             else:
                 st["pending_alert_text"] = text
                 logger.warning(
                     "Bot 连接离线告警发送失败，已排队，恢复后补发"
+                )
+                self._record_event(
+                    "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
 
     @staticmethod

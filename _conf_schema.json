@@ -633,5 +633,44 @@
         "hint": "只在配置了“响应中必须包含的文字”时生效，避免误读大文件。"
       }
     }
+  },
+  "daily_report": {
+    "description": "日报数据",
+    "type": "object",
+    "hint": "记录资源趋势、QQ 每日快照和异常事件，为后续日报发送积累数据。默认开启记录，开销很小。",
+    "items": {
+      "collect": {
+        "description": "记录日报历史数据",
+        "type": "bool",
+        "default": true,
+        "hint": "每 5 分钟记录一次资源占用，每天记录一次 QQ 数量/接收累计，并记录告警和监测事件。"
+      },
+      "show_advanced": {
+        "description": "显示高级日报选项",
+        "type": "bool",
+        "default": false
+      },
+      "resource_sample_seconds": {
+        "description": "资源采样间隔（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {"min": 60, "max": 1800, "step": 60},
+        "condition": {"show_advanced": true}
+      },
+      "retention_days": {
+        "description": "资源数据保留天数",
+        "type": "int",
+        "default": 30,
+        "slider": {"min": 7, "max": 365, "step": 1},
+        "condition": {"show_advanced": true}
+      },
+      "event_retention_days": {
+        "description": "异常事件保留天数",
+        "type": "int",
+        "default": 90,
+        "slider": {"min": 30, "max": 730, "step": 30},
+        "condition": {"show_advanced": true}
+      }
+    }
   }
 }

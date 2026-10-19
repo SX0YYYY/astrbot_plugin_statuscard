@@ -63,10 +63,17 @@ class ServiceMonitor:
     The monitor never runs a browser and performs only lightweight checks.
     """
 
-    def __init__(self, plugin: Any, state: StateStore, config: Any):
+    def __init__(
+        self,
+        plugin: Any,
+        state: StateStore,
+        config: Any,
+        report_store: Any = None,
+    ):
         self.plugin = plugin
         self.state = state
         self.config = config
+        self.report_store = report_store
         self.enabled = cfg_bool(config, "monitors.enabled", False)
         self.interval = max(
             15, min(3600, cfg_int(config, "monitors.interval_seconds", 60))
@@ -154,6 +161,24 @@ class ServiceMonitor:
                     dependency,
                 )
                 self._suppress_warned.add(dependency)
+
+    def _record_event(
+        self,
+        name: str,
+        target: str,
+        detail: str,
+        status: str,
+    ) -> None:
+        if self.report_store is None:
+            return
+        try:
+            now = time.time()
+            day = now_in_timezone(self.config).strftime("%Y-%m-%d")
+            self.report_store.add_event(
+                int(now), day, "service", name, detail, status, target
+            )
+        except Exception:
+            logger.exception("记录服务监测事件失败")
 
     def _prune_state(self) -> None:
         if not self.items:
@@ -346,6 +371,9 @@ class ServiceMonitor:
                     st["pending"] = not sent
                     if sent:
                         st["last_sent"] = now
+                        self._record_event(name, target_text, detail, "alert")
+                    else:
+                        self._record_event(name, target_text, detail, "failed")
             elif alerting and pending:
                 last_attempt = float(st.get("last_attempt") or 0)
                 if now - last_attempt >= self.cooldown:
@@ -362,6 +390,9 @@ class ServiceMonitor:
                     if sent:
                         st["pending"] = False
                         st["last_sent"] = now
+                        self._record_event(
+                            name, target_text, detail, "alert"
+                        )
         else:
             st["fails"] = 0
             st["last_checked"] = now
@@ -394,6 +425,10 @@ class ServiceMonitor:
                     if not sent:
                         st["pending_recovery"] = text
                         st["recovery_attempt"] = now
+                    else:
+                        self._record_event(
+                            name, target_text, detail, "recovery"
+                        )
                 st["pending"] = False
         states[key] = st
 

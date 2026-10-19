@@ -13,6 +13,7 @@
 - **进程信息**：进程状态统计 + CPU 占用最高的进程表
 - **主动告警**：资源阈值、Bot 掉线/恢复、每日定时状态图、Komari Webhook 转发
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
+- **日报数据底座**：记录资源趋势、QQ 每日快照和异常事件，为后续日报发送积累数据（v2.4.0 只记录，不发送日报）
 
 ## 平台支持
 
@@ -114,6 +115,13 @@
 - **重复层抑制**：HTTP 监测项的高级选项可填 `suppress_when_down`，指向一个容器/服务监测项；依赖项异常时不再重复推送本 HTTP 告警
 
 > 监测项类型未知、或缺少网址/端口/容器名/服务名/进程关键字时，插件启动会在日志中给出 warning，不会静默跳过；填完可以用管理员命令 `立即检测` 验证。
+
+### 日报数据
+
+- **记录日报历史数据**：默认开启；每 5 分钟记录一次资源占用，每天记录一次好友/群/群员和接收累计，并记录告警/监测事件
+- **显示高级日报选项**：资源采样间隔、资源保留天数、异常事件保留天数
+- 本版本只积累数据，**不会发送日报**；日报图片和定时发送在后续版本提供
+- 资源、QQ 数量、接收量和异常事件从启用后开始积累；发送量和 Token 可以回填 AstrBot 历史数据库
 
 ## 常见场景
 
@@ -225,6 +233,10 @@
 | `monitors.max_response_bytes` | HTTP 关键字检查最大读取字节数，默认 262144 |
 | `monitors.items[].suppress_when_down` | HTTP 监测项依赖的另一个监测项名称；依赖项异常时抑制本项告警 |
 | `alerts.komari_webhook.require_token` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
+| `daily_report.collect` | 记录日报历史数据，默认 true |
+| `daily_report.resource_sample_seconds` | 资源采样间隔，默认 300 秒 |
+| `daily_report.retention_days` | 资源数据保留天数，默认 30 天 |
+| `daily_report.event_retention_days` | 异常事件保留天数，默认 90 天 |
 
 ### 配置文件位置
 
@@ -299,9 +311,13 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 本插件只支持 QQ / OneBot（aiocqhttp）。其他平台发送 `查看状态` 会直接收到“当前平台不受支持”，不再生成缺数据的卡片；`状态卡诊断` 仍可用于检查插件状态（仅管理员）。
 
+### 日报在哪里看
+
+当前版本（v2.4.0）只记录日报数据，不会发送日报；日报图片、趋势图和定时发送尚未实现。管理员可以发送 `状态卡诊断`，查看已积累的资源条数、快照天数和事件条数。
+
 ### 如何卸载和数据清理
 
-删除插件目录、`data/config/astrbot_plugin_statuscard_config.json` 和 `data/plugin_data/astrbot_plugin_statuscard/` 即可。卸载前建议先备份 `state.json`。
+删除插件目录、`data/config/astrbot_plugin_statuscard_config.json` 和 `data/plugin_data/astrbot_plugin_statuscard/` 即可。卸载前建议先备份 `state.json`；如需保留日报历史，同时备份 `report.db`。
 
 ## 更新日志
 

@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("astrbot_plugin_statuscard")
+
+SCHEMA_VERSION = 1
+
+
+class ReportStore:
+    """Small SQLite store for daily-report history.
+
+    The store only keeps numeric samples, daily snapshots and alert/service
+    events. It never stores message text, user IDs or session identifiers.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.available = False
+        self._lock = threading.Lock()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
+            try:
+                os.chmod(self.path, 0o600)
+            except Exception:
+                pass
+            self.available = True
+            logger.info("日报数据库已就绪: %s", self.path)
+        except Exception:
+            logger.exception("初始化日报数据库失败，历史数据将不可用")
+
+    def _connect(self) -> sqlite3.Connection:
+        con = sqlite3.connect(self.path, timeout=5)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        return con
+
+    def _init_db(self) -> None:
+        con = self._connect()
+        try:
+            con.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS resource_samples (
+                    ts         INTEGER PRIMARY KEY,
+                    cpu        REAL,
+                    ram        REAL,
+                    swap       REAL,
+                    disk       REAL,
+                    load1      REAL,
+                    net_up     REAL,
+                    net_down   REAL,
+                    disk_read  REAL,
+                    disk_write REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_resource_ts
+                    ON resource_samples(ts);
+
+                CREATE TABLE IF NOT EXISTS daily_snapshots (
+                    day         TEXT PRIMARY KEY,
+                    friends     INTEGER,
+                    groups      INTEGER,
+                    members     INTEGER,
+                    recv_total  INTEGER,
+                    complete    INTEGER NOT NULL DEFAULT 0,
+                    captured_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          INTEGER NOT NULL,
+                    day         TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    name        TEXT,
+                    target      TEXT,
+                    detail      TEXT,
+                    status      TEXT NOT NULL,
+                    resolved_ts INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_day
+                    ON events(day);
+                CREATE INDEX IF NOT EXISTS idx_events_ts
+                    ON events(ts);
+
+                CREATE TABLE IF NOT EXISTS report_runs (
+                    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day    TEXT NOT NULL,
+                    ts     INTEGER NOT NULL,
+                    ok     INTEGER NOT NULL,
+                    detail TEXT
+                );
+                PRAGMA user_version = 1;
+                """
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def _write(self, sql: str, params: tuple[Any, ...] = ()) -> bool:
+        if not self.available:
+            return False
+        con: sqlite3.Connection | None = None
+        with self._lock:
+            try:
+                con = self._connect()
+                con.execute(sql, params)
+                con.commit()
+                return True
+            except Exception:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
+                logger.exception("日报数据库写入失败")
+                return False
+            finally:
+                if con is not None:
+                    con.close()
+
+    def _query(
+        self, sql: str, params: tuple[Any, ...] = ()
+    ) -> list[tuple[Any, ...]]:
+        if not self.available:
+            return []
+        con: sqlite3.Connection | None = None
+        with self._lock:
+            try:
+                con = self._connect()
+                return list(con.execute(sql, params).fetchall())
+            except Exception:
+                logger.exception("日报数据库查询失败")
+                return []
+            finally:
+                if con is not None:
+                    con.close()
+
+    # ------------------------------------------------------------------
+    # writes
+    # ------------------------------------------------------------------
+
+    def add_resource(
+        self,
+        ts: int,
+        cpu: float | None = None,
+        ram: float | None = None,
+        swap: float | None = None,
+        disk: float | None = None,
+        load1: float | None = None,
+        net_up: float | None = None,
+        net_down: float | None = None,
+        disk_read: float | None = None,
+        disk_write: float | None = None,
+    ) -> bool:
+        return self._write(
+            """
+            INSERT OR REPLACE INTO resource_samples
+                (ts, cpu, ram, swap, disk, load1, net_up, net_down,
+                 disk_read, disk_write)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(ts),
+                cpu,
+                ram,
+                swap,
+                disk,
+                load1,
+                net_up,
+                net_down,
+                disk_read,
+                disk_write,
+            ),
+        )
+
+    def record_snapshot(
+        self,
+        day: str,
+        friends: int | None,
+        groups: int | None,
+        members: int | None,
+        recv_total: int | None,
+        complete: bool,
+        captured_at: int | None = None,
+    ) -> bool:
+        return self._write(
+            """
+            INSERT INTO daily_snapshots
+                (day, friends, groups, members, recv_total, complete, captured_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day) DO UPDATE SET
+                friends = excluded.friends,
+                groups = excluded.groups,
+                members = excluded.members,
+                recv_total = excluded.recv_total,
+                complete = excluded.complete,
+                captured_at = excluded.captured_at
+            WHERE daily_snapshots.complete = 0
+            """,
+            (
+                day,
+                friends,
+                groups,
+                members,
+                recv_total,
+                1 if complete else 0,
+                captured_at,
+            ),
+        )
+
+    def add_event(
+        self,
+        ts: int,
+        day: str,
+        kind: str,
+        name: str,
+        detail: str,
+        status: str,
+        target: str = "",
+        resolved_ts: int | None = None,
+    ) -> bool:
+        return self._write(
+            """
+            INSERT INTO events
+                (ts, day, kind, name, target, detail, status, resolved_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(ts),
+                day,
+                kind,
+                name,
+                target,
+                detail,
+                status,
+                resolved_ts,
+            ),
+        )
+
+    def add_report_run(
+        self, day: str, ts: int, ok: bool, detail: str = ""
+    ) -> bool:
+        return self._write(
+            """
+            INSERT INTO report_runs (day, ts, ok, detail)
+            VALUES (?, ?, ?, ?)
+            """,
+            (day, int(ts), 1 if ok else 0, detail[:500]),
+        )
+
+    def prune(
+        self,
+        resource_days: int = 30,
+        event_days: int = 90,
+        now: int | None = None,
+    ) -> None:
+        now = int(now if now is not None else time.time())
+        self._write(
+            "DELETE FROM resource_samples WHERE ts < ?",
+            (now - max(1, resource_days) * 86400,),
+        )
+        self._write(
+            "DELETE FROM events WHERE ts < ?",
+            (now - max(1, event_days) * 86400,),
+        )
+        self._write(
+            "DELETE FROM report_runs WHERE ts < ?",
+            (now - max(1, event_days) * 86400,),
+        )
+
+    # ------------------------------------------------------------------
+    # reads
+    # ------------------------------------------------------------------
+
+    def snapshot_complete(self, day: str) -> bool:
+        rows = self._query(
+            "SELECT complete FROM daily_snapshots WHERE day = ?", (day,)
+        )
+        return bool(rows and rows[0][0])
+
+    def get_snapshot(self, day: str) -> dict[str, Any] | None:
+        rows = self._query(
+            """
+            SELECT day, friends, groups, members, recv_total, complete, captured_at
+            FROM daily_snapshots WHERE day = ?
+            """,
+            (day,),
+        )
+        if not rows:
+            return None
+        keys = (
+            "day",
+            "friends",
+            "groups",
+            "members",
+            "recv_total",
+            "complete",
+            "captured_at",
+        )
+        return dict(zip(keys, rows[0]))
+
+    def list_snapshots(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT day, friends, groups, members, recv_total, complete, captured_at
+            FROM daily_snapshots ORDER BY day DESC LIMIT ?
+            """,
+            (max(1, min(365, limit)),),
+        )
+        keys = (
+            "day",
+            "friends",
+            "groups",
+            "members",
+            "recv_total",
+            "complete",
+            "captured_at",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def list_resources(self, since_ts: int, limit: int = 20000) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT ts, cpu, ram, swap, disk, load1, net_up, net_down,
+                   disk_read, disk_write
+            FROM resource_samples WHERE ts >= ?
+            ORDER BY ts ASC LIMIT ?
+            """,
+            (int(since_ts), max(1, min(100000, limit))),
+        )
+        keys = (
+            "ts",
+            "cpu",
+            "ram",
+            "swap",
+            "disk",
+            "load1",
+            "net_up",
+            "net_down",
+            "disk_read",
+            "disk_write",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def list_events(self, day: str, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            FROM events WHERE day = ? ORDER BY ts ASC LIMIT ?
+            """,
+            (day, max(1, min(1000, limit))),
+        )
+        keys = (
+            "id",
+            "ts",
+            "day",
+            "kind",
+            "name",
+            "target",
+            "detail",
+            "status",
+            "resolved_ts",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def count_events(self, day: str) -> dict[str, int]:
+        rows = self._query(
+            """
+            SELECT status, COUNT(*) FROM events
+            WHERE day = ? GROUP BY status
+            """,
+            (day,),
+        )
+        return {str(status): int(count) for status, count in rows}
+
+    def stats(self) -> dict[str, int]:
+        if not self.available:
+            return {"resources": 0, "snapshots": 0, "events": 0}
+        resources = self._query("SELECT COUNT(*) FROM resource_samples")
+        snapshots = self._query("SELECT COUNT(*) FROM daily_snapshots")
+        events = self._query("SELECT COUNT(*) FROM events")
+        return {
+            "resources": int(resources[0][0]) if resources else 0,
+            "snapshots": int(snapshots[0][0]) if snapshots else 0,
+            "events": int(events[0][0]) if events else 0,
+        }
