@@ -20,6 +20,7 @@ from .collectors import (
     cfg_int,
     fetch_avatar_bytes,
 )
+from .monitor import ServiceMonitor
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html
@@ -50,17 +51,21 @@ class StatusCardPlugin(Star):
         interval = cfg_int(self.config, "alerts.interval_seconds", 60)
         self.sampler = Sampler(self.state, interval_seconds=interval)
         self.alerts = AlertEngine(self, self.state, self.config)
+        self.monitor = ServiceMonitor(self, self.state, self.config)
 
     async def initialize(self):
         self.sampler.start()
         self.alerts.start()
+        self.monitor.start()
         logger.info(
-            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s)",
+            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, monitors_enabled=%s)",
             self.data_dir,
             cfg_bool(self.config, "alerts.enabled", False),
+            cfg_bool(self.config, "monitors.enabled", False),
         )
 
     async def terminate(self):
+        await self.monitor.stop()
         await self.alerts.stop()
         await self.sampler.stop()
         logger.info("StatusCard plugin terminated")
@@ -264,3 +269,32 @@ class StatusCardPlugin(Star):
             "状态卡告警配置：\n"
             + json.dumps(status, ensure_ascii=False, indent=2)
         )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("状态卡监测状态", alias={"/状态卡监测状态"})
+    async def cmd_monitor_status(self, event: AstrMessageEvent):
+        event.should_call_llm(False)
+        status = self.monitor.status()
+        yield event.plain_result(
+            "服务监测状态：\n"
+            + json.dumps(status, ensure_ascii=False, indent=2)
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("状态卡监测测试", alias={"/状态卡监测测试"})
+    async def cmd_monitor_test(self, event: AstrMessageEvent):
+        event.should_call_llm(False)
+        if not self.monitor.items:
+            yield event.plain_result(
+                "没有配置任何监测目标。请在 WebUI 的 monitors.items 中添加。"
+            )
+            return
+        results = await self.monitor.test_all()
+        lines = ["服务监测测试结果："]
+        for result in results:
+            icon = "✅" if result["ok"] else "❌"
+            lines.append(
+                f"{icon} {result['name']} [{result['kind']}] {result['target']}\n"
+                f"   {result['detail']}"
+            )
+        yield event.plain_result("\n".join(lines))

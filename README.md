@@ -13,6 +13,7 @@
 - **进程**：状态统计 + TOP 进程表（Name / Pid / CPU / MEM）
 - **系统信息**：OS、Kernel、Boot、Python、Packages、Shell、CPU、GPU、Memory、Network、Arch、Disk、Platform
 - **主动告警**：资源阈值、Bot 掉线/恢复、每日状态摘要、Komari Webhook 转发
+- **服务监测**：类似 Uptime Kuma，支持 HTTP、TCP、Docker 容器、进程、systemd 服务，异常/恢复推送到 QQ 群
 
 ## 命令
 
@@ -21,6 +22,8 @@
 | `状态卡` / `/状态卡` / `状态卡片` / `sysstatus` / `系统状态` | 生成并发送状态图 |
 | `状态卡告警测试`（管理员） | 向当前会话发送一条测试告警 |
 | `状态卡告警状态`（管理员） | 查看告警配置与运行状态 |
+| `状态卡监测状态`（管理员） | 查看服务监测目标与最近状态 |
+| `状态卡监测测试`（管理员） | 立即执行一轮服务监测并返回结果（不发送告警） |
 
 ### 关于唤醒前缀
 
@@ -82,6 +85,32 @@ AstrBot 的命令触发方式受 `wake_prefix` 影响。常见的 `wake_prefix` 
 - Komari Webhook 可独立于资源告警开启；默认只监听 `127.0.0.1`，避免暴露公网。
 - 修改 `alerts.enabled`、`daily_summary.enabled` 或 `komari_webhook.enabled` 后，需要重启 AstrBot 或重载本插件才会生效。
 
+### 服务监测（类似 Uptime Kuma）
+
+```json
+"monitors": {
+  "enabled": true,
+  "interval_seconds": 60,
+  "fail_threshold": 2,
+  "cooldown_seconds": 1800,
+  "recover_notify": true,
+  "targets": [],
+  "items": [
+    {"__template_key": "docker", "name": "NapCat", "container": "napcat", "timeout_seconds": 10, "enabled": true},
+    {"__template_key": "systemd", "name": "Nginx", "unit": "nginx.service", "timeout_seconds": 10, "enabled": true},
+    {"__template_key": "http", "name": "Uptime Kuma", "url": "http://127.0.0.1:3002", "expected_status": 0, "timeout_seconds": 5, "enabled": true},
+    {"__template_key": "tcp", "name": "GsCore", "host": "127.0.0.1", "port": 8765, "timeout_seconds": 5, "enabled": true}
+  ]
+}
+```
+
+- `items` 是 `template_list`，每一项必须带 `__template_key`，可取 `http` / `tcp` / `docker` / `process` / `systemd`。
+- `targets` 留空时复用 `alerts.targets`，即推送到同一个 QQ 群。
+- 连续 `fail_threshold` 次失败才告警；恢复后发送一次“服务恢复”。
+- HTTP 的 `expected_status` 为 `0` 时，任意 2xx/3xx 都算正常。
+- Docker 检查需要运行 AstrBot 的系统用户有 Docker 权限；systemd 检查使用 `systemctl is-active`。
+- AstrBot 自身无法监测“自己进程被杀”，因为进程不在时监测任务也不会运行；这种情况建议用外部 Uptime Kuma 或 Komari 监测 AstrBot。
+
 ### Komari Webhook 配置示例
 
 Komari 后台 → 通知渠道 → Webhook：
@@ -113,6 +142,7 @@ main.py            插件入口、命令、渲染与发送
 collectors.py      psutil / OneBot / 数据库采集
 sampler.py         网络、磁盘 IO、接收统计采样器
 alerts.py          阈值告警、掉线恢复、每日摘要、Komari Webhook
+monitor.py         Uptime Kuma 式服务监测（HTTP/TCP/Docker/进程/systemd）
 state.py           JSON 状态存储（原子写入）
 t2i_renderer.py    Jinja2 → 单文件 HTML（CSS/图片内联）
 templates/         模板与 CSS
