@@ -70,6 +70,12 @@
         "slider": {"min": 1, "max": 30, "step": 1},
         "hint": "卡片上展示 CPU 占用最高的前几个进程。"
       },
+      "compact": {
+        "description": "手机紧凑模式",
+        "type": "bool",
+        "default": false,
+        "hint": "隐藏系统信息表，进程表最多显示 5 行，并放大资源百分比，适合手机查看。"
+      },
       "progress_notice": {
         "description": "出图前发送“生成中”提示",
         "type": "bool",
@@ -429,6 +435,13 @@
                 "default": "",
                 "condition": {"show_advanced": true}
               },
+              "suppress_when_down": {
+                "description": "依赖项异常时抑制告警",
+                "type": "string",
+                "default": "",
+                "condition": {"show_advanced": true},
+                "hint": "填写另一个监测项的名称（例如 NapCat 容器）；该项异常时不再重复推送本 HTTP 告警。"
+              },
               "timeout_seconds": {
                 "description": "超时（秒）",
                 "type": "int",
@@ -575,6 +588,13 @@
         "type": "bool",
         "default": false,
         "hint": "轮询间隔、连续失败次数、冷却等；通常不需要改。"
+      },
+      "silence_until": {
+        "description": "维护静默截止时间",
+        "type": "string",
+        "default": "",
+        "condition": {"show_advanced": true},
+        "hint": "格式 YYYY-MM-DD HH:MM；到时间前只探测、不发送异常/恢复通知。留空表示不静默。"
       },
       "interval_seconds": {
         "description": "轮询间隔（秒）",

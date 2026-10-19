@@ -88,6 +88,9 @@ class ServiceMonitor:
         self.items = self._normalize_items(cfg_get(config, "monitors.items", []))
         self._task: asyncio.Task | None = None
         self._running = False
+        self._silence_warned = False
+        self._silence_active = False
+        self._suppress_warned: set[str] = set()
 
     def _normalize_items(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
@@ -129,6 +132,8 @@ class ServiceMonitor:
             logger.warning("服务监测已启用，但没有配置任何监测目标")
         self._prune_state()
         self._running = True
+        self._is_silenced()
+        self._validate_suppression()
         self._task = asyncio.create_task(self._loop())
         logger.info(
             "服务监测已启动：%d 个目标，间隔=%ss，失败阈值=%d",
@@ -136,6 +141,19 @@ class ServiceMonitor:
             self.interval,
             self.fail_threshold,
         )
+
+    def _validate_suppression(self) -> None:
+        for item in self.items:
+            dependency = str(item.get("suppress_when_down") or "").strip()
+            if not dependency:
+                continue
+            if self._dependency_state(dependency) is None:
+                logger.warning(
+                    "监测项 %r 的 suppress_when_down=%r 找不到对应监测项，抑制不会生效",
+                    item.get("name") or "",
+                    dependency,
+                )
+                self._suppress_warned.add(dependency)
 
     def _prune_state(self) -> None:
         if not self.items:
@@ -186,6 +204,82 @@ class ServiceMonitor:
         self.state.data.setdefault("monitors", {})["last_run"] = time.time()
         self.state.save()
 
+    def _silence_until(self) -> datetime | None:
+        """Parse ``monitors.silence_until`` as a wall-clock time in display.timezone."""
+
+        raw = str(
+            cfg_get(self.config, "monitors.silence_until", "") or ""
+        ).strip()
+        if not raw:
+            return None
+        parsed: datetime | None = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            if not self._silence_warned:
+                logger.warning(
+                    "monitors.silence_until 格式非法：%s（应为 YYYY-MM-DD HH:MM）",
+                    raw,
+                )
+                self._silence_warned = True
+            return None
+        return parsed.replace(tzinfo=now_in_timezone(self.config).tzinfo)
+
+    def _is_silenced(self) -> bool:
+        until = self._silence_until()
+        silenced = bool(
+            until is not None and now_in_timezone(self.config) < until
+        )
+        if silenced != self._silence_active:
+            if silenced and until is not None:
+                logger.info(
+                    "服务监测进入维护静默，截止 %s；期间只探测，不推送异常/恢复通知",
+                    until.strftime("%Y-%m-%d %H:%M"),
+                )
+            else:
+                logger.info("服务监测维护静默已结束，恢复推送")
+            self._silence_active = silenced
+        return silenced
+
+    def _dependency_state(self, name: str) -> dict[str, Any] | None:
+        for other in self.items:
+            if str(other.get("name")) == name:
+                states = self.state.get("monitors", {}).get("items", {})
+                if not isinstance(states, dict):
+                    return None
+                value = states.get(self._item_key(other))
+                return value if isinstance(value, dict) else None
+        return None
+
+    def _suppress_alert(self, item: dict[str, Any]) -> str | None:
+        """Return the dependency name when an HTTP alert should be suppressed.
+
+        ``suppress_when_down`` is intentionally a monitor item name, so the
+        user can point an HTTP check at the container/service check that must
+        be healthy first. This avoids two alarms for one outage.
+        """
+
+        dependency = str(item.get("suppress_when_down") or "").strip()
+        if not dependency:
+            return None
+        state = self._dependency_state(dependency)
+        if state is None:
+            if dependency not in self._suppress_warned:
+                logger.warning(
+                    "监测项 %r 的 suppress_when_down=%r 找不到对应监测项，抑制不会生效",
+                    item.get("name") or "",
+                    dependency,
+                )
+                self._suppress_warned.add(dependency)
+            return None
+        if state.get("alerting") or int(state.get("fails") or 0) >= self.fail_threshold:
+            return dependency
+        return None
+
     async def _check_item(self, item: dict[str, Any]) -> None:
         key = self._item_key(item)
         ok, detail, target_text = await self._probe(item)
@@ -198,6 +292,32 @@ class ServiceMonitor:
         pending = bool(st.get("pending"))
         name = str(item.get("name") or item.get("__template_key") or "服务")
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
+
+        if self._is_silenced():
+            # Keep the check history fresh but freeze alert state so the
+            # maintenance window never emits alerts or recovery messages.
+            st["last_checked"] = now
+            if ok:
+                st["last_ok"] = now
+                st["last_error"] = ""
+            else:
+                st["last_error"] = detail
+            states[key] = st
+            return
+
+        if not ok and not alerting:
+            suppressed_by = self._suppress_alert(item)
+            if suppressed_by:
+                st["fails"] = fails
+                st["last_error"] = detail
+                st["last_checked"] = now
+                states[key] = st
+                logger.info(
+                    "监测项 %s 异常，但依赖项 %s 也异常，已抑制重复告警",
+                    name,
+                    suppressed_by,
+                )
+                return
 
         if not ok:
             st.pop("pending_recovery", None)
@@ -463,6 +583,10 @@ class ServiceMonitor:
             "interval": self.interval,
             "fail_threshold": self.fail_threshold,
             "cooldown": self.cooldown,
+            "silence_until": str(
+                cfg_get(self.config, "monitors.silence_until", "") or ""
+            ),
+            "silenced": self._is_silenced(),
             "items": [
                 {
                     "name": item.get("name"),

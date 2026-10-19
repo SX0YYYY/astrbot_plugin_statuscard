@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.3.0 — 2026-10-19
+
+### 新增
+
+- **服务监测维护窗口**：`monitors.silence_until`（`YYYY-MM-DD HH:MM`）；到期前只探测、不发送异常/恢复通知，到期自动恢复推送。
+- **监测重复层抑制**：HTTP 监测项可配置 `suppress_when_down` 指向另一个监测项；依赖项异常时不再重复推送本 HTTP 告警。
+- **手机紧凑模式**：`display.compact`；隐藏系统信息表、进程表最多 5 行、放大资源百分比。
+- **状态卡诊断**：新增管理员命令 `状态卡诊断`，输出平台、OneBot 客户端、告警/监测/静默状态、最近采集与渲染耗时、最近主动推送结果和最近错误。
+- **非 QQ 平台提示**：`查看状态` 在非 aiocqhttp 平台直接提示“不支持”，不再生成缺数据的卡片。
+- **投递结果记录**：主动推送成功/失败写入 `state.json` 的 `delivery`，诊断命令可查看。
+- **首卡缓存持久化**：`pip`/`dpkg`/`lspci` 结果缓存 24 小时并写入 `state.json` 的 `sysinfo_cache`，重启后不必重新执行耗时命令。
+- **配置文件权限检查**：Linux 下启动时检查插件配置文件权限，过宽时输出 warning。
+
+### 配置
+
+- `display.compact`：默认 false。
+- `monitors.silence_until`：默认空；格式非法时输出 warning 并视为不静默。
+- HTTP 监测模板新增 `suppress_when_down`：默认空；找不到依赖项时启动 warning。
+
 ## v2.2.0 — 2026-10-19
 
 ### 优化

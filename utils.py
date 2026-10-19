@@ -31,3 +31,15 @@ def readable_python_version() -> str:
 def system_name() -> str:
     return f"{platform.system()} {platform.release()} ({platform.machine()})"
 
+
+def is_supported_platform(name: object) -> bool:
+    """Only QQ/OneBot (aiocqhttp) has the data the status card needs.
+
+    An empty name is allowed so tests and internal callers without a platform
+    context can still render a degraded card; a named non-aiocqhttp platform is
+    rejected explicitly.
+    """
+
+    text = str(name or "").strip().lower()
+    return not text or text == "aiocqhttp"
+

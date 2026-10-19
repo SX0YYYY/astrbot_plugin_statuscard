@@ -9,9 +9,12 @@ from pathlib import Path
 import pytest
 
 from astrbot_plugin_statuscard import collectors
+from astrbot_plugin_statuscard import monitor as monitor_module
 from astrbot_plugin_statuscard.alerts import AlertEngine
 from astrbot_plugin_statuscard.collectors import (
+    _load_sysinfo_cache,
     _normalize_website_targets,
+    _save_sysinfo_cache,
     build_network_chart,
     cfg_bool,
     cfg_int,
@@ -25,6 +28,7 @@ from astrbot_plugin_statuscard.t2i_renderer import (
     _percent_to_color,
     build_default_html,
 )
+from astrbot_plugin_statuscard.utils import is_supported_platform
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +147,22 @@ def test_cfg_helpers_ignore_bool_for_int() -> None:
     assert cfg_bool({"a": {"b": "off"}}, "a.b", True) is False
 
 
+def test_sysinfo_cache_roundtrip(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    _save_sysinfo_cache(store, {"ts": 123.0, "dpkg": 10, "pip": 20})
+    assert _load_sysinfo_cache(store)["dpkg"] == 10
+    assert _load_sysinfo_cache(store)["ts"] == 123.0
+    assert _load_sysinfo_cache(None) == {}
+
+
+def test_supported_platform_only_aiocqhttp() -> None:
+    assert is_supported_platform("aiocqhttp")
+    assert is_supported_platform("")
+    assert is_supported_platform(None)
+    assert not is_supported_platform("webchat")
+    assert not is_supported_platform("telegram")
+
+
 def test_collect_bot_info_runs_onebot_calls_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,13 +246,15 @@ def test_format_komari_online_icon_and_fallback() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _monitor(tmp_path: Path, items: list[dict]) -> ServiceMonitor:
+def _monitor(
+    tmp_path: Path,
+    items: list[dict],
+    monitors_extra: dict | None = None,
+) -> ServiceMonitor:
     state = StateStore(tmp_path / "state.json")
-    return ServiceMonitor(
-        plugin=None,
-        state=state,
-        config={"monitors": {"enabled": True, "items": items}},
-    )
+    monitors = {"enabled": True, "items": items}
+    monitors.update(monitors_extra or {})
+    return ServiceMonitor(plugin=None, state=state, config={"monitors": monitors})
 
 
 def test_monitor_normalizes_supported_items(tmp_path: Path) -> None:
@@ -277,6 +299,76 @@ def test_monitor_item_key_matches_target(tmp_path: Path) -> None:
     assert monitor._item_key(monitor.items[0]) == "http:站点:https://a.example"
 
 
+def test_monitor_silence_window_parsing(tmp_path: Path) -> None:
+    monitor = _monitor(tmp_path, [])
+    monitor.config["monitors"]["silence_until"] = "2099-01-01 00:00"
+    assert monitor._is_silenced() is True
+
+    monitor.config["monitors"]["silence_until"] = "2000-01-01 00:00"
+    assert monitor._is_silenced() is False
+
+    monitor.config["monitors"]["silence_until"] = "not-a-date"
+    assert monitor._silence_until() is None
+
+
+def test_monitor_silence_freezes_alert_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = {
+        "__template_key": "http",
+        "name": "站点",
+        "url": "https://a.example",
+    }
+    monitor = _monitor(
+        tmp_path,
+        [item],
+        {"silence_until": "2099-01-01 00:00"},
+    )
+
+    async def fake_probe(_item):
+        return False, "boom", "https://a.example"
+
+    monkeypatch.setattr(monitor, "_probe", fake_probe)
+    asyncio.run(monitor._check_item(monitor.items[0]))
+
+    state = monitor.state.get("monitors")["items"][monitor._item_key(item)]
+    assert state.get("last_error") == "boom"
+    assert state.get("fails", 0) == 0
+    assert not state.get("alerting")
+
+
+def test_monitor_suppresses_http_when_dependency_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker = {
+        "__template_key": "docker",
+        "name": "NapCat 容器",
+        "container": "napcat",
+    }
+    http = {
+        "__template_key": "http",
+        "name": "NapCat 端口",
+        "url": "http://127.0.0.1:1/",
+        "suppress_when_down": "NapCat 容器",
+    }
+    monitor = _monitor(tmp_path, [docker, http])
+    dep_key = monitor._item_key(docker)
+    monitor.state.data.setdefault("monitors", {}).setdefault("items", {})[dep_key] = {
+        "alerting": True
+    }
+    assert monitor._suppress_alert(monitor.items[1]) == "NapCat 容器"
+
+    async def fake_probe(_item):
+        return False, "connection refused", "http://127.0.0.1:1/"
+
+    monkeypatch.setattr(monitor, "_probe", fake_probe)
+    asyncio.run(monitor._check_item(monitor.items[1]))
+
+    state = monitor.state.get("monitors")["items"][monitor._item_key(http)]
+    assert not state.get("alerting")
+    assert state.get("fails", 0) == 0
+
+
 # ---------------------------------------------------------------------------
 # renderer helpers
 # ---------------------------------------------------------------------------
@@ -303,9 +395,13 @@ def test_br_filter_escapes_html_before_adding_breaks() -> None:
     assert "<br />next" in rendered
 
 
-def test_build_default_html_inlines_assets() -> None:
-    view = {
+def _sample_view(
+    compact: bool = False,
+    system_info: list[dict] | None = None,
+) -> dict:
+    return {
         "generated_at": "2026-10-19 00:00:00",
+        "compact": compact,
         "bot": {
             "nick": "测试",
             "self_id": "10000",
@@ -352,12 +448,16 @@ def test_build_default_html_inlines_assets() -> None:
             },
             "top": [],
         },
-        "system_info": [],
+        "system_info": system_info or [],
         "uptime": "00:00:01",
         "footer": "test",
         "background_data_url": "",
         "avatar_data_url": "",
     }
+
+
+def test_build_default_html_inlines_assets() -> None:
+    view = _sample_view()
     html = build_default_html(
         {"view": view},
         b"\xff\xd8\xff\xe0fakejpeg",
@@ -370,3 +470,19 @@ def test_build_default_html_inlines_assets() -> None:
     assert "data:image/png;base64," in html
     assert "init-global.js" not in html
     assert "width=650" in html
+
+
+def test_build_default_html_compact_hides_system_info() -> None:
+    view = _sample_view(
+        compact=True,
+        system_info=[{"label": "OS", "value": "Linux"}],
+    )
+    html = build_default_html(
+        {"view": view},
+        b"\xff\xd8\xff\xe0fakejpeg",
+        "image/jpeg",
+        render_width=650,
+    )
+    assert 'class="compact"' in html
+    assert "系统信息" not in html
+    assert "Linux" not in html

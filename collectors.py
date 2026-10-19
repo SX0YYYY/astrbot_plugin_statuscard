@@ -715,12 +715,45 @@ def _run_command(args: list[str], timeout: float = 4.0) -> str | None:
 
 
 _pkg_cache: dict[str, Any] = {"ts": 0.0, "dpkg": None, "pip": None, "gpu": None}
+_SYSINFO_CACHE_TTL = 24 * 3600
 
 
-def _package_counts() -> tuple[int | None, int | None]:
+def _load_sysinfo_cache(state: Any = None) -> dict[str, Any]:
+    if state is None or not hasattr(state, "get"):
+        return {}
+    value = state.get("sysinfo_cache", {}) or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _save_sysinfo_cache(state: Any, updates: dict[str, Any]) -> None:
+    """Update the shared cache without forcing a disk write from a worker thread.
+
+    ``collect_all`` runs the system-info block in ``asyncio.to_thread`` while
+    the sampler also saves state. Writing the whole state file from both places
+    can race on the temporary file, so this only updates the in-memory dict;
+    the next sampler save persists it.
+    """
+
+    if state is None or not hasattr(state, "setdefault"):
+        return
+    cache = state.setdefault("sysinfo_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        state.data["sysinfo_cache"] = cache
+    cache.update(updates)
+
+
+def _package_counts(
+    state: Any = None,
+) -> tuple[int | None, int | None]:
     now = time.time()
-    if now - float(_pkg_cache.get("ts") or 0) < 3600:
-        return _pkg_cache.get("dpkg"), _pkg_cache.get("pip")
+    persisted = _load_sysinfo_cache(state)
+    cache_ts = float(_pkg_cache.get("ts") or persisted.get("ts") or 0)
+    if now - cache_ts < _SYSINFO_CACHE_TTL:
+        return (
+            _pkg_cache.get("dpkg", persisted.get("dpkg")),
+            _pkg_cache.get("pip", persisted.get("pip")),
+        )
 
     dpkg: int | None = None
     pip: int | None = None
@@ -739,13 +772,16 @@ def _package_counts() -> tuple[int | None, int | None]:
     except Exception:
         pass
     _pkg_cache.update(ts=now, dpkg=dpkg, pip=pip)
+    _save_sysinfo_cache(state, {"ts": now, "dpkg": dpkg, "pip": pip})
     return dpkg, pip
 
 
-def _gpu_name() -> str:
+def _gpu_name(state: Any = None) -> str:
     now = time.time()
-    cached = _pkg_cache.get("gpu")
-    if now - float(_pkg_cache.get("ts") or 0) < 3600 and cached:
+    persisted = _load_sysinfo_cache(state)
+    cached = _pkg_cache.get("gpu") or persisted.get("gpu")
+    cache_ts = float(_pkg_cache.get("ts") or persisted.get("ts") or 0)
+    if now - cache_ts < _SYSINFO_CACHE_TTL and cached and cached != "--":
         return str(cached)
     gpu = "--"
     if shutil.which("lspci"):
@@ -769,6 +805,7 @@ def _gpu_name() -> str:
         if out and out.strip():
             gpu = out.strip()
     _pkg_cache["gpu"] = gpu
+    _save_sysinfo_cache(state, {"ts": now, "gpu": gpu})
     return gpu
 
 
@@ -1427,8 +1464,9 @@ def _system_info_rows(
     disks: list[DiskUsage],
     net_interface: str,
     tz: Any = None,
+    state: Any = None,
 ) -> list[dict[str, str]]:
-    dpkg, pip = _package_counts()
+    dpkg, pip = _package_counts(state)
     packages = (
         f"{pip if pip is not None else '--'} pip / {dpkg if dpkg is not None else '--'} dpkg"
     )
@@ -1459,7 +1497,7 @@ def _system_info_rows(
         {"label": "Shell", "value": _shell_name()},
         {"label": "Terminal", "value": "AstrBot T2I"},
         {"label": "CPU", "value": f"{cpu_brand} ({cores} Cores)"},
-        {"label": "GPU", "value": _gpu_name()},
+        {"label": "GPU", "value": _gpu_name(state)},
         {
             "label": "Memory",
             "value": f"{format_bytes(mem.used)} / {format_bytes(mem.total)}",
@@ -1577,6 +1615,9 @@ async def collect_all(
     websites = await connection_test(sites_cfg, cache_seconds=cache_seconds)
 
     top_n = max(1, min(30, cfg_int(config, "display.process_top_n", 8)))
+    compact = cfg_bool(config, "display.compact", False)
+    if compact:
+        top_n = min(top_n, 5)
     proc = await asyncio.to_thread(process_info, top_n)
 
     def state_section(key: str) -> dict[str, Any]:
@@ -1616,12 +1657,17 @@ async def collect_all(
 
     boot_uptime = format_duration(now.timestamp() - BOOT_TIME.timestamp())
     overview = _overview_cards(context, bot, tz)
-    system_info = await asyncio.to_thread(
-        _system_info_rows, context, bot, disks, net_interface, tz
+    system_info = (
+        []
+        if compact
+        else await asyncio.to_thread(
+            _system_info_rows, context, bot, disks, net_interface, tz, state
+        )
     )
 
     view = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "compact": compact,
         "bot": bot,
         "overview": overview,
         "resources": _resources(cpu_pct, mem, swap),

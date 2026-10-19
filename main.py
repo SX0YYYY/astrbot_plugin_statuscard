@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+from pathlib import Path
 from typing import Final
 
 import astrbot.api.message_components as Comp
@@ -14,6 +16,9 @@ from astrbot.core.message.message_event_result import MessageChain
 from .alerts import AlertEngine
 from .bg_provider import MAX_IMAGE_BYTES, resolve_background
 from .collectors import (
+    _call_action,
+    _get_aiocqhttp_client,
+    _normalize_object,
     collect_all,
     cfg_bool,
     cfg_get,
@@ -26,6 +31,7 @@ from .monitor import ServiceMonitor
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html
+from .utils import is_supported_platform
 
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
@@ -35,7 +41,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.2.0",
+    "2.3.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -54,6 +60,31 @@ class StatusCardPlugin(Star):
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
+        self._diag: dict[str, float] = {}
+        self._check_config_permissions()
+
+    def _check_config_permissions(self) -> None:
+        if os.name != "posix":
+            return
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            path = (
+                Path(get_astrbot_data_path())
+                / "config"
+                / f"{PLUGIN_NAME}_config.json"
+            )
+            if not path.is_file():
+                return
+            mode = path.stat().st_mode & 0o777
+            if mode & 0o077:
+                logger.warning(
+                    "插件配置文件权限过宽：%s (%o)，建议 chmod 600",
+                    path,
+                    mode,
+                )
+        except Exception:
+            pass
 
     def _migrate_media_sources(self) -> None:
         """Keep images uploaded before the source switch from being ignored.
@@ -165,6 +196,16 @@ class StatusCardPlugin(Star):
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
         event.should_call_llm(False)
+        platform_name = ""
+        try:
+            platform_name = str(event.get_platform_name() or "")
+        except Exception:
+            pass
+        if platform_name and not is_supported_platform(platform_name):
+            yield event.plain_result(
+                "当前平台不受支持：状态卡仅支持 QQ/OneBot（aiocqhttp）。"
+            )
+            return
         if not self._status_access_allowed(event):
             yield event.plain_result(
                 "查看状态仅管理员可用。"
@@ -215,10 +256,16 @@ class StatusCardPlugin(Star):
             if chat_key:
                 self._status_inflight.discard(chat_key)
             yield event.image_result(image_url)
-        except Exception:
+        except Exception as exc:
             if chat_key:
                 self._status_cooldown.pop(chat_key, None)
                 self._status_inflight.discard(chat_key)
+            self._diag.update(
+                {
+                    "last_error": exc.__class__.__name__,
+                    "last_error_at": time.time(),
+                }
+            )
             logger.exception("生成系统状态图片失败")
             try:
                 summary = await self.build_summary_text(event=event)
@@ -230,12 +277,14 @@ class StatusCardPlugin(Star):
                 self._status_inflight.discard(chat_key)
 
     async def _render_status_image(self, event: AstrMessageEvent | None = None) -> str:
+        collect_started = time.perf_counter()
         collected = await collect_all(
             context=self.context,
             event=event,
             state=self.state,
             config=self.config,
         )
+        collect_ms = (time.perf_counter() - collect_started) * 1000
         background = await self._resolve_background(event)
         avatar = await fetch_avatar_bytes(
             collected["view"]["bot"], self.config, data_dir=self.data_dir
@@ -263,10 +312,35 @@ class StatusCardPlugin(Star):
             "full_page": True,
             "device_scale_factor_level": "ultra",
         }
-        return await asyncio.wait_for(
-            self.html_render(html, {}, return_url=True, options=options),
-            timeout=timeout,
+        render_started = time.perf_counter()
+        try:
+            url = await asyncio.wait_for(
+                self.html_render(html, {}, return_url=True, options=options),
+                timeout=timeout,
+            )
+        except Exception:
+            self._diag.update(
+                {
+                    "last_collect_ms": round(collect_ms, 1),
+                    "last_render_ms": round(
+                        (time.perf_counter() - render_started) * 1000, 1
+                    ),
+                    "last_render_ok": False,
+                    "last_render_at": time.time(),
+                }
+            )
+            raise
+        self._diag.update(
+            {
+                "last_collect_ms": round(collect_ms, 1),
+                "last_render_ms": round(
+                    (time.perf_counter() - render_started) * 1000, 1
+                ),
+                "last_render_ok": True,
+                "last_render_at": time.time(),
+            }
         )
+        return url
 
     async def build_status_image(self) -> str | None:
         """Render a status image without an incoming event (scheduled daily status image)."""
@@ -369,6 +443,20 @@ class StatusCardPlugin(Star):
                 await asyncio.sleep(attempt + 1)
         return False
 
+    def _record_delivery(
+        self, kind: str, targets: list[str], ok: bool
+    ) -> None:
+        try:
+            self.state.data["delivery"] = {
+                "ts": time.time(),
+                "kind": kind,
+                "ok": ok,
+                "target_count": len(targets),
+            }
+            self.state.save()
+        except Exception as exc:
+            logger.warning("记录主动推送结果失败: %s", exc)
+
     async def send_text(self, targets: list[str], text: str) -> bool:
         any_ok = False
         for target in targets:
@@ -376,6 +464,7 @@ class StatusCardPlugin(Star):
                 target, lambda: MessageChain([Comp.Plain(text)]), "消息"
             ):
                 any_ok = True
+        self._record_delivery("text", targets, any_ok)
         return any_ok
 
     async def send_image(self, targets: list[str], image_url: str) -> bool:
@@ -387,6 +476,7 @@ class StatusCardPlugin(Star):
                 "图片",
             ):
                 any_ok = True
+        self._record_delivery("image", targets, any_ok)
         return any_ok
 
     async def build_summary_text(
@@ -472,4 +562,95 @@ class StatusCardPlugin(Star):
                 )
         else:
             lines.append("✅ 全部正常。")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("状态卡诊断")
+    async def cmd_diag(self, event: AstrMessageEvent):
+        """Return a compact diagnostic summary without rendering an image."""
+        event.should_call_llm(False)
+        lines = ["🩺 状态卡诊断", "──────────────"]
+        platform = ""
+        try:
+            platform = str(event.get_platform_name() or "")
+        except Exception:
+            pass
+        lines.append(f"平台: {platform or '--'}")
+        lines.append("插件: v2.3.0")
+        if platform and platform != "aiocqhttp":
+            lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
+
+        platform_id = str(
+            cfg_get(self.config, "alerts.platform_id", "default") or "default"
+        )
+        client = _get_aiocqhttp_client(self.context, platform_id)
+        if client is None:
+            lines.append("OneBot: 未找到 aiocqhttp 客户端")
+        else:
+            try:
+                status = _normalize_object(
+                    await _call_action(client, "get_status", timeout=3)
+                )
+                online = status.get("online")
+                lines.append(
+                    "OneBot: 客户端存在，online="
+                    + ("unknown" if online is None else str(online))
+                )
+            except Exception as exc:
+                lines.append(
+                    "OneBot: 客户端存在，get_status 失败（"
+                    + exc.__class__.__name__
+                    + "）"
+                )
+
+        lines.append(
+            "告警: "
+            + ("开启" if cfg_bool(self.config, "alerts.enabled", False) else "关闭")
+            + f"，目标 {len(self.alerts.targets)} 个"
+        )
+        daily_time = str(
+            cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
+        )
+        lines.append(
+            "每日定时状态图: "
+            + (
+                f"开启（{daily_time}）"
+                if cfg_bool(self.config, "alerts.daily_summary.enabled", False)
+                else "关闭"
+            )
+        )
+        monitor_status = self.monitor.status()
+        silence = monitor_status.get("silence_until") or "无"
+        lines.append(
+            "服务监测: "
+            + ("开启" if monitor_status.get("enabled") else "关闭")
+            + f"，{len(self.monitor.items)} 项"
+            + f"，静默: {silence}"
+        )
+        if monitor_status.get("silenced"):
+            lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
+
+        if self._diag.get("last_render_at"):
+            age = max(0, int(time.time() - float(self._diag["last_render_at"])))
+            ok = "成功" if self._diag.get("last_render_ok") else "失败"
+            lines.append(
+                f"最近渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
+                f"渲染 {self._diag.get('last_render_ms', '--')}ms，{age}s 前"
+            )
+        else:
+            lines.append("最近渲染: 尚未渲染")
+        if self._diag.get("last_error"):
+            lines.append(f"最近错误: {self._diag.get('last_error')}")
+
+        delivery = self.state.get("delivery", {})
+        if isinstance(delivery, dict) and delivery.get("ts"):
+            age = max(0, int(time.time() - float(delivery["ts"])))
+            lines.append(
+                "最近主动推送: "
+                + ("成功" if delivery.get("ok") else "失败")
+                + f"（{delivery.get('kind', '?')}，{age}s 前）"
+            )
+        else:
+            lines.append("最近主动推送: 暂无记录")
+        lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
         yield event.plain_result("\n".join(lines))

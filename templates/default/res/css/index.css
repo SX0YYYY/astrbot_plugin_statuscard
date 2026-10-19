@@ -687,3 +687,23 @@ body {
   padding: 0 0 4px;
   text-shadow: 0 1px 2px rgba(255, 255, 255, 0.8);
 }
+
+/* Compact mode: keep the same card, but make key numbers easier to read on
+   phones and drop the long system-information table. */
+
+body.compact .donut-label {
+  font-size: 34px;
+}
+
+body.compact .donut-title {
+  font-size: 23px;
+}
+
+body.compact .overview-value {
+  font-size: 15px;
+}
+
+body.compact .section {
+  padding-top: 16px;
+  padding-bottom: 16px;
+}

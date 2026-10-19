@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="/default/res/css/index.css" />
 </head>
-<body>
+<body class="{{ 'compact' if d.compact else '' }}">
   <div class="main-background" style="background-image: url('{{ d.background_data_url }}')">
     <div class="main-background-mask">
       <div class="main">
@@ -18,7 +18,7 @@
         {{ network(d) }}
         {{ websites(d) }}
         {{ process(d) }}
-        {{ sysinfo(d) }}
+        {% if not d.compact %}{{ sysinfo(d) }}{% endif %}
         {{ footer(d) }}
       </div>
     </div>
