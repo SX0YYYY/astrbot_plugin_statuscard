@@ -15,6 +15,12 @@
 - **主动告警**：资源阈值、Bot 掉线/恢复、每日状态摘要、Komari Webhook 转发
 - **服务监测**：类似 Uptime Kuma，支持 HTTP、TCP、Docker 容器、进程、systemd 服务，异常/恢复推送到 QQ 群
 
+## 平台支持
+
+本插件面向 **QQ / OneBot（aiocqhttp，NapCat）**。
+
+好友数、群聊数、群员数、Bot 头像、NapCat 版本等数据都依赖 OneBot API；Telegram、Discord、飞书、钉钉、企业微信等平台没有做适配和验证，因此已从支持列表中移除。命令在其他平台上可能仍能被触发，但状态卡相关数据会缺失，不作为受支持平台。
+
 ## 命令
 
 | 命令 | 说明 |

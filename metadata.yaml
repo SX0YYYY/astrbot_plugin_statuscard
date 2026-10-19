@@ -6,13 +6,6 @@ author: 烬辞
 repo: "https://github.com/SX0YYYY/astrbot_plugin_statuscard"
 support_platforms:
   - aiocqhttp
-  - qq_official
-  - qq_official_webhook
-  - telegram
-  - discord
-  - lark
-  - dingtalk
-  - wecom
 astrbot_version: ">=4.26.7,<5"
 tags:
   - 状态
