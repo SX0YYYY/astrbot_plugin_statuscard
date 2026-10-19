@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Final
 
@@ -30,19 +29,13 @@ from .t2i_renderer import build_default_html
 
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
-ALIASES: Final[set[str]] = {
-    "/状态卡",
-    "状态卡片",
-    "sysstatus",
-    "系统状态",
-}
 
 
 @register(
     PLUGIN_NAME,
     "烬辞",
     "以华丽的图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.0.0",
+    "2.1.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -168,13 +161,13 @@ class StatusCardPlugin(Star):
         return bool(allowed & values)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("状态卡", alias=ALIASES)
+    @filter.command("查看状态")
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
         event.should_call_llm(False)
         if not self._status_access_allowed(event):
             yield event.plain_result(
-                "状态卡当前仅管理员或白名单会话可用。"
+                "查看状态仅管理员可用。"
             )
             return
         cooldown = max(
@@ -409,54 +402,39 @@ class StatusCardPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("状态卡告警测试", alias={"/状态卡告警测试"})
+    @filter.command("测试通知")
     async def cmd_alert_test(self, event: AstrMessageEvent):
         event.should_call_llm(False)
         if not cfg_bool(self.config, "alerts.enabled", False):
             yield event.plain_result(
-                "告警当前未启用（alerts.enabled=false）。启用后再试，或先在 WebUI 中打开。"
+                "告警推送未启用。请先在配置页打开“启用资源与掉线告警”。"
             )
             return
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
-            "测试告警已发送到当前会话。" if ok else "测试告警发送失败，请查看后台日志。"
+            "测试通知已发送到当前会话。" if ok else "测试通知发送失败，请查看后台日志。"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("状态卡告警状态", alias={"/状态卡告警状态"})
-    async def cmd_alert_status(self, event: AstrMessageEvent):
-        event.should_call_llm(False)
-        status = self.alerts.status()
-        yield event.plain_result(
-            "状态卡告警配置：\n"
-            + json.dumps(status, ensure_ascii=False, indent=2)
-        )
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("状态卡监测状态", alias={"/状态卡监测状态"})
-    async def cmd_monitor_status(self, event: AstrMessageEvent):
-        event.should_call_llm(False)
-        status = self.monitor.status()
-        yield event.plain_result(
-            "服务监测状态：\n"
-            + json.dumps(status, ensure_ascii=False, indent=2)
-        )
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("状态卡监测测试", alias={"/状态卡监测测试"})
+    @filter.command("立即检测")
     async def cmd_monitor_test(self, event: AstrMessageEvent):
         event.should_call_llm(False)
         if not self.monitor.items:
             yield event.plain_result(
-                "没有配置任何监测目标。请在 WebUI 的 monitors.items 中添加。"
+                "没有配置监测目标。请在配置页的“服务可用性监测”中添加。"
             )
             return
         results = await self.monitor.test_all()
-        lines = ["服务监测测试结果："]
-        for result in results:
-            icon = "✅" if result["ok"] else "❌"
-            lines.append(
-                f"{icon} {result['name']} [{result['kind']}] {result['target']}\n"
-                f"   {result['detail']}"
-            )
+        failed = [item for item in results if not item["ok"]]
+        lines = [
+            "🩺 服务检测结果",
+            f"✅ 正常 {len(results) - len(failed)} 项 · ❌ 异常 {len(failed)} 项",
+        ]
+        if failed:
+            for item in failed:
+                lines.append(
+                    f"❌ {item['name']}（{item['kind']}）\n   {item['detail']}"
+                )
+        else:
+            lines.append("✅ 全部正常。")
         yield event.plain_result("\n".join(lines))

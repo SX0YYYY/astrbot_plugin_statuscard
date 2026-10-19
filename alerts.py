@@ -178,7 +178,7 @@ class AlertEngine:
         if not targets:
             return False
         text = (
-            "🔔 状态卡告警测试\n"
+            "🔔 测试通知\n"
             "──────────────\n"
             f"主机: {os.uname().nodename if hasattr(os, 'uname') else os.environ.get('COMPUTERNAME', '--')}\n"
             f"时间: {_now_text(self.config)}\n"
