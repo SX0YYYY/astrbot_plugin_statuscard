@@ -7,7 +7,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-
 from astrbot_plugin_statuscard.report import DailyReporter
 from astrbot_plugin_statuscard.report_store import ReportStore
 from astrbot_plugin_statuscard.report_view import (
@@ -143,12 +142,8 @@ def test_qq_and_token_sections_use_astrbot_history(tmp_path: Path) -> None:
 
 def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
-    store.add_event(
-        1_700_000_000, "2026-10-19", "service", "Nginx", "down", "alert"
-    )
-    store.add_event(
-        1_700_000_600, "2026-10-20", "service", "Nginx", "up", "recovery"
-    )
+    store.add_event(1_700_000_000, "2026-10-19", "service", "Nginx", "down", "alert")
+    store.add_event(1_700_000_600, "2026-10-20", "service", "Nginx", "up", "recovery")
     store.add_event(
         1_700_000_700, "2026-10-20", "resource", "CPU 使用率", "too high", "alert"
     )
@@ -172,9 +167,7 @@ def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
 
 def test_empty_report_shows_accumulating_messages(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
-    view = _builder(tmp_path, store).build(
-        day="2026-10-20", history_days=7
-    )
+    view = _builder(tmp_path, store).build(day="2026-10-20", history_days=7)
 
     assert view["resources"]["available"] is False
     assert "暂无" in view["resources"]["empty_reason"]
@@ -325,9 +318,7 @@ def test_daily_reporter_targets_sections_and_text_fallback(
     reporter._build_view = lambda day=None: _sample_report_view()
     asyncio.run(reporter._send_scheduled())
 
-    assert plugin.images and plugin.images[0][0] == [
-        "default:GroupMessage:123456"
-    ]
+    assert plugin.images and plugin.images[0][0] == ["default:GroupMessage:123456"]
     assert plugin.texts
     latest = store.latest_report_run("2026-10-20")
     assert latest is not None

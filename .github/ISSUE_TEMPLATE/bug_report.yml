@@ -1,0 +1,65 @@
+name: Bug 报告
+description: 报告可复现的插件问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先阅读 README 的“常见问题”，并删除日志中的群号、token、服务器地址等隐私信息。
+  - type: input
+    id: astrbot-version
+    attributes:
+      label: AstrBot 版本
+      placeholder: 4.29.0
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: 2.10.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - aiocqhttp / QQ
+        - 其他（插件仅支持 aiocqhttp）
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 请先脱敏（群号、token、服务器地址）
+      render: shell
+  - type: textarea
+    id: config
+    attributes:
+      label: 相关配置
+      description: 只贴与问题相关的配置项，删除 token/密码
+      render: json

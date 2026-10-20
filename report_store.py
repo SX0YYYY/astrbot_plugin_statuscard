@@ -153,9 +153,7 @@ class ReportStore:
                 if con is not None:
                     con.close()
 
-    def _write_many(
-        self, sql: str, rows: list[tuple[Any, ...]]
-    ) -> bool:
+    def _write_many(self, sql: str, rows: list[tuple[Any, ...]]) -> bool:
         if not self.available or not rows:
             return False
         con: sqlite3.Connection | None = None
@@ -177,9 +175,7 @@ class ReportStore:
                 if con is not None:
                     con.close()
 
-    def _query(
-        self, sql: str, params: tuple[Any, ...] = ()
-    ) -> list[tuple[Any, ...]]:
+    def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         if not self.available:
             return []
         con: sqlite3.Connection | None = None
@@ -296,9 +292,7 @@ class ReportStore:
             ),
         )
 
-    def add_website_samples(
-        self, ts: int, samples: list[dict[str, Any]]
-    ) -> bool:
+    def add_website_samples(self, ts: int, samples: list[dict[str, Any]]) -> bool:
         rows = []
         for item in samples:
             name = str(item.get("name") or "").strip()
@@ -354,9 +348,7 @@ class ReportStore:
             rows,
         )
 
-    def add_report_run(
-        self, day: str, ts: int, ok: bool, detail: str = ""
-    ) -> bool:
+    def add_report_run(self, day: str, ts: int, ok: bool, detail: str = "") -> bool:
         return self._write(
             """
             INSERT INTO report_runs (day, ts, ok, detail)
@@ -436,9 +428,7 @@ class ReportStore:
     # ------------------------------------------------------------------
 
     def snapshot_complete(self, day: str) -> bool:
-        rows = self._query(
-            "SELECT complete FROM daily_snapshots WHERE day = ?", (day,)
-        )
+        rows = self._query("SELECT complete FROM daily_snapshots WHERE day = ?", (day,))
         return bool(rows and rows[0][0])
 
     def get_snapshot(self, day: str) -> dict[str, Any] | None:

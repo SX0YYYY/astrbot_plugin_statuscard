@@ -1,10 +1,12 @@
-![Version](https://img.shields.io/badge/version-2.9.3-blue)
+![Version](https://img.shields.io/badge/version-2.10.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 ![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
 
 # 系统状态卡片
+
+<img src="logo.png" width="96" height="96" alt="系统状态卡片图标" align="right">
 
 把服务器的 CPU、内存、磁盘、网络、进程等信息，做成一张状态图发到 QQ 群；需要时还能在服务掉线、资源过高或每天固定时间主动通知你，并发送资源/异常/QQ/Token/网站延迟/进程日报。
 
@@ -66,7 +68,13 @@
 
 ### 安装步骤
 
-1. 把 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下（当前仓库私有，暂不支持插件市场安装）。
+**方式一：插件市场（推荐）**
+
+在 AstrBot WebUI 的插件市场搜索“系统状态卡片”或 `astrbot_plugin_statuscard`，安装后重载插件即可。
+
+**方式二：手动安装**
+
+1. 把 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下。
 2. 安装依赖：`pip install -r requirements.txt`。部分 AstrBot 版本会自动处理插件依赖。
 3. 重启 AstrBot，或在 WebUI 的插件管理页重载插件。
 4. 确认 AstrBot 的 T2I 渲染服务可用（默认即可）。
@@ -268,6 +276,7 @@
 | `display.compact` | `false` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
 | `display.process_top_n` | `8` | 状态卡进程表展示的 CPU 最高进程数量，3–20 |
 | `display.render_timeout` | `180` | 渲染超时（秒）；超时后回退为文字摘要 |
+| `display.t2i_benchmark` | `false` | 开启后每次状态卡/日报渲染完成记录一条耗时日志 |
 | `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
 | `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删 |
 | `display.website_cache_seconds` | `60` | 网站测试缓存；0 表示每次重新请求 |
@@ -280,10 +289,13 @@
 | `alerts.cooldown_seconds` | `1800` | 同一规则告警冷却（秒） |
 | `monitors.interval_seconds` | `60` | 服务监测轮询间隔（秒） |
 | `monitors.fail_threshold` | `2` | 连续失败几次后告警 |
+| `monitors.silence_enabled` | `false` | 启用维护静默；只有开启时 `silence_until` 才生效 |
 | `monitors.silence_until` | 空 | 维护静默截止时间，`YYYY-MM-DD HH:MM`；到期前只探测不推送 |
+| `monitors.suppress_duplicates` | `false` | 启用重复层抑制；只有开启时 `suppress_when_down` 才生效 |
 | `monitors.max_response_bytes` | `262144` | HTTP 关键字检查最大读取字节数 |
 | `monitors.items[].suppress_when_down` | 空 | HTTP 监测项依赖的另一个监测项名称；依赖项异常时抑制本项告警 |
 | `alerts.komari_webhook.require_token` | `false` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
+| `telemetry.enabled` | `false` | 匿名指标预留开关；当前版本只保存本地开关，不上报任何数据 |
 | `daily_report.enabled` | `false` | 启用每日定时日报 |
 | `daily_report.time` | `21:00` | 日报发送时间，24 小时制 `HH:MM` |
 | `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |

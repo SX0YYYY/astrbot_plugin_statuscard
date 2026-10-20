@@ -55,9 +55,7 @@ def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
             name = str(info.get("name") or f"pid {pid}")[:80]
             cpu = float(proc.cpu_percent(None) or 0.0)
             mem_mb = float(proc.memory_info().rss or 0) / 1048576.0
-            items.append(
-                {"pid": pid, "name": name, "cpu": cpu, "mem_mb": mem_mb}
-            )
+            items.append({"pid": pid, "name": name, "cpu": cpu, "mem_mb": mem_mb})
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     if not items:
@@ -65,17 +63,12 @@ def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
 
     def ranked(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
-            {"rank": index + 1, **item}
-            for index, item in enumerate(values[:top_n])
+            {"rank": index + 1, **item} for index, item in enumerate(values[:top_n])
         ]
 
     return {
-        "cpu": ranked(
-            sorted(items, key=lambda item: item["cpu"], reverse=True)
-        ),
-        "mem": ranked(
-            sorted(items, key=lambda item: item["mem_mb"], reverse=True)
-        ),
+        "cpu": ranked(sorted(items, key=lambda item: item["cpu"], reverse=True)),
+        "mem": ranked(sorted(items, key=lambda item: item["mem_mb"], reverse=True)),
     }
 
 
@@ -233,9 +226,7 @@ class ReportCollector:
                 }
                 for item in results
             ]
-            await asyncio.to_thread(
-                self.store.add_website_samples, int(now), samples
-            )
+            await asyncio.to_thread(self.store.add_website_samples, int(now), samples)
         except Exception:
             logger.exception("网站延迟采样失败")
 
@@ -248,9 +239,7 @@ class ReportCollector:
             ),
         )
         try:
-            samples = await asyncio.to_thread(
-                _collect_process_samples, top_n
-            )
+            samples = await asyncio.to_thread(_collect_process_samples, top_n)
         except Exception:
             logger.exception("Top 进程采样失败")
             return
@@ -276,15 +265,11 @@ class ReportCollector:
 
         recv_total, _ = await asyncio.to_thread(read_message_stats_total)
         recv_state = self.state.get("recv", {}) or {}
-        bot = await collect_bot_info(
-            self.plugin.context, None, self.config, recv_state
-        )
+        bot = await collect_bot_info(self.plugin.context, None, self.config, recv_state)
         friends = bot.get("friends")
         groups = bot.get("groups")
         members = bot.get("members")
-        complete = all(
-            value is not None for value in (friends, groups, members)
-        )
+        complete = all(value is not None for value in (friends, groups, members))
         await asyncio.to_thread(
             self.store.record_snapshot,
             day,
@@ -359,9 +344,7 @@ class DailyReporter:
         ).strip()
 
     def _history_days(self) -> int:
-        return max(
-            7, min(30, cfg_int(self.config, "daily_report.history_days", 7))
-        )
+        return max(7, min(30, cfg_int(self.config, "daily_report.history_days", 7)))
 
     def _sections(self) -> list[str] | None:
         """Return selected sections, or None when the key is unset.
@@ -399,9 +382,7 @@ class DailyReporter:
             value = item.strip()
             if not value:
                 continue
-            target = (
-                value if ":" in value else f"{platform_id}:GroupMessage:{value}"
-            )
+            target = value if ":" in value else f"{platform_id}:GroupMessage:{value}"
             if target not in out:
                 out.append(target)
         return out
@@ -433,9 +414,7 @@ class DailyReporter:
             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 return None
             now = now_in_timezone(self.config)
-            target = now.replace(
-                hour=hour, minute=minute, second=0, microsecond=0
-            )
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)
             return target.strftime("%Y-%m-%d %H:%M")
@@ -447,9 +426,7 @@ class DailyReporter:
             return
         exc = task.exception()
         if exc is not None:
-            logger.error(
-                "日报定时任务异常退出: %r", exc, exc_info=exc
-            )
+            logger.error("日报定时任务异常退出: %r", exc, exc_info=exc)
 
     def start(self) -> None:
         if not self._enabled():
@@ -490,9 +467,7 @@ class DailyReporter:
             try:
                 if not self._enabled():
                     if not self._disabled_logged:
-                        logger.warning(
-                            "日报定时任务暂停：daily_report.enabled=false"
-                        )
+                        logger.warning("日报定时任务暂停：daily_report.enabled=false")
                         self._disabled_logged = True
                     self._pending_retry = None
                     self._pending_retry_count = 0
@@ -510,9 +485,7 @@ class DailyReporter:
                     continue
                 time_text = self._time_text()
                 try:
-                    hour, minute = [
-                        int(part) for part in time_text.split(":", 1)
-                    ]
+                    hour, minute = [int(part) for part in time_text.split(":", 1)]
                     if not (0 <= hour <= 23 and 0 <= minute <= 59):
                         raise ValueError("out of range")
                     warned = False
@@ -526,15 +499,11 @@ class DailyReporter:
                     await asyncio.sleep(60)
                     continue
                 tz_name = str(
-                    cfg_get(
-                        self.config, "display.timezone", "Asia/Shanghai"
-                    )
+                    cfg_get(self.config, "display.timezone", "Asia/Shanghai")
                     or "Asia/Shanghai"
                 )
                 now = now_in_timezone(self.config)
-                target = now.replace(
-                    hour=hour, minute=minute, second=0, microsecond=0
-                )
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
                     target += timedelta(days=1)
                 if last_logged != target:
@@ -555,9 +524,7 @@ class DailyReporter:
                 if (
                     self._time_text() != time_text
                     or str(
-                        cfg_get(
-                            self.config, "display.timezone", "Asia/Shanghai"
-                        )
+                        cfg_get(self.config, "display.timezone", "Asia/Shanghai")
                         or "Asia/Shanghai"
                     )
                     != tz_name
@@ -580,9 +547,7 @@ class DailyReporter:
         if self._pending_retry_count > 3:
             self._pending_retry = None
             self._pending_retry_count = 0
-            logger.warning(
-                "日报 %s 连续发送失败 3 次，停止重试", day or "--"
-            )
+            logger.warning("日报 %s 连续发送失败 3 次，停止重试", day or "--")
             return
         delay = 600 * self._pending_retry_count
         self._pending_retry = (day, time.time() + delay)
@@ -600,9 +565,7 @@ class DailyReporter:
     async def _send_scheduled(self) -> None:
         targets = self._targets()
         if self._sections() is not None and not self._sections():
-            logger.warning(
-                "日报内容为空（daily_report.sections=[]），跳过发送"
-            )
+            logger.warning("日报内容为空（daily_report.sections=[]），跳过发送")
             self._record("", False, "sections empty")
             self._clear_retry()
             return

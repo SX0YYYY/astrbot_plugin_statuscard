@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import metadata
 from inspect import isawaitable
-from typing import Any, Callable
+from typing import Any
 
 
 def _normalize_version(raw: Any) -> str | None:

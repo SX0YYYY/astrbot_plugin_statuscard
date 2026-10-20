@@ -57,15 +57,11 @@ class PageApi:
 
     def register(self) -> None:
         if jsonify is None or request is None:
-            logger.warning(
-                "当前环境缺少 Quart，插件页面 API 不可用"
-            )
+            logger.warning("当前环境缺少 Quart，插件页面 API 不可用")
             return
         register = getattr(self.plugin.context, "register_web_api", None)
         if not callable(register):
-            logger.warning(
-                "当前 AstrBot 不支持 register_web_api，插件页面 API 不可用"
-            )
+            logger.warning("当前 AstrBot 不支持 register_web_api，插件页面 API 不可用")
             return
         routes = (
             ("overview", self.overview, ["GET"], "状态概览"),
@@ -74,9 +70,7 @@ class PageApi:
             ("reports", self.reports, ["GET"], "日报摘要"),
         )
         for name, handler, methods, desc in routes:
-            register(
-                f"/{PLUGIN_NAME}/{name}", handler, methods, desc
-            )
+            register(f"/{PLUGIN_NAME}/{name}", handler, methods, desc)
         logger.info("插件页面 API 已注册：%d 个路由", len(routes))
 
     # ------------------------------------------------------------------
@@ -87,11 +81,7 @@ class PageApi:
         raw = cfg_get(self.plugin.config, "display.redact", []) or []
         if isinstance(raw, str):
             raw = [raw]
-        return {
-            str(item).strip().lower()
-            for item in raw
-            if str(item).strip()
-        }
+        return {str(item).strip().lower() for item in raw if str(item).strip()}
 
     def _host(self) -> str:
         if "hostname" in self._redact():
@@ -99,9 +89,7 @@ class PageApi:
         return socket.gethostname()
 
     @staticmethod
-    def _network_view(
-        redacted: bool, net: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _network_view(redacted: bool, net: dict[str, Any]) -> dict[str, Any]:
         """Return the overview network payload, honouring ``network`` redaction."""
 
         if redacted:
@@ -116,8 +104,7 @@ class PageApi:
 
     def _platform(self) -> str:
         return str(
-            cfg_get(self.plugin.config, "alerts.platform_id", "default")
-            or "default"
+            cfg_get(self.plugin.config, "alerts.platform_id", "default") or "default"
         )
 
     def _astrbot_version(self) -> str:
@@ -158,14 +145,10 @@ class PageApi:
         if not rows:
             return []
         latest = max(int(row.get("ts") or 0) for row in rows)
-        rows = [
-            row for row in rows if int(row.get("ts") or 0) == latest
-        ]
+        rows = [row for row in rows if int(row.get("ts") or 0) == latest]
         redact = "process" in self._redact()
         items = []
-        for row in sorted(
-            rows, key=lambda item: int(item.get("rank") or 99)
-        ):
+        for row in sorted(rows, key=lambda item: int(item.get("rank") or 99)):
             items.append(
                 {
                     "rank": int(row.get("rank") or 0),
@@ -322,9 +305,7 @@ class PageApi:
                 for item in history[-120:]
                 if isinstance(item, (list, tuple)) and len(item) >= 3
             ]
-            network_note = (
-                "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
-            )
+            network_note = "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
         return jsonify(
             {
                 "ok": True,
@@ -350,9 +331,7 @@ class PageApi:
         items: list[dict[str, Any]] = []
         for offset in range(days):
             day = (today - timedelta(days=offset)).isoformat()
-            for event in self.plugin.report_store.list_events(
-                day, limit=200
-            ):
+            for event in self.plugin.report_store.list_events(day, limit=200):
                 items.append(
                     {
                         "id": event.get("id"),
@@ -397,12 +376,8 @@ class PageApi:
             return jsonify(cached[1])
         view: dict[str, Any] = {}
         try:
-            builder = DailyReportBuilder(
-                plugin.report_store, plugin.config
-            )
-            sections = cfg_get(
-                plugin.config, "daily_report.sections", None
-            )
+            builder = DailyReportBuilder(plugin.report_store, plugin.config)
+            sections = cfg_get(plugin.config, "daily_report.sections", None)
             view = builder.build(
                 day=None,
                 history_days=7,
@@ -430,4 +405,3 @@ class PageApi:
         }
         self._reports_cache = (now_ts, payload)
         return jsonify(payload)
-

@@ -29,7 +29,9 @@ def _message_stats_dir() -> Path | None:
     try:
         from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-        base = Path(get_astrbot_data_path()) / "plugin_data" / "message_stats" / "groups"
+        base = (
+            Path(get_astrbot_data_path()) / "plugin_data" / "message_stats" / "groups"
+        )
         if base.is_dir():
             return base
     except Exception:
@@ -37,12 +39,7 @@ def _message_stats_dir() -> Path | None:
 
     # Useful for standalone tests on the development machine.
     fallback = (
-        Path.home()
-        / ".astrbot"
-        / "data"
-        / "plugin_data"
-        / "message_stats"
-        / "groups"
+        Path.home() / ".astrbot" / "data" / "plugin_data" / "message_stats" / "groups"
     )
     return fallback if fallback.is_dir() else None
 

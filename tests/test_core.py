@@ -7,9 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-
 from astrbot_plugin_statuscard import collectors
-from astrbot_plugin_statuscard import monitor as monitor_module
 from astrbot_plugin_statuscard.alerts import AlertEngine
 from astrbot_plugin_statuscard.collectors import (
     _load_sysinfo_cache,
@@ -33,7 +31,6 @@ from astrbot_plugin_statuscard.utils import (
     is_supported_platform,
     retry_delay,
 )
-
 
 # ---------------------------------------------------------------------------
 # state store
@@ -109,9 +106,7 @@ def test_build_network_chart_trims_to_last_sixty_points() -> None:
 
 def test_normalize_website_targets_defaults_and_clamping() -> None:
     defaults = _normalize_website_targets(None)
-    assert [(x.name, x.url) for x in defaults] == [
-        ("Baidu", "https://www.baidu.com/")
-    ]
+    assert [(x.name, x.url) for x in defaults] == [("Baidu", "https://www.baidu.com/")]
 
     sites = _normalize_website_targets(
         [
@@ -316,7 +311,7 @@ def test_monitor_item_key_matches_target(tmp_path: Path) -> None:
 
 
 def test_monitor_silence_window_parsing(tmp_path: Path) -> None:
-    monitor = _monitor(tmp_path, [])
+    monitor = _monitor(tmp_path, [], {"silence_enabled": True})
     monitor.config["monitors"]["silence_until"] = "2099-01-01 00:00"
     assert monitor._is_silenced() is True
 
@@ -338,7 +333,7 @@ def test_monitor_silence_freezes_alert_state(
     monitor = _monitor(
         tmp_path,
         [item],
-        {"silence_until": "2099-01-01 00:00"},
+        {"silence_enabled": True, "silence_until": "2099-01-01 00:00"},
     )
 
     async def fake_probe(_item):
@@ -367,7 +362,7 @@ def test_monitor_suppresses_http_when_dependency_down(
         "url": "http://127.0.0.1:1/",
         "suppress_when_down": "NapCat 容器",
     }
-    monitor = _monitor(tmp_path, [docker, http])
+    monitor = _monitor(tmp_path, [docker, http], {"suppress_duplicates": True})
     dep_key = monitor._item_key(docker)
     monitor.state.data.setdefault("monitors", {}).setdefault("items", {})[dep_key] = {
         "alerting": True
@@ -540,9 +535,7 @@ def test_alert_failure_uses_short_retry(tmp_path: Path) -> None:
         }
     }
     engine = AlertEngine(_FailingPlugin(), state, config)
-    asyncio.run(
-        engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%")
-    )
+    asyncio.run(engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%"))
     rule = state.data["alerts"]["rules"]["cpu"]
     assert rule["retry_count"] == 1
     assert 0 < rule["next_attempt"] - time.time() <= 31
@@ -569,9 +562,7 @@ def test_pending_recovery_survives_renewed_threshold(
         }
     }
     engine = AlertEngine(_FailingPlugin(), state, config)
-    asyncio.run(
-        engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%")
-    )
+    asyncio.run(engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%"))
     rule = state.data["alerts"]["rules"]["cpu"]
     assert rule["pending_recovery"] == "✅ recovered"
 
@@ -616,3 +607,33 @@ def test_daily_summary_sends_once_per_day(tmp_path: Path) -> None:
     assert asyncio.run(engine._send_daily_summary()) is True
     assert asyncio.run(engine._send_daily_summary()) is True
     assert plugin.images == 1
+
+
+class _FakeReportStore:
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def add_event(self, *args: object) -> None:
+        self.events.append(args)
+
+
+def test_monitor_url_query_redacted(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.json")
+    store = _FakeReportStore()
+    monitor = ServiceMonitor(None, state, {}, store)
+    monitor._record_event(
+        "New API",
+        "http://example.com/health?token=secret#frag",
+        "HTTP 200",
+        "alert",
+    )
+    assert store.events
+    _ts, _day, _kind, _name, _detail, _status, target = store.events[0]
+    assert target == "http://example.com/health"
+    assert "secret" not in target
+
+
+def test_komari_message_truncated() -> None:
+    text = AlertEngine._format_komari({"title": "alert", "message": "x" * 5000})
+    assert len(text) <= 2000
+    assert "已截断" in text

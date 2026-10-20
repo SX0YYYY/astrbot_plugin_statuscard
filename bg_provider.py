@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from astrbot.api import logger
-
 
 ASSETS_PATH = Path(__file__).parent / "res" / "assets"
 DEFAULT_BG_PATH = ASSETS_PATH / "default_bg.webp"
@@ -30,7 +28,7 @@ def _detect_image_mime(data: bytes) -> str:
     return "application/octet-stream"
 
 
-def _read_default_background() -> Optional[BgBytesData]:
+def _read_default_background() -> BgBytesData | None:
     try:
         if not DEFAULT_BG_PATH.is_file():
             logger.error("内置背景缺失: %s", DEFAULT_BG_PATH)

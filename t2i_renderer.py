@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import jinja2
 from markupsafe import Markup, escape
-
 
 ROOT = Path(__file__).parent
 TPL_DIR = ROOT / "templates" / "default" / "res" / "templates"
@@ -72,7 +71,7 @@ def build_default_html(
     collected: dict[str, Any],
     bg_bytes: bytes,
     bg_mime: str = "image/jpeg",
-    avatar_bytes: Optional[bytes] = None,
+    avatar_bytes: bytes | None = None,
     render_width: int = 650,
 ) -> str:
     view = collected.setdefault("view", {})
@@ -150,7 +149,5 @@ def build_report_html(
         'content="width=650, initial-scale=1.0"',
         f'content="width={width}, initial-scale=1.0"',
     )
-    env = jinja2.Environment(
-        autoescape=jinja2.select_autoescape(["html", "xml"])
-    )
+    env = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"]))
     return env.from_string(template_text).render(d=view)

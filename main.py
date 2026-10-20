@@ -18,14 +18,15 @@ from .collectors import (
     _call_action,
     _get_aiocqhttp_client,
     _normalize_object,
-    collect_all,
     cfg_bool,
     cfg_get,
     cfg_int,
+    collect_all,
     effective_media_source,
     fetch_avatar_bytes,
     uploaded_file_path,
 )
+from .delivery import deliver_targets
 from .i18n import tr
 from .monitor import ServiceMonitor
 from .page_api import PageApi
@@ -36,7 +37,6 @@ from .state import StateStore
 from .t2i_renderer import build_default_html, build_report_html
 from .utils import clean_report_sections, is_supported_platform
 from .version import __version__
-
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
 
@@ -61,12 +61,8 @@ class StatusCardPlugin(Star):
         self.sampler = Sampler(
             self.state, interval_seconds=interval, config=self.config
         )
-        self.report = ReportCollector(
-            self, self.state, self.config, self.report_store
-        )
-        self.daily_report = DailyReporter(
-            self, self.report_store, self.config
-        )
+        self.report = ReportCollector(self, self.state, self.config, self.report_store)
+        self.daily_report = DailyReporter(self, self.report_store, self.config)
         self.alerts = AlertEngine(
             self,
             self.state,
@@ -94,9 +90,7 @@ class StatusCardPlugin(Star):
             from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
             path = (
-                Path(get_astrbot_data_path())
-                / "config"
-                / f"{PLUGIN_NAME}_config.json"
+                Path(get_astrbot_data_path()) / "config" / f"{PLUGIN_NAME}_config.json"
             )
             if not path.is_file():
                 return
@@ -131,7 +125,9 @@ class StatusCardPlugin(Star):
             ("avatar", "avatar_source", "avatar.avatar_upload_files"),
             ("background", "background_source", "background.bg_upload_files"),
         ):
-            section = self.config.get(section_name) if isinstance(self.config, dict) else None
+            section = (
+                self.config.get(section_name) if isinstance(self.config, dict) else None
+            )
             if not isinstance(section, dict):
                 continue
             desired = (
@@ -163,9 +159,7 @@ class StatusCardPlugin(Star):
         if migration.get("daily_report_sections_v1"):
             return
         section = (
-            self.config.get("daily_report")
-            if isinstance(self.config, dict)
-            else None
+            self.config.get("daily_report") if isinstance(self.config, dict) else None
         )
         if isinstance(section, dict):
             cleaned = clean_report_sections(section.get("sections"))
@@ -174,9 +168,7 @@ class StatusCardPlugin(Star):
                 if hasattr(self.config, "save_config"):
                     try:
                         self.config.save_config()
-                        logger.info(
-                            "已从日报内容中移除旧待办模块：%s", cleaned
-                        )
+                        logger.info("已从日报内容中移除旧待办模块：%s", cleaned)
                     except Exception:
                         logger.exception("保存日报内容迁移失败")
                         return
@@ -211,9 +203,9 @@ class StatusCardPlugin(Star):
     # ------------------------------------------------------------------
 
     def _status_access_allowed(self, event: AstrMessageEvent) -> bool:
-        mode = str(
-            cfg_get(self.config, "display.access", "all") or "all"
-        ).strip().lower()
+        mode = (
+            str(cfg_get(self.config, "display.access", "all") or "all").strip().lower()
+        )
         if mode == "all":
             return True
         try:
@@ -231,11 +223,7 @@ class StatusCardPlugin(Star):
             raw = [raw]
         if not isinstance(raw, list):
             return False
-        allowed = {
-            str(item).strip()
-            for item in raw
-            if str(item).strip()
-        }
+        allowed = {str(item).strip() for item in raw if str(item).strip()}
         values: set[str] = set()
         try:
             if event.unified_msg_origin:
@@ -262,9 +250,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         if platform_name and not is_supported_platform(platform_name):
-            yield event.plain_result(
-                tr(self.config, "platform_unsupported")
-            )
+            yield event.plain_result(tr(self.config, "platform_unsupported"))
             return
         if not self._status_access_allowed(event):
             yield event.plain_result(tr(self.config, "admin_only"))
@@ -331,9 +317,7 @@ class StatusCardPlugin(Star):
                 summary = await self.build_summary_text(event=event)
             except Exception:
                 summary = tr(self.config, "summary_failed")
-            yield event.plain_result(
-                tr(self.config, "image_failed", summary=summary)
-            )
+            yield event.plain_result(tr(self.config, "image_failed", summary=summary))
         finally:
             if chat_key:
                 self._status_inflight.discard(chat_key)
@@ -391,6 +375,12 @@ class StatusCardPlugin(Star):
                     "last_render_at": time.time(),
                 }
             )
+            if cfg_bool(self.config, "display.t2i_benchmark", False):
+                logger.warning(
+                    "T2I 状态卡渲染失败：%.1fms（采集 %.1fms）",
+                    self._diag.get("last_render_ms", 0),
+                    self._diag.get("last_collect_ms", 0),
+                )
             raise
         self._diag.update(
             {
@@ -402,6 +392,12 @@ class StatusCardPlugin(Star):
                 "last_render_at": time.time(),
             }
         )
+        if cfg_bool(self.config, "display.t2i_benchmark", False):
+            logger.info(
+                "T2I 状态卡渲染完成：%.1fms（采集 %.1fms）",
+                self._diag.get("last_render_ms", 0),
+                self._diag.get("last_collect_ms", 0),
+            )
         return url
 
     async def build_status_image(self) -> str | None:
@@ -415,12 +411,12 @@ class StatusCardPlugin(Star):
             1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
         )
         logical_width = max(650, min(1600, round(render_width / 1.8)))
-        theme = str(
-            cfg_get(self.config, "daily_report.theme", "light") or "light"
-        ).strip().lower()
-        html = build_report_html(
-            view, render_width=logical_width, theme=theme
+        theme = (
+            str(cfg_get(self.config, "daily_report.theme", "light") or "light")
+            .strip()
+            .lower()
         )
+        html = build_report_html(view, render_width=logical_width, theme=theme)
         timeout = max(
             30,
             min(600, cfg_int(self.config, "daily_report.render_timeout", 180)),
@@ -434,9 +430,7 @@ class StatusCardPlugin(Star):
         started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
-                self.html_render(
-                    html, {}, return_url=True, options=options
-                ),
+                self.html_render(html, {}, return_url=True, options=options),
                 timeout=timeout,
             )
         except Exception:
@@ -449,6 +443,11 @@ class StatusCardPlugin(Star):
                     ),
                 }
             )
+            if cfg_bool(self.config, "display.t2i_benchmark", False):
+                logger.warning(
+                    "T2I 日报渲染失败：%.1fms",
+                    self._diag.get("last_report_render_ms", 0),
+                )
             raise
         self._diag.update(
             {
@@ -459,6 +458,11 @@ class StatusCardPlugin(Star):
                 ),
             }
         )
+        if cfg_bool(self.config, "display.t2i_benchmark", False):
+            logger.info(
+                "T2I 日报渲染完成：%.1fms",
+                self._diag.get("last_report_render_ms", 0),
+            )
         return result
 
     async def _resolve_background(self):
@@ -476,15 +480,11 @@ class StatusCardPlugin(Star):
             if uploaded is not None:
                 try:
                     if uploaded.stat().st_size > MAX_IMAGE_BYTES:
-                        logger.warning(
-                            "上传背景超过 10 MB，已跳过: %s", uploaded
-                        )
+                        logger.warning("上传背景超过 10 MB，已跳过: %s", uploaded)
                     else:
                         bg_bytes = uploaded.read_bytes() or None
                 except Exception as exc:
-                    logger.warning(
-                        "读取上传背景失败 %s: %s", uploaded, exc
-                    )
+                    logger.warning("读取上传背景失败 %s: %s", uploaded, exc)
             if bg_bytes is None:
                 logger.warning(
                     "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
@@ -568,25 +568,21 @@ class StatusCardPlugin(Star):
         text: str,
         source: str = "unknown",
     ) -> bool:
-        ok_targets: list[str] = []
-        failed_targets: list[str] = []
-        for target in targets:
-            if await self._send_chain(
+        result = await deliver_targets(
+            targets,
+            lambda target: self._send_chain(
                 target, lambda: MessageChain([Comp.Plain(text)]), "消息"
-            ):
-                ok_targets.append(target)
-            else:
-                failed_targets.append(target)
-        any_ok = bool(ok_targets)
+            ),
+        )
         self._record_delivery(
             "text",
             targets,
-            any_ok,
+            result.ok,
             source=source,
-            ok_targets=ok_targets,
-            failed_targets=failed_targets,
+            ok_targets=result.ok_targets,
+            failed_targets=result.failed_targets,
         )
-        return any_ok
+        return result.ok
 
     async def send_image(
         self,
@@ -594,31 +590,25 @@ class StatusCardPlugin(Star):
         image_url: str,
         source: str = "unknown",
     ) -> bool:
-        ok_targets: list[str] = []
-        failed_targets: list[str] = []
-        for target in targets:
-            if await self._send_chain(
+        result = await deliver_targets(
+            targets,
+            lambda target: self._send_chain(
                 target,
                 lambda: MessageChain([Comp.Image.fromURL(image_url)]),
                 "图片",
-            ):
-                ok_targets.append(target)
-            else:
-                failed_targets.append(target)
-        any_ok = bool(ok_targets)
+            ),
+        )
         self._record_delivery(
             "image",
             targets,
-            any_ok,
+            result.ok,
             source=source,
-            ok_targets=ok_targets,
-            failed_targets=failed_targets,
+            ok_targets=result.ok_targets,
+            failed_targets=result.failed_targets,
         )
-        return any_ok
+        return result.ok
 
-    async def build_summary_text(
-        self, event: AstrMessageEvent | None = None
-    ) -> str:
+    async def build_summary_text(self, event: AstrMessageEvent | None = None) -> str:
         collected = await collect_all(
             context=self.context,
             event=event,
@@ -669,9 +659,7 @@ class StatusCardPlugin(Star):
         event.should_call_llm(False)
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
-            tr(self.config, "test_sent")
-            if ok
-            else tr(self.config, "test_failed")
+            tr(self.config, "test_sent") if ok else tr(self.config, "test_failed")
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -787,11 +775,7 @@ class StatusCardPlugin(Star):
                 0,
                 int(time.time() - float(self._diag["last_report_render_at"])),
             )
-            ok = (
-                "成功"
-                if self._diag.get("last_report_render_ok")
-                else "失败"
-            )
+            ok = "成功" if self._diag.get("last_report_render_ok") else "失败"
             lines.append(
                 f"最近日报渲染: {ok}；渲染 "
                 f"{self._diag.get('last_report_render_ms', '--')}ms，{age}s 前"
@@ -813,8 +797,7 @@ class StatusCardPlugin(Star):
             failed_targets = delivery.get("failed_targets") or []
             if failed_targets:
                 lines.append(
-                    "失败目标: "
-                    + "、".join(str(item) for item in failed_targets[:3])
+                    "失败目标: " + "、".join(str(item) for item in failed_targets[:3])
                 )
         else:
             lines.append("最近主动推送: 暂无记录")
@@ -841,9 +824,7 @@ class StatusCardPlugin(Star):
             + f"，内容 {','.join(daily_status.get('sections') or [])}"
         )
         if daily_status.get("next_run"):
-            lines.append(
-                "下次日报: " + str(daily_status.get("next_run"))
-            )
+            lines.append("下次日报: " + str(daily_status.get("next_run")))
         elif daily_status.get("enabled"):
             lines.append("下次日报: 待排程（任务可能未启动）")
         alarm_status = self.alerts.status()
@@ -865,6 +846,11 @@ class StatusCardPlugin(Star):
             )
         else:
             lines.append("最近日报: 暂无发送记录")
+        telemetry_on = cfg_bool(self.config, "telemetry.enabled", False)
+        lines.append(
+            "匿名指标: "
+            + ("已开启（当前版本仅本地开关，不上报）" if telemetry_on else "未开启")
+        )
         lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
         yield event.plain_result("\n".join(lines))
 
@@ -878,4 +864,3 @@ class StatusCardPlugin(Star):
         )
         yield event.plain_result(detail)
         event.stop_event()
-

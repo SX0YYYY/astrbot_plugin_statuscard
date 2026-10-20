@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import socket
 import sqlite3
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -99,8 +99,8 @@ def _parse_utc(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _line_chart(
@@ -237,16 +237,13 @@ class DailyReportBuilder:
         self.db_path = Path(db_path) if db_path is not None else None
         self.tz = get_timezone(config)
         self.tz_name = str(
-            cfg_get(config, "display.timezone", "Asia/Shanghai")
-            or "Asia/Shanghai"
+            cfg_get(config, "display.timezone", "Asia/Shanghai") or "Asia/Shanghai"
         )
         raw_redact = cfg_get(config, "display.redact", []) or []
         if isinstance(raw_redact, str):
             raw_redact = [raw_redact]
         self.redact = {
-            str(item).strip().lower()
-            for item in raw_redact
-            if str(item).strip()
+            str(item).strip().lower() for item in raw_redact if str(item).strip()
         }
 
     # ------------------------------------------------------------------
@@ -263,16 +260,10 @@ class DailyReportBuilder:
         target = self._resolve_day(day)
         previous = target - timedelta(days=1)
         history_days = max(7, min(30, int(history_days or 7)))
-        requested = (
-            list(DEFAULT_SECTIONS) if sections is None else sections
-        )
+        requested = list(DEFAULT_SECTIONS) if sections is None else sections
         if isinstance(requested, str):
             requested = [requested]
-        selected = [
-            item
-            for item in requested
-            if item in VALID_SECTIONS
-        ]
+        selected = [item for item in requested if item in VALID_SECTIONS]
         selected = [item for item in VALID_SECTIONS if item in selected]
         meta = meta or {}
         generated_at = now_in_timezone(self.config).strftime("%Y-%m-%d %H:%M:%S")
@@ -297,9 +288,7 @@ class DailyReportBuilder:
             ),
         }
         if "resource" in selected:
-            view["resources"] = self._resource_section(
-                target, previous, history_days
-            )
+            view["resources"] = self._resource_section(target, previous, history_days)
         if "anomaly" in selected:
             view["anomalies"] = self._anomaly_section(target, previous)
         if "qq" in selected:
@@ -307,13 +296,9 @@ class DailyReportBuilder:
         if "token" in selected:
             view["token"] = self._token_section(target, history_days)
         if "website" in selected:
-            view["website"] = self._website_section(
-                target, previous, history_days
-            )
+            view["website"] = self._website_section(target, previous, history_days)
         if "process" in selected:
-            view["process"] = self._process_section(
-                target, previous, history_days
-            )
+            view["process"] = self._process_section(target, previous, history_days)
         view["summary"] = self._summary(view)
         return view
 
@@ -375,7 +360,9 @@ class DailyReportBuilder:
             datetime.combine(start_day, time.min, tzinfo=self.tz).timestamp()
         )
         end_ts = int(
-            datetime.combine(day + timedelta(days=1), time.min, tzinfo=self.tz).timestamp()
+            datetime.combine(
+                day + timedelta(days=1), time.min, tzinfo=self.tz
+            ).timestamp()
         )
         rows = [
             row
@@ -403,14 +390,14 @@ class DailyReportBuilder:
             else:
                 empty_reason = "暂无资源采样数据"
         elif not available:
-            empty_reason = (
-                f"资源采样从 {first_day or '--'} 开始，暂无完整昨日数据"
-            )
+            empty_reason = f"资源采样从 {first_day or '--'} 开始，暂无完整昨日数据"
         else:
             empty_reason = None
 
         yesterday = {
-            key: self._metric_stats(yesterday_rows, key, unit="%" if key != "load1" else "")
+            key: self._metric_stats(
+                yesterday_rows, key, unit="%" if key != "load1" else ""
+            )
             for key in RESOURCE_KEYS
         }
         prev = {
@@ -473,9 +460,7 @@ class DailyReportBuilder:
             y_max=100,
             y_formatter=lambda value: f"{value:.0f}%",
         )
-        days_with_data = sum(
-            1 for item in days if by_day.get(item.isoformat())
-        )
+        days_with_data = sum(1 for item in days if by_day.get(item.isoformat()))
         if first_day and first_day > start_day.isoformat():
             history_note = (
                 f"资源历史从 {first_day} 开始，{history_days} 天趋势仍在积累。"
@@ -490,9 +475,7 @@ class DailyReportBuilder:
             60,
             min(
                 1800,
-                cfg_int(
-                    self.config, "daily_report.resource_sample_seconds", 300
-                ),
+                cfg_int(self.config, "daily_report.resource_sample_seconds", 300),
             ),
         )
         expected = max(1, 86400 // interval)
@@ -519,11 +502,7 @@ class DailyReportBuilder:
     def _metric_stats(
         rows: list[dict[str, Any]], key: str, unit: str = "%"
     ) -> dict[str, Any]:
-        values = [
-            float(row[key])
-            for row in rows
-            if row.get(key) is not None
-        ]
+        values = [float(row[key]) for row in rows if row.get(key) is not None]
         if not values:
             return {
                 "avg": None,
@@ -552,7 +531,9 @@ class DailyReportBuilder:
     def _anomaly_section(self, day: date, previous: date) -> dict[str, Any]:
         events = self.store.list_events(previous.isoformat(), limit=1000)
         events += self.store.list_events(day.isoformat(), limit=1000)
-        events.sort(key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0)))
+        events.sort(
+            key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
+        )
         open_alerts: dict[str, int] = {}
         items: list[dict[str, Any]] = []
         count = 0
@@ -569,9 +550,7 @@ class DailyReportBuilder:
             if status == "recovery":
                 start = open_alerts.pop(name, None)
                 if start:
-                    duration_text = format_duration(
-                        int(event.get("ts") or 0) - start
-                    )
+                    duration_text = format_duration(int(event.get("ts") or 0) - start)
             elif status == "alert":
                 duration_text = "进行中"
             if status in {"alert", "failed"}:
@@ -685,30 +664,22 @@ class DailyReportBuilder:
             else:
                 recv_values.append(None)
 
-        sent_map, sent_min_day, sent_available = self._platform_sent(
-            days[0], days[-1]
-        )
+        sent_map, sent_min_day, sent_available = self._platform_sent(days[0], days[-1])
         sent_values: list[int | None] = []
         for item in days:
             day_text = item.isoformat()
-            if not sent_available:
-                sent_values.append(None)
-            elif not sent_min_day or day_text < sent_min_day:
+            if not sent_available or not sent_min_day or day_text < sent_min_day:
                 sent_values.append(None)
             else:
                 sent_values.append(int(sent_map.get(day_text, 0)))
 
         yesterday = snapshots.get(day.isoformat(), {})
         previous = snapshots.get((day - timedelta(days=1)).isoformat(), {})
-        snapshot_days = sum(
-            1 for item in days if snapshots.get(item.isoformat())
-        )
+        snapshot_days = sum(1 for item in days if snapshots.get(item.isoformat()))
         if snapshot_days == 0:
             snapshot_note = "QQ 快照尚未开始积累。"
         elif snapshot_days < 2:
-            snapshot_note = (
-                f"QQ 快照已有 {snapshot_days} 天数据，趋势仍在积累。"
-            )
+            snapshot_note = f"QQ 快照已有 {snapshot_days} 天数据，趋势仍在积累。"
         else:
             snapshot_note = None
         yesterday_recv = recv_values[-1] if recv_values else None
@@ -826,10 +797,7 @@ class DailyReportBuilder:
             return {}, None, False
         finally:
             connection.close()
-        mapping = {
-            str(day): int(count or 0)
-            for day, count in rows
-        }
+        mapping = {str(day): int(count or 0) for day, count in rows}
         min_day = str(min_row[0]) if min_row and min_row[0] else None
         return mapping, min_day, True
 
@@ -844,22 +812,14 @@ class DailyReportBuilder:
             day - timedelta(days=history_days - 1 - index)
             for index in range(history_days)
         ]
-        start_ts = int(
-            datetime.combine(days[0], time.min, tzinfo=self.tz).timestamp()
-        )
+        start_ts = int(datetime.combine(days[0], time.min, tzinfo=self.tz).timestamp())
         end_ts = int(
             datetime.combine(
                 day + timedelta(days=1), time.min, tzinfo=self.tz
             ).timestamp()
         )
         rows = self.store.list_website_samples(start_ts, end_ts)
-        names = sorted(
-            {
-                str(row.get("name") or "")
-                for row in rows
-                if row.get("name")
-            }
-        )
+        names = sorted({str(row.get("name") or "") for row in rows if row.get("name")})
         by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in rows:
             local = datetime.fromtimestamp(int(row["ts"]), self.tz)
@@ -870,8 +830,7 @@ class DailyReportBuilder:
             return [
                 float(item["latency_ms"])
                 for item in items
-                if item.get("ok")
-                and item.get("latency_ms") is not None
+                if item.get("ok") and item.get("latency_ms") is not None
             ]
 
         targets: list[dict[str, Any]] = []
@@ -894,12 +853,8 @@ class DailyReportBuilder:
                         if yesterday_rows
                         else "--"
                     ),
-                    "avg_text": (
-                        f"{average:.0f} ms" if average is not None else "--"
-                    ),
-                    "peak_text": (
-                        f"{peak:.0f} ms" if peak is not None else "--"
-                    ),
+                    "avg_text": (f"{average:.0f} ms" if average is not None else "--"),
+                    "peak_text": (f"{peak:.0f} ms" if peak is not None else "--"),
                 }
             )
 
@@ -908,12 +863,8 @@ class DailyReportBuilder:
         for index, name in enumerate(names[:5]):
             values: list[float | None] = []
             for item in days:
-                latencies = latency_values(
-                    by_key.get((item.isoformat(), name), [])
-                )
-                values.append(
-                    sum(latencies) / len(latencies) if latencies else None
-                )
+                latencies = latency_values(by_key.get((item.isoformat(), name), []))
+                values.append(sum(latencies) / len(latencies) if latencies else None)
             series.append(
                 {
                     "name": name,
@@ -946,8 +897,7 @@ class DailyReportBuilder:
         history_note = None
         if first_day and first_day > days[0].isoformat():
             history_note = (
-                f"网站延迟历史从 {first_day} 开始，"
-                f"{history_days} 天趋势仍在积累。"
+                f"网站延迟历史从 {first_day} 开始，{history_days} 天趋势仍在积累。"
             )
         return {
             "available": available,
@@ -966,25 +916,17 @@ class DailyReportBuilder:
     def _process_section(
         self, day: date, previous: date, history_days: int
     ) -> dict[str, Any]:
-        start_ts = int(
-            datetime.combine(day, time.min, tzinfo=self.tz).timestamp()
-        )
+        start_ts = int(datetime.combine(day, time.min, tzinfo=self.tz).timestamp())
         end_ts = int(
             datetime.combine(
                 day + timedelta(days=1), time.min, tzinfo=self.tz
             ).timestamp()
         )
-        top_n = max(
-            3, min(10, cfg_int(self.config, "daily_report.process_top_n", 5))
-        )
-        cpu_rows = self.store.list_process_samples(
-            start_ts, end_ts, "cpu"
-        )
+        top_n = max(3, min(10, cfg_int(self.config, "daily_report.process_top_n", 5)))
+        cpu_rows = self.store.list_process_samples(start_ts, end_ts, "cpu")
         mem_rows = self.store.list_process_samples(start_ts, end_ts, "mem")
 
-        def aggregate(
-            rows: list[dict[str, Any]], key: str
-        ) -> list[dict[str, Any]]:
+        def aggregate(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
             values: dict[str, dict[str, Any]] = {}
             for row in rows:
                 name = str(row.get("name") or "").strip()
@@ -999,17 +941,15 @@ class DailyReportBuilder:
                         "samples": 0,
                     },
                 )
-                item["cpu"] = max(
-                    float(item["cpu"]), float(row.get("cpu") or 0.0)
-                )
+                item["cpu"] = max(float(item["cpu"]), float(row.get("cpu") or 0.0))
                 item["mem_mb"] = max(
                     float(item["mem_mb"]),
                     float(row.get("mem_mb") or 0.0),
                 )
                 item["samples"] += 1
-            return sorted(
-                values.values(), key=lambda item: item[key], reverse=True
-            )[:top_n]
+            return sorted(values.values(), key=lambda item: item[key], reverse=True)[
+                :top_n
+            ]
 
         redact = "process" in self.redact
 
@@ -1082,8 +1022,7 @@ class DailyReportBuilder:
             min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
 
         by_day = {
-            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0}
-            for item in days
+            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0} for item in days
         }
         by_model: dict[str, int] = {}
         for row in rows:
@@ -1094,10 +1033,7 @@ class DailyReportBuilder:
             bucket = by_day.get(local_day)
             if bucket is None:
                 continue
-            tokens = sum(
-                int(value or 0)
-                for value in (row[3], row[4], row[5])
-            )
+            tokens = sum(int(value or 0) for value in (row[3], row[4], row[5]))
             bucket["tokens"] += tokens
             bucket["calls"] += 1
             if str(row[1] or "") == "completed":
@@ -1253,25 +1189,17 @@ def build_report_text(view: dict[str, Any]) -> str:
             ]
             lines.append("网站: " + "；".join(parts))
         else:
-            lines.append(
-                f"网站: {website.get('empty_reason') or '暂无数据'}"
-            )
+            lines.append(f"网站: {website.get('empty_reason') or '暂无数据'}")
     process = view.get("process") or {}
     if "process" in sections:
         if process.get("available") and process.get("cpu"):
             top = process["cpu"][0]
             lines.append(
-                "Top 进程: {0} CPU {1}".format(
-                    top.get("name"), top.get("cpu_text")
-                )
+                "Top 进程: {0} CPU {1}".format(top.get("name"), top.get("cpu_text"))
             )
         else:
-            lines.append(
-                f"进程: {process.get('empty_reason') or '暂无数据'}"
-            )
+            lines.append(f"进程: {process.get('empty_reason') or '暂无数据'}")
     lines.append(
-        "窗口: {0}（{1}）".format(
-            view.get("window") or "", view.get("timezone") or ""
-        )
+        "窗口: {0}（{1}）".format(view.get("window") or "", view.get("timezone") or "")
     )
     return "\n".join(lines)[:1500]

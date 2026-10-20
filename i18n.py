@@ -57,8 +57,7 @@ MESSAGES: dict[str, dict[str, str]] = {
 
 def get_language(config: Any = None) -> str:
     value = str(
-        cfg_get(config, "display.language", DEFAULT_LANGUAGE)
-        or DEFAULT_LANGUAGE
+        cfg_get(config, "display.language", DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
     ).strip()
     return value if value in LANGUAGES else DEFAULT_LANGUAGE
 

@@ -65,10 +65,7 @@ def clean_report_sections(sections: Any) -> list[str] | None:
 
     if not isinstance(sections, list):
         return None
-    cleaned = [
-        item for item in sections
-        if isinstance(item, str) and item != "todo"
-    ]
+    cleaned = [item for item in sections if isinstance(item, str) and item != "todo"]
     return cleaned if cleaned != sections else None
 
 
@@ -100,4 +97,3 @@ def truncate_text(text: Any, limit: int = 2000) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 12)].rstrip() + "\n…（已截断）"
-

@@ -14,7 +14,6 @@ from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_time
 from .state import StateStore
 from .utils import redact_url, retry_delay
 
-
 KIND_LABELS = {
     "http": "HTTP",
     "tcp": "TCP",
@@ -157,6 +156,8 @@ class ServiceMonitor:
         )
 
     def _validate_suppression(self) -> None:
+        if not cfg_bool(self.config, "monitors.suppress_duplicates", False):
+            return
         for item in self.items:
             dependency = str(item.get("suppress_when_down") or "").strip()
             if not dependency:
@@ -245,9 +246,7 @@ class ServiceMonitor:
     def _silence_until(self) -> datetime | None:
         """Parse ``monitors.silence_until`` as a wall-clock time in display.timezone."""
 
-        raw = str(
-            cfg_get(self.config, "monitors.silence_until", "") or ""
-        ).strip()
+        raw = str(cfg_get(self.config, "monitors.silence_until", "") or "").strip()
         if not raw:
             return None
         parsed: datetime | None = None
@@ -268,10 +267,13 @@ class ServiceMonitor:
         return parsed.replace(tzinfo=now_in_timezone(self.config).tzinfo)
 
     def _is_silenced(self) -> bool:
+        if not cfg_bool(self.config, "monitors.silence_enabled", False):
+            if self._silence_active:
+                logger.info("服务监测维护静默开关已关闭，恢复推送")
+                self._silence_active = False
+            return False
         until = self._silence_until()
-        silenced = bool(
-            until is not None and now_in_timezone(self.config) < until
-        )
+        silenced = bool(until is not None and now_in_timezone(self.config) < until)
         if silenced != self._silence_active:
             if silenced and until is not None:
                 logger.info(
@@ -307,6 +309,8 @@ class ServiceMonitor:
         be healthy first. This avoids two alarms for one outage.
         """
 
+        if not cfg_bool(self.config, "monitors.suppress_duplicates", False):
+            return None
         dependency = str(item.get("suppress_when_down") or "").strip()
         if not dependency:
             return None
@@ -422,9 +426,7 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
-                        self._record_event(
-                            name, target_text, detail, "alert"
-                        )
+                        self._record_event(name, target_text, detail, "alert")
                     else:
                         retry_count = int(st.get("retry_count") or 0) + 1
                         st["retry_count"] = retry_count
@@ -436,9 +438,7 @@ class ServiceMonitor:
             st["last_error"] = ""
             pending_text = st.get("pending_recovery")
             if pending_text:
-                next_recovery = float(
-                    st.get("recovery_next_attempt") or 0
-                )
+                next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
                     sent = await self._send(str(pending_text))
                     if sent:
@@ -447,13 +447,9 @@ class ServiceMonitor:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = int(
-                            st.get("recovery_retry_count") or 0
-                        ) + 1
+                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
                         st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = (
-                            now + retry_delay(retry_count)
-                        )
+                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 duration = now - float(st.get("since") or now)
                 st["alerting"] = False
@@ -476,9 +472,7 @@ class ServiceMonitor:
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
                     else:
-                        self._record_event(
-                            name, target_text, detail, "recovery"
-                        )
+                        self._record_event(name, target_text, detail, "recovery")
                 st["pending"] = False
         states[key] = st
 
@@ -493,46 +487,46 @@ class ServiceMonitor:
             keyword = str(item.get("keyword") or "").strip()
             try:
                 started = time.perf_counter()
-                async with httpx.AsyncClient(
-                    follow_redirects=True, timeout=timeout
-                ) as cli:
-                    async with cli.stream("GET", url) as resp:
-                        status_code = resp.status_code
-                        if expected and status_code != expected:
-                            return (
-                                False,
-                                f"HTTP {status_code}（期望 {expected}）",
-                                url,
-                            )
-                        if not expected and status_code >= 400:
-                            return False, f"HTTP {status_code}", url
-                        if keyword:
-                            limit = max(
-                                1024,
-                                min(
-                                    10 * 1024 * 1024,
-                                    cfg_int(
-                                        self.config,
-                                        "monitors.max_response_bytes",
-                                        262144,
-                                    ),
+                async with (
+                    httpx.AsyncClient(follow_redirects=True, timeout=timeout) as cli,
+                    cli.stream("GET", url) as resp,
+                ):
+                    status_code = resp.status_code
+                    if expected and status_code != expected:
+                        return (
+                            False,
+                            f"HTTP {status_code}（期望 {expected}）",
+                            url,
+                        )
+                    if not expected and status_code >= 400:
+                        return False, f"HTTP {status_code}", url
+                    if keyword:
+                        limit = max(
+                            1024,
+                            min(
+                                10 * 1024 * 1024,
+                                cfg_int(
+                                    self.config,
+                                    "monitors.max_response_bytes",
+                                    262144,
                                 ),
-                            )
-                            body = bytearray()
-                            async for chunk in resp.aiter_bytes():
-                                body.extend(chunk)
-                                if len(body) >= limit:
-                                    body = body[:limit]
-                                    break
-                            encoding = resp.charset_encoding or "utf-8"
-                            try:
-                                text = body.decode(encoding, errors="replace")
-                            except LookupError:
-                                text = body.decode("utf-8", errors="replace")
-                            if keyword not in text:
-                                return False, "响应中未找到关键字", url
-                        ms = (time.perf_counter() - started) * 1000
-                        return True, f"HTTP {status_code}（{ms:.0f}ms）", url
+                            ),
+                        )
+                        body = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) >= limit:
+                                body = body[:limit]
+                                break
+                        encoding = resp.charset_encoding or "utf-8"
+                        try:
+                            text = body.decode(encoding, errors="replace")
+                        except LookupError:
+                            text = body.decode("utf-8", errors="replace")
+                        if keyword not in text:
+                            return False, "响应中未找到关键字", url
+                    ms = (time.perf_counter() - started) * 1000
+                    return True, f"HTTP {status_code}（{ms:.0f}ms）", url
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", url
 
@@ -574,7 +568,9 @@ class ServiceMonitor:
                     timeout=timeout,
                 )
                 if proc.returncode != 0:
-                    detail = (proc.stderr or proc.stdout or "docker inspect 失败").strip()
+                    detail = (
+                        proc.stderr or proc.stdout or "docker inspect 失败"
+                    ).strip()
                     return False, detail[:200], container
                 running = proc.stdout.strip().lower() == "true"
                 return running, f"容器 running={running}", container
@@ -640,9 +636,7 @@ class ServiceMonitor:
             logger.warning("服务监测推送目标为空")
             return False
         try:
-            return await self.plugin.send_text(
-                self.targets, text, source="monitor"
-            )
+            return await self.plugin.send_text(self.targets, text, source="monitor")
         except Exception:
             logger.exception("服务监测推送失败")
             return False
@@ -658,9 +652,7 @@ class ServiceMonitor:
                 "detail": detail,
             }
 
-        return list(
-            await asyncio.gather(*(one(item) for item in self.items))
-        )
+        return list(await asyncio.gather(*(one(item) for item in self.items)))
 
     def status(self) -> dict[str, Any]:
         monitors = self.state.get("monitors", {}) or {}

@@ -71,12 +71,8 @@ def test_report_store_roundtrip(tmp_path: Path) -> None:
 def test_report_store_prunes_old_rows(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     assert store.add_resource(1_000, cpu=1.0)
-    assert store.add_event(
-        1_000, "2020-01-01", "resource", "CPU", "too high", "alert"
-    )
-    assert store.record_snapshot(
-        "2020-01-01", 1, 2, 3, 4, True, 1_000
-    )
+    assert store.add_event(1_000, "2020-01-01", "resource", "CPU", "too high", "alert")
+    assert store.record_snapshot("2020-01-01", 1, 2, 3, 4, True, 1_000)
 
     store.prune(resource_days=7, event_days=30, now=1_000_000_000)
 

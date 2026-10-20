@@ -17,7 +17,7 @@ try:
 except ImportError:  # Windows development environment
     pwd = None  # type: ignore[assignment]
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -34,14 +34,11 @@ _TZ_WARNED: set[str] = set()
 
 
 def _dt_now() -> datetime:
-    return datetime.now(timezone.utc).astimezone()
+    return datetime.now(UTC).astimezone()
 
 
 def get_timezone(config: Any = None):
-    name = str(
-        cfg_get(config, "display.timezone", "Asia/Shanghai")
-        or "Asia/Shanghai"
-    )
+    name = str(cfg_get(config, "display.timezone", "Asia/Shanghai") or "Asia/Shanghai")
     try:
         return ZoneInfo(name)
     except Exception:
@@ -55,13 +52,13 @@ def now_in_timezone(config: Any = None) -> datetime:
     return datetime.now(get_timezone(config))
 
 
-BOOT_TIME = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc).astimezone()
+BOOT_TIME = datetime.fromtimestamp(psutil.boot_time(), tz=UTC).astimezone()
 PROCESS_START_TIME = datetime.fromtimestamp(
-    psutil.Process(os.getpid()).create_time(), tz=timezone.utc
+    psutil.Process(os.getpid()).create_time(), tz=UTC
 ).astimezone()
 
 
-def format_bytes(value: float | int | None, digits: int = 2) -> str:
+def format_bytes(value: float | None, digits: int = 2) -> str:
     if value is None:
         return "--"
     try:
@@ -78,11 +75,11 @@ def format_bytes(value: float | int | None, digits: int = 2) -> str:
     return f"{value:.{digits}f} {units[idx]}"
 
 
-def format_speed(value: float | int | None) -> str:
+def format_speed(value: float | None) -> str:
     return f"{format_bytes(value, 1)}/s"
 
 
-def format_duration(seconds: float | int | None) -> str:
+def format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "--"
     try:
@@ -109,9 +106,7 @@ def cfg_get(config: Any, path: str, default: Any = None) -> Any:
     for part in path.split("."):
         if cur is None:
             return default
-        if hasattr(cur, "get"):
-            cur = cur.get(part)
-        elif isinstance(cur, dict):
+        if hasattr(cur, "get") or isinstance(cur, dict):
             cur = cur.get(part)
         else:
             return default
@@ -313,7 +308,7 @@ def disk_io() -> list[DiskIO]:
             write = max(0.0, (now_one.write_bytes - past_one.write_bytes) / dt)
             ret.append(DiskIO(name=name, read=read, write=write))
         _last_disk_io = (now, now_c)
-        ret.sort(key=lambda x: (x.read + x.write), reverse=True)
+        ret.sort(key=lambda x: x.read + x.write, reverse=True)
         return ret[:6]
     except Exception:
         return []
@@ -348,7 +343,7 @@ def network_io(ignore_names: list[str] | None = None) -> list[NetIO]:
             recv = max(0.0, (now_one.bytes_recv - past_one.bytes_recv) / dt)
             ret.append(NetIO(name=name, sent=sent, recv=recv))
         _last_net_io = (now, now_c)
-        ret.sort(key=lambda x: (x.sent + x.recv), reverse=True)
+        ret.sort(key=lambda x: x.sent + x.recv, reverse=True)
         return ret[:6]
     except Exception:
         return []
@@ -485,9 +480,7 @@ _BLOCKED_STATUSES = {
 _SLEEPING_STATUSES = {"sleeping", "idle", "parked"}
 
 _PROC_CPU_LOCK = threading.Lock()
-_PROC_CPU_PREV: dict[
-    tuple[int, float], tuple[float, float, float]
-] = {}
+_PROC_CPU_PREV: dict[tuple[int, float], tuple[float, float, float]] = {}
 _PROC_CPU_READY = False
 
 
@@ -611,9 +604,7 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
             entry = previous.get(key)
             cpu = float(entry[2]) if entry is not None else 0.0
             procs.append(
-                ProcStatus(
-                    name=name, pid=pid, cpu=cpu, mem=mem, status=status
-                )
+                ProcStatus(name=name, pid=pid, cpu=cpu, mem=mem, status=status)
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -650,9 +641,9 @@ def _pick_network_interface() -> str:
             return "--"
 
         def score(name: str) -> tuple[int, int]:
-            preferred = 1 if name.startswith(
-                ("eth", "enp", "ens", "eno", "wlan", "wl")
-            ) else 0
+            preferred = (
+                1 if name.startswith(("eth", "enp", "ens", "eno", "wlan", "wl")) else 0
+            )
             c = counters.get(name)
             traffic = (int(c.bytes_sent) + int(c.bytes_recv)) if c else 0
             return (preferred, traffic)
@@ -757,9 +748,7 @@ def _package_counts(
     dpkg: int | None = None
     pip: int | None = None
     if shutil.which("dpkg-query"):
-        out = _run_command(
-            ["dpkg-query", "-W", "-f", "${Package}\n"], timeout=6
-        )
+        out = _run_command(["dpkg-query", "-W", "-f", "${Package}\n"], timeout=6)
         if out is not None:
             dpkg = len([line for line in out.splitlines() if line.strip()])
     try:
@@ -857,7 +846,11 @@ def _get_aiocqhttp_client(
             insts = getattr(manager, "platform_insts", [])
         for inst in insts:
             try:
-                meta = inst.meta() if callable(getattr(inst, "meta", None)) else getattr(inst, "meta", None)
+                meta = (
+                    inst.meta()
+                    if callable(getattr(inst, "meta", None))
+                    else getattr(inst, "meta", None)
+                )
             except Exception:
                 meta = None
             name = str(getattr(meta, "name", "") or "")
@@ -935,9 +928,7 @@ async def collect_bot_info(
     except Exception:
         pass
     if not platform_id:
-        platform_id = str(
-            cfg_get(config, "alerts.platform_id", "default") or "default"
-        )
+        platform_id = str(cfg_get(config, "alerts.platform_id", "default") or "default")
     cache_key = f"{platform_id}:{self_id or 'default'}"
     cache = _bot_cache.setdefault(cache_key, {})
     if len(_bot_cache) > _BOT_CACHE_MAX_KEYS:
@@ -956,11 +947,7 @@ async def collect_bot_info(
         if not item:
             return False, None
         ts, value = item
-        ttl = (
-            _BOT_CACHE_SUCCESS_TTL
-            if value is not None
-            else _BOT_CACHE_FAILURE_TTL
-        )
+        ttl = _BOT_CACHE_SUCCESS_TTL if value is not None else _BOT_CACHE_FAILURE_TTL
         return (now - ts < ttl), value
 
     def store(name: str, value: Any) -> None:
@@ -1001,9 +988,7 @@ async def collect_bot_info(
             if ok_self and ok_nick:
                 return
             try:
-                login = _normalize_object(
-                    await _call_action(client, "get_login_info")
-                )
+                login = _normalize_object(await _call_action(client, "get_login_info"))
                 sid = str(login.get("user_id") or "")
                 nick = str(login.get("nickname") or "")
                 data["self_id"] = sid
@@ -1029,9 +1014,7 @@ async def collect_bot_info(
                     or version.get("app_full_name")
                     or "NapCat.Onebot"
                 )
-                pver = str(
-                    version.get("app_version") or version.get("version") or ""
-                )
+                pver = str(version.get("app_version") or version.get("version") or "")
                 data["protocol_name"] = pname
                 data["protocol_version"] = pver
                 store("protocol_name", pname)
@@ -1046,9 +1029,7 @@ async def collect_bot_info(
             if ok_friends:
                 return
             try:
-                friends = _normalize_list(
-                    await _call_action(client, "get_friend_list")
-                )
+                friends = _normalize_list(await _call_action(client, "get_friend_list"))
                 value = len(friends) if friends is not None else None
                 data["friends"] = value
                 store("friends", value)
@@ -1062,14 +1043,10 @@ async def collect_bot_info(
             if ok_groups and ok_members:
                 return
             try:
-                groups = _normalize_list(
-                    await _call_action(client, "get_group_list")
-                )
+                groups = _normalize_list(await _call_action(client, "get_group_list"))
                 if groups is not None:
                     gcount = len(groups)
-                    mcount = sum(
-                        int(g.get("member_count") or 0) for g in groups
-                    )
+                    mcount = sum(int(g.get("member_count") or 0) for g in groups)
                     data["groups"] = gcount
                     data["members"] = mcount
                     store("groups", gcount)
@@ -1087,9 +1064,7 @@ async def collect_bot_info(
             if ok_online:
                 return
             try:
-                status = _normalize_object(
-                    await _call_action(client, "get_status")
-                )
+                status = _normalize_object(await _call_action(client, "get_status"))
                 online = bool(status.get("online")) if "online" in status else True
                 data["online"] = online
                 store("online", online)
@@ -1121,9 +1096,7 @@ async def collect_bot_info(
     except Exception:
         event_adapter = ""
     bot["adapter"] = (
-        "aiocqhttp"
-        if bot.get("has_client")
-        else (event_adapter or "aiocqhttp")
+        "aiocqhttp" if bot.get("has_client") else (event_adapter or "aiocqhttp")
     )
 
     nick_cfg = cfg_get(config, "avatar.avatar_text", "")
@@ -1146,17 +1119,13 @@ async def collect_bot_info(
     baseline = int(recv_state.get("baseline") or 0)
     accum = int(recv_state.get("accum") or 0)
     bot["recv"] = (baseline + accum) if recv_available else None
-    bot["recv_scope"] = (
-        "message_stats 跟踪群" if recv_available else "暂无接收统计"
-    )
+    bot["recv_scope"] = "message_stats 跟踪群" if recv_available else "暂无接收统计"
     bot["sent"] = await asyncio.to_thread(query_sent_total)
     bot["sent_scope"] = "platform_stats 全量"
 
     bot["avatar_url"] = ""
     if str(bot.get("self_id") or "").isdigit():
-        bot["avatar_url"] = (
-            f"https://q1.qlogo.cn/g?b=qq&nk={bot['self_id']}&s=640"
-        )
+        bot["avatar_url"] = f"https://q1.qlogo.cn/g?b=qq&nk={bot['self_id']}&s=640"
     return bot
 
 
@@ -1227,9 +1196,7 @@ async def fetch_avatar_bytes(
         data_dir,
     )
     if source == "upload":
-        uploaded = uploaded_file_path(
-            config, "avatar.avatar_upload_files", data_dir
-        )
+        uploaded = uploaded_file_path(config, "avatar.avatar_upload_files", data_dir)
         if uploaded is not None:
             try:
                 if uploaded.stat().st_size > MAX_IMAGE_BYTES:
@@ -1321,9 +1288,7 @@ def build_network_chart(history: Any, tz: Any = None) -> dict[str, Any]:
     if len(points) < 60:
         first_ts = points[0][0]
         pad = 60 - len(points)
-        points = [
-            (first_ts - (pad - i) * 60, 0.0, 0.0) for i in range(pad)
-        ] + points
+        points = [(first_ts - (pad - i) * 60, 0.0, 0.0) for i in range(pad)] + points
 
     max_value = max(max(p[1], p[2]) for p in points)
     max_value = _nice_ceil(max_value * 1.12)
@@ -1410,7 +1375,11 @@ def _overview_cards(
     context: Any, bot: dict[str, Any], tz: Any = None
 ) -> list[dict[str, str]]:
     boot = BOOT_TIME
-    boot_text = boot.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S") if tz else boot.strftime("%Y-%m-%d %H:%M:%S")
+    boot_text = (
+        boot.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        if tz
+        else boot.strftime("%Y-%m-%d %H:%M:%S")
+    )
     uptime = format_duration(_dt_now().timestamp() - boot.timestamp())
     plugin_count = 0
     try:
@@ -1420,8 +1389,7 @@ def _overview_cards(
                 [
                     star
                     for star in stars
-                    if getattr(star, "name", "")
-                    not in {"astrbot", "builtin_commands"}
+                    if getattr(star, "name", "") not in {"astrbot", "builtin_commands"}
                 ]
             )
     except Exception:
@@ -1466,9 +1434,7 @@ def _system_info_rows(
     state: Any = None,
 ) -> list[dict[str, str]]:
     dpkg, pip = _package_counts(state)
-    packages = (
-        f"{pip if pip is not None else '--'} pip / {dpkg if dpkg is not None else '--'} dpkg"
-    )
+    packages = f"{pip if pip is not None else '--'} pip / {dpkg if dpkg is not None else '--'} dpkg"
     disk_text = "--"
     if disks:
         d = disks[0]
@@ -1503,15 +1469,16 @@ def _system_info_rows(
         },
         {"label": "Network", "value": net_interface},
         {"label": "Arch", "value": platform.machine()},
-        {"label": "Scope", "value": "宿主机" if platform.system() == "Linux" else "本机"},
+        {
+            "label": "Scope",
+            "value": "宿主机" if platform.system() == "Linux" else "本机",
+        },
         {"label": "Disk", "value": disk_text},
         {"label": "Platform", "value": protocol},
     ]
 
 
-def _resources(
-    cpu_pct: float, mem: MemStat, swap: MemStat
-) -> list[dict[str, Any]]:
+def _resources(cpu_pct: float, mem: MemStat, swap: MemStat) -> list[dict[str, Any]]:
     brand = get_cpu_brand()
     cores = cpu_count() or cpu_count_logical() or 0
     logical = cpu_count_logical() or cores
@@ -1548,11 +1515,7 @@ def _rule_set(config: Any) -> set[str]:
         raw = [raw]
     if not isinstance(raw, list):
         return set()
-    return {
-        str(item).strip().lower()
-        for item in raw
-        if str(item).strip()
-    }
+    return {str(item).strip().lower() for item in raw if str(item).strip()}
 
 
 def _apply_redaction(view: dict[str, Any], config: Any) -> None:
@@ -1637,8 +1600,18 @@ async def collect_all(
     up_rate = float(net_state.get("up_rate") or 0.0)
     down_rate = float(net_state.get("down_rate") or 0.0)
     month_names = {
-        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+        1: "Jan",
+        2: "Feb",
+        3: "Mar",
+        4: "Apr",
+        5: "May",
+        6: "Jun",
+        7: "Jul",
+        8: "Aug",
+        9: "Sep",
+        10: "Oct",
+        11: "Nov",
+        12: "Dec",
     }
     month = str(net_state.get("month") or now.strftime("%Y-%m"))
     try:

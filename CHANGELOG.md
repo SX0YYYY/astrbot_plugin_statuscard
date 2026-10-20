@@ -4,6 +4,22 @@
 
 暂无。
 
+## v2.10.0 — 2026-10-21
+
+### 新增
+
+- `display.t2i_benchmark`（默认关闭）：开启后记录状态卡/日报渲染耗时日志。
+- `monitors.silence_enabled`（默认关闭）：维护静默总开关，只有开启时 `silence_until` 才生效。
+- `monitors.suppress_duplicates`（默认关闭）：重复层抑制总开关，只有开启时 `suppress_when_down` 才生效。
+- `telemetry.enabled`（默认关闭）：匿名指标预留开关，当前版本不上报任何数据。
+- 新增 `logo.png`、`SECURITY.md`、GitHub issue 模板。
+- 抽出 `delivery.py` 的 `deliver_targets` / `DeliveryResult`，为后续 `DeliveryService` 打基础。
+
+### 变更
+
+- 全量 ruff 格式化。
+- 新增 4 个集成单测，pytest 70 passed。
+
 ## v2.9.3 — 2026-10-20
 
 ### 变更

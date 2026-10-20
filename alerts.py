@@ -19,8 +19,8 @@ from .collectors import (
     cached_cpu_percent,
     cfg_bool,
     cfg_float,
-    cfg_int,
     cfg_get,
+    cfg_int,
     format_bytes,
     format_duration,
     memory_stat,
@@ -57,9 +57,7 @@ class AlertEngine:
         self.interval = max(
             15, min(3600, cfg_int(config, "alerts.interval_seconds", 60))
         )
-        self.sustain = max(
-            1, min(100, cfg_int(config, "alerts.sustain_samples", 3))
-        )
+        self.sustain = max(1, min(100, cfg_int(config, "alerts.sustain_samples", 3)))
         self.cooldown = max(
             0, min(86400, cfg_int(config, "alerts.cooldown_seconds", 1800))
         )
@@ -109,18 +107,13 @@ class AlertEngine:
 
         try:
             time_text = str(
-                cfg_get(
-                    self.config, "alerts.daily_summary.time", "09:00"
-                )
-                or "09:00"
+                cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
             ).strip()
             hour, minute = [int(x) for x in time_text.split(":", 1)]
             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 return None
             now = now_in_timezone(self.config)
-            target = now.replace(
-                hour=hour, minute=minute, second=0, microsecond=0
-            )
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)
             return target
@@ -139,15 +132,11 @@ class AlertEngine:
             return
         exc = task.exception()
         if exc is not None:
-            logger.error(
-                "状态卡后台任务异常退出: %r", exc, exc_info=exc
-            )
+            logger.error("状态卡后台任务异常退出: %r", exc, exc_info=exc)
 
     def start(self) -> None:
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
-        daily_on = cfg_bool(
-            self.config, "alerts.daily_summary.enabled", False
-        )
+        daily_on = cfg_bool(self.config, "alerts.daily_summary.enabled", False)
         self._running = alerts_on or daily_on
         if alerts_on:
             self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -227,9 +216,7 @@ class AlertEngine:
         if not self.targets:
             logger.warning("告警目标为空，跳过发送")
             return False
-        if not await self.plugin.send_text(
-            self.targets, text, source=source
-        ):
+        if not await self.plugin.send_text(self.targets, text, source=source):
             logger.warning("告警发送失败：%s", text.splitlines()[0] if text else "")
             return False
         return True
@@ -420,9 +407,7 @@ class AlertEngine:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
-                next_recovery = float(
-                    st.get("recovery_next_attempt") or 0
-                )
+                next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
                     sent = await self._send(str(pending_text))
                     if sent:
@@ -431,13 +416,9 @@ class AlertEngine:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = int(
-                            st.get("recovery_retry_count") or 0
-                        ) + 1
+                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
                         st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = (
-                            now + retry_delay(retry_count)
-                        )
+                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 st["alerting"] = False
                 st["retry_count"] = 0
@@ -491,9 +472,7 @@ class AlertEngine:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
-                next_recovery = float(
-                    st.get("recovery_next_attempt") or 0
-                )
+                next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
                     sent = await self._send(str(pending_text))
                     if sent:
@@ -503,13 +482,9 @@ class AlertEngine:
                         st.pop("recovery_retry_count", None)
                         logger.info("Bot 连接恢复通知补发成功")
                     else:
-                        retry_count = int(
-                            st.get("recovery_retry_count") or 0
-                        ) + 1
+                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
                         st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = (
-                            now + retry_delay(retry_count)
-                        )
+                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
                         logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
             if st.get("alerting") or st.get("pending_alert_text"):
                 duration = now - float(st.get("since") or now)
@@ -548,9 +523,7 @@ class AlertEngine:
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
-                        logger.warning(
-                            "Bot 连接恢复通知发送失败，已排队重试"
-                        )
+                        logger.warning("Bot 连接恢复通知发送失败，已排队重试")
             return
 
         # Keep pending_recovery for the next online transition instead of
@@ -573,14 +546,10 @@ class AlertEngine:
             if ok:
                 st.pop("pending_alert_text", None)
                 logger.info("Bot 连接离线告警已发送")
-                self._record_event(
-                    "offline", "Bot 连接", "连接离线", "alert"
-                )
+                self._record_event("offline", "Bot 连接", "连接离线", "alert")
             else:
                 st["pending_alert_text"] = text
-                logger.warning(
-                    "Bot 连接离线告警发送失败，已排队，恢复后补发"
-                )
+                logger.warning("Bot 连接离线告警发送失败，已排队，恢复后补发")
                 self._record_event(
                     "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
@@ -636,15 +605,11 @@ class AlertEngine:
                     await asyncio.sleep(60)
                     continue
                 now = datetime.now(tz)
-                target = now.replace(
-                    hour=hour, minute=minute, second=0, microsecond=0
-                )
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
                     target += timedelta(days=1)
                 if last_logged != target:
-                    self._next_daily_text = target.strftime(
-                        "%Y-%m-%d %H:%M"
-                    )
+                    self._next_daily_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
                         "每日定时状态图将在 %s 发送（%.0f 秒后）",
                         self._next_daily_text,
@@ -658,9 +623,7 @@ class AlertEngine:
                     await asyncio.sleep(60)
                     continue
                 await asyncio.sleep(wait)
-                if not cfg_bool(
-                    self.config, "alerts.daily_summary.enabled", False
-                ):
+                if not cfg_bool(self.config, "alerts.daily_summary.enabled", False):
                     continue
                 current_time_text = str(
                     cfg_get(self.config, "alerts.daily_summary.time", "09:00")
@@ -699,9 +662,7 @@ class AlertEngine:
         if not self.targets:
             logger.warning("每日定时状态图已启用，但告警目标为空，跳过发送")
             return True
-        with_image = cfg_bool(
-            self.config, "alerts.daily_summary.with_image", True
-        )
+        with_image = cfg_bool(self.config, "alerts.daily_summary.with_image", True)
         if with_image:
             try:
                 image_url = await self.plugin.build_status_image()
@@ -750,8 +711,7 @@ class AlertEngine:
             min(65535, cfg_int(self.config, "alerts.komari_webhook.port", 9968)),
         )
         path = str(
-            cfg_get(self.config, "alerts.komari_webhook.path", "/webhook")
-            or "/webhook"
+            cfg_get(self.config, "alerts.komari_webhook.path", "/webhook") or "/webhook"
         )
         if not path.startswith("/"):
             path = "/" + path
@@ -773,11 +733,11 @@ class AlertEngine:
         app = web.Application()
         max_body_bytes = 64 * 1024
 
-        async def handle(request: "web.Request") -> "web.Response":
+        async def handle(request: web.Request) -> web.Response:
             if token:
                 auth = request.headers.get("Authorization", "")
                 if not hmac.compare_digest(
-                    auth.encode("utf-8"), f"Bearer {token}".encode("utf-8")
+                    auth.encode("utf-8"), f"Bearer {token}".encode()
                 ):
                     return web.json_response(
                         {"status": "error", "message": "unauthorized"},
@@ -798,9 +758,7 @@ class AlertEngine:
             try:
                 data = json.loads(raw.decode("utf-8"))
             except Exception:
-                data = {
-                    "message": raw.decode("utf-8", errors="replace")[:4000]
-                }
+                data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
             text = self._format_komari(data)
             ok = await self._send(text, source="webhook")
             if not ok:
@@ -876,9 +834,7 @@ class AlertEngine:
                 cleaned.append(text)
             lines.extend(cleaned or [message])
         else:
-            lines.append(
-                json.dumps(data, ensure_ascii=False, indent=2)[:4000]
-            )
+            lines.append(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
         return truncate_text("\n".join(lines), 2000)
 
     # ------------------------------------------------------------------

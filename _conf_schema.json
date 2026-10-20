@@ -264,6 +264,15 @@
         },
         "hint": "超时后回退为文字摘要。"
       },
+      "t2i_benchmark": {
+        "description": "记录 T2I 渲染耗时",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "开启后每次状态卡/日报渲染完成会记录一条耗时日志，便于排查 T2I 延迟。"
+      },
       "access": {
         "description": "状态卡访问权限（已废弃）",
         "type": "string",
@@ -796,6 +805,15 @@
         "default": false,
         "hint": "轮询间隔、连续失败次数、冷却等；通常不需要改。"
       },
+      "silence_enabled": {
+        "description": "启用维护静默",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "只有开启时，下面的维护静默截止时间才会生效。"
+      },
       "silence_until": {
         "description": "维护静默截止时间",
         "type": "string",
@@ -805,6 +823,15 @@
           "show_advanced": true
         },
         "hint": "格式 YYYY-MM-DD HH:MM；到时间前只探测、不发送异常/恢复通知。留空表示不静默。"
+      },
+      "suppress_duplicates": {
+        "description": "抑制重复层告警",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "开启后，HTTP 监测项的 suppress_when_down 才会生效；依赖的容器/服务异常时不再重复告警。"
       },
       "interval_seconds": {
         "description": "轮询间隔（秒）",
@@ -1042,6 +1069,19 @@
         "condition": {
           "show_advanced": true
         }
+      }
+    }
+  },
+  "telemetry": {
+    "description": "匿名指标（预留）",
+    "type": "object",
+    "hint": "预留开关；当前版本不会上报任何数据。",
+    "items": {
+      "enabled": {
+        "description": "启用匿名指标",
+        "type": "bool",
+        "default": false,
+        "hint": "当前版本仅保存本地开关，没有上报端点。"
       }
     }
   }
