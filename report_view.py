@@ -266,6 +266,8 @@ class DailyReportBuilder:
         requested = (
             list(DEFAULT_SECTIONS) if sections is None else sections
         )
+        if isinstance(requested, str):
+            requested = [requested]
         selected = [
             item
             for item in requested
