@@ -498,6 +498,18 @@ def test_report_html_renders_new_sections(tmp_path: Path) -> None:
     assert "<script" not in html
 
 
+def test_report_html_renders_dark_theme(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    view = _builder(tmp_path, store).build(
+        day="2026-10-20", history_days=7, sections=[]
+    )
+    html = build_report_html(view, render_width=650, theme="dark")
+
+    assert 'data-theme="dark"' in html
+    assert '[data-theme="dark"] body' in html
+    assert "<script" not in html
+
+
 def test_report_text_contains_new_sections() -> None:
     view = {
         "title": "系统日报",

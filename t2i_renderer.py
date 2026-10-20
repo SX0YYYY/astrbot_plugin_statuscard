@@ -130,14 +130,21 @@ def build_default_html(
     return template.render(d=view)
 
 
-def build_report_html(view: dict[str, Any], render_width: int = 650) -> str:
+def build_report_html(
+    view: dict[str, Any], render_width: int = 650, theme: str = "light"
+) -> str:
     """Render the daily-report template without any JavaScript dependency."""
 
     width = max(650, min(1600, int(render_width or 650)))
+    theme = "dark" if str(theme or "").strip().lower() == "dark" else "light"
     css = _read_text(REPORT_DIR / "report.css").replace(
         "width: 650px", f"width: {width}px"
     )
     template_text = _read_text(REPORT_DIR / "index.html.jinja")
+    template_text = template_text.replace(
+        '<html lang="zh-CN">',
+        f'<html lang="zh-CN" data-theme="{theme}">',
+    )
     template_text = template_text.replace("__REPORT_CSS__", css)
     template_text = template_text.replace(
         'content="width=650, initial-scale=1.0"',

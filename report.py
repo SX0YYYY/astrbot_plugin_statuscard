@@ -21,6 +21,7 @@ from .collectors import (
     now_in_timezone,
     swap_stat,
 )
+from .i18n import tr
 from .report_store import ReportStore
 from .report_view import (
     DEFAULT_SECTIONS,
@@ -565,12 +566,12 @@ class DailyReporter:
 
     async def preview(self, target_umo: str | None) -> tuple[bool, str]:
         if not target_umo:
-            return False, "无法确定当前会话，日报预览未发送。"
+            return False, tr(self.config, "report_no_session")
         try:
             view = self._build_view()
         except Exception:
             logger.exception("日报预览数据聚合失败")
-            return False, "日报预览生成失败，请查看后台日志。"
+            return False, tr(self.config, "report_preview_failed")
         if self._with_image():
             image_url = None
             try:
@@ -580,10 +581,10 @@ class DailyReporter:
             if image_url and await self.plugin.send_image(
                 [target_umo], image_url
             ):
-                return True, "日报预览已发送。"
+                return True, tr(self.config, "report_preview_sent")
         if await self.plugin.send_text([target_umo], build_report_text(view)):
-            return True, "日报预览已发送（文字）。"
-        return False, "日报预览发送失败，请查看后台日志。"
+            return True, tr(self.config, "report_preview_sent_text")
+        return False, tr(self.config, "report_preview_send_failed")
 
     def _record(self, day: str, ok: bool, detail: str) -> None:
         try:

@@ -4,6 +4,25 @@
 
 暂无。
 
+## v2.8.0 — 2026-10-20
+
+### 新增
+
+- 插件页面和元数据支持中英双语：新增 `.astrbot-plugin/i18n/en-US.json`，页面文案跟随 AstrBot WebUI 语言。
+- 新增 `display.language`（默认 `zh-CN`），QQ 命令提示支持中英双语；`待办` 增加英文别名 `todo`。
+- 新增 `daily_report.theme`（默认 `light`），日报支持浅色/深色主题。
+- 插件页面跟随 AstrBot 主题（`data-theme`），并补充键盘左右方向键切换标签、`aria` 标签和 `prefers-reduced-motion`。
+- 页面图表增加 `aria-label`，表格表头增加 `scope`，状态同时用文字和颜色表示。
+
+### 说明
+
+- 状态卡仍保持现有深色主题；浅色状态卡和本地渲染在后续版本提供。
+- 页面语言由 WebUI 语言决定；`display.language` 只影响 QQ 命令回复。
+
+### 测试
+
+- 新增 i18n 回退/变量测试和日报深色主题渲染测试，pytest 54 passed。
+
 ## v2.7.0 — 2026-10-20
 
 ### 新增

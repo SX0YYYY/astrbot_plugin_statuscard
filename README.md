@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.7.0-blue)
+![Version](https://img.shields.io/badge/version-2.8.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -23,6 +23,7 @@
 - **待办**：管理员可用 `待办` 命令记录和完成待办，日报自动汇总昨日新增/完成/未完成
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
 - **Web 看板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件、日报和待办
+- **双语与主题**：页面和命令提示支持中英双语，日报支持浅色/深色主题，页面跟随 AstrBot 主题
 
 ## Web 看板
 
@@ -34,7 +35,15 @@
 - **日报**：昨日日报摘要、关键数据和发送记录
 - **待办**：查看、添加、完成、删除待办
 
-页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API（4.29 已验证）；旧版 AstrBot 不支持时会跳过注册，QQ 命令仍可正常使用。
+页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API（4.29 已验证）；旧版 AstrBot 不支持时会跳过注册，QQ 命令仍可正常使用。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
+
+## 国际化与主题
+
+- **页面语言**：跟随 AstrBot WebUI 界面语言，已提供 `zh-CN` 和 `en-US` 两套页面文案。
+- **命令提示语言**：在“状态卡显示”中把“命令提示语言”设为 `zh-CN` 或 `en-US`；`待办` 命令同时支持英文别名 `todo`。
+- **日报主题**：在“日报”中把“日报主题”设为 `light`（默认）或 `dark`。
+- **状态卡主题**：状态卡保持现有深色主题；浅色状态卡和本地渲染在后续版本提供。
+- **无障碍**：页面支持键盘左右方向键切换标签、`aria` 标签、`prefers-reduced-motion` 减少动效；表格使用语义化表头，状态同时用文字和颜色表示。
 
 ## 效果预览
 
@@ -85,7 +94,7 @@
 | `立即检测` | 立即检查所有监测目标，只返回异常项和汇总（仅管理员） |
 | `状态卡诊断` | 输出平台、OneBot、告警/监测/静默状态、最近采集与渲染耗时、最近推送结果（仅管理员） |
 | `预览日报` | 生成昨日日报并发送到当前会话（仅管理员） |
-| `待办` | 查看、添加、完成、删除待办，例如 `待办 添加 检查备份`（仅管理员） |
+| `待办` / `todo` | 查看、添加、完成、删除待办，例如 `待办 添加 检查备份`（仅管理员） |
 
 `待办` 子命令：
 
@@ -269,6 +278,7 @@
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `display.render_width` | `1170` | 输出图片宽度，1170–2880 像素；内部按 T2I 的 1.8 倍高清倍率换算 |
+| `display.language` | `zh-CN` | QQ 命令提示语言，`zh-CN` 或 `en-US`；页面跟随 WebUI 语言 |
 | `display.compact` | `false` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
 | `display.render_timeout` | `180` | 渲染超时（秒）；超时后回退为文字摘要 |
 | `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
@@ -292,6 +302,7 @@
 | `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |
 | `daily_report.sections` | 资源 / 异常 / QQ / Token | 日报内容；可额外勾选网站延迟、Top 进程、待办 |
 | `daily_report.with_image` | `true` | 发送图片；关闭或失败时发文字摘要 |
+| `daily_report.theme` | `light` | 日报主题，`light` 或 `dark` |
 | `daily_report.history_days` | `7` | 趋势天数，7–30 天 |
 | `daily_report.render_timeout` | `180` | 日报渲染超时（秒） |
 | `daily_report.collect` | `true` | 记录日报历史数据 |
@@ -396,8 +407,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 ## Roadmap
 
 - **日报图片分页/压缩**：超长日报拆成多张或自动压缩
-- **状态页/历史看板**：在 WebUI 中查看状态、趋势、事件、日报和待办
-- **主题 / 国际化 / 无障碍**：状态卡和日报主题、页面与提示中英双语
+- **状态卡浅色主题与本地渲染**：状态卡浅色配色、可选本地渲染后端
 - **多机器人完整支持**：按监测项/告警目标配置平台，真实双账号验证
 - **通知渠道**：邮件、出站 Webhook、其他 IM 平台
 - **公开发布**：插件市场、公开仓库、issue 模板和安全策略（当前仓库私有）
@@ -411,7 +421,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `51 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
+当前测试预期为 `54 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
 
 ## 更新日志
 

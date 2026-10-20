@@ -28,6 +28,7 @@ from .collectors import (
     now_in_timezone,
     uploaded_file_path,
 )
+from .i18n import tr
 from .monitor import ServiceMonitor
 from .page_api import PageApi
 from .report import DailyReporter, ReportCollector
@@ -45,7 +46,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.7.0",
+    "2.8.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -232,13 +233,11 @@ class StatusCardPlugin(Star):
             pass
         if platform_name and not is_supported_platform(platform_name):
             yield event.plain_result(
-                "当前平台不受支持：状态卡仅支持 QQ/OneBot（aiocqhttp）。"
+                tr(self.config, "platform_unsupported")
             )
             return
         if not self._status_access_allowed(event):
-            yield event.plain_result(
-                "查看状态仅管理员可用。"
-            )
+            yield event.plain_result(tr(self.config, "admin_only"))
             return
         cooldown = max(
             0, min(3600, cfg_int(self.config, "display.cooldown_seconds", 10))
@@ -247,14 +246,18 @@ class StatusCardPlugin(Star):
         now = time.monotonic()
         if chat_key:
             if chat_key in self._status_inflight:
-                yield event.plain_result("状态卡正在生成，请稍候。")
+                yield event.plain_result(tr(self.config, "generating"))
                 return
             if cooldown:
                 last = self._status_cooldown.get(chat_key, 0.0)
                 remaining = cooldown - (now - last)
                 if remaining > 0:
                     yield event.plain_result(
-                        f"状态卡冷却中，请 {max(1, int(remaining + 0.999))} 秒后再试。"
+                        tr(
+                            self.config,
+                            "cooldown",
+                            seconds=max(1, int(remaining + 0.999)),
+                        )
                     )
                     return
                 self._status_cooldown[chat_key] = now
@@ -273,11 +276,9 @@ class StatusCardPlugin(Star):
                 if len(self._privacy_notified) > 500:
                     self._privacy_notified.clear()
                     self._privacy_notified.add(chat_key)
-                notices.append(
-                    "提示：状态图包含主机名/进程等信息，并会发送到 T2I 服务渲染。"
-                )
+                notices.append(tr(self.config, "privacy_notice"))
         if cfg_bool(self.config, "display.progress_notice", True):
-            notices.append("状态卡生成中，通常需要 1–3 分钟，请稍候…")
+            notices.append(tr(self.config, "progress_notice"))
         if notices:
             yield event.plain_result("\n".join(notices))
         try:
@@ -299,8 +300,10 @@ class StatusCardPlugin(Star):
             try:
                 summary = await self.build_summary_text(event=event)
             except Exception:
-                summary = "获取系统状态失败，请检查 AstrBot 后台日志。"
-            yield event.plain_result("生成状态图失败，以下为文本摘要：\n" + summary)
+                summary = tr(self.config, "summary_failed")
+            yield event.plain_result(
+                tr(self.config, "image_failed", summary=summary)
+            )
         finally:
             if chat_key:
                 self._status_inflight.discard(chat_key)
@@ -382,7 +385,12 @@ class StatusCardPlugin(Star):
             1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
         )
         logical_width = max(650, min(1600, round(render_width / 1.8)))
-        html = build_report_html(view, render_width=logical_width)
+        theme = str(
+            cfg_get(self.config, "daily_report.theme", "light") or "light"
+        ).strip().lower()
+        html = build_report_html(
+            view, render_width=logical_width, theme=theme
+        )
         timeout = max(
             30,
             min(600, cfg_int(self.config, "daily_report.render_timeout", 180)),
@@ -608,13 +616,13 @@ class StatusCardPlugin(Star):
     async def cmd_alert_test(self, event: AstrMessageEvent):
         event.should_call_llm(False)
         if not cfg_bool(self.config, "alerts.enabled", False):
-            yield event.plain_result(
-                "告警推送未启用。请先在配置页打开“启用资源与掉线告警”。"
-            )
+            yield event.plain_result(tr(self.config, "alert_disabled"))
             return
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
-            "测试通知已发送到当前会话。" if ok else "测试通知发送失败，请查看后台日志。"
+            tr(self.config, "test_sent")
+            if ok
+            else tr(self.config, "test_failed")
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -622,23 +630,32 @@ class StatusCardPlugin(Star):
     async def cmd_monitor_test(self, event: AstrMessageEvent):
         event.should_call_llm(False)
         if not self.monitor.items:
-            yield event.plain_result(
-                "没有配置监测目标。请在配置页的“服务可用性监测”中添加。"
-            )
+            yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
         results = await self.monitor.test_all()
         failed = [item for item in results if not item["ok"]]
         lines = [
-            "🩺 服务检测结果",
-            f"✅ 正常 {len(results) - len(failed)} 项 · ❌ 异常 {len(failed)} 项",
+            tr(self.config, "monitor_result_title"),
+            tr(
+                self.config,
+                "monitor_result_summary",
+                ok=len(results) - len(failed),
+                failed=len(failed),
+            ),
         ]
         if failed:
             for item in failed:
                 lines.append(
-                    f"❌ {item['name']}（{item['kind']}）\n   {item['detail']}"
+                    tr(
+                        self.config,
+                        "monitor_result_item",
+                        name=item["name"],
+                        kind=item["kind"],
+                        detail=item["detail"],
+                    )
                 )
         else:
-            lines.append("✅ 全部正常。")
+            lines.append(tr(self.config, "monitor_all_ok"))
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -653,7 +670,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.7.0")
+        lines.append("插件: v2.8.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -802,7 +819,7 @@ class StatusCardPlugin(Star):
         return todo_id if todo_id > 0 else None
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("待办")
+    @filter.command("待办", alias={"todo"})
     async def cmd_todo(self, event: AstrMessageEvent):
         """Manage the daily-report todo list from QQ."""
         event.should_call_llm(False)
@@ -812,8 +829,10 @@ class StatusCardPlugin(Star):
         if raw.startswith("@") or raw.startswith("[CQ:at"):
             _, _, raw = raw.partition(" ")
             raw = raw.strip()
-        if raw.startswith("待办"):
-            raw = raw[len("待办") :].strip()
+        for command_name in ("待办", "todo"):
+            if raw.lower().startswith(command_name):
+                raw = raw[len(command_name) :].strip()
+                break
         parts = raw.split(maxsplit=1)
         action = parts[0] if parts else ""
         argument = parts[1].strip() if len(parts) > 1 else ""
@@ -827,32 +846,28 @@ class StatusCardPlugin(Star):
                 include_done=False, limit=30
             )
             if not todos:
-                reply = (
-                    "📝 暂无未完成待办。\n"
-                    "用法：待办 添加 <内容> / 待办 完成 <编号> / "
-                    "待办 删除 <编号>"
-                )
+                reply = tr(self.config, "todo_empty")
             else:
-                lines = [f"📝 待办（{len(todos)} 项未完成）", "──────────"]
+                lines = [
+                    tr(self.config, "todo_list_title", count=len(todos)),
+                    "──────────",
+                ]
                 for item in todos:
                     lines.append(
                         f"#{item['id']} [{item['created_day']}] "
                         f"{item['content']}"
                     )
                 lines.append("")
-                lines.append(
-                    "用法：待办 添加 <内容> / 待办 完成 <编号> / "
-                    "待办 删除 <编号> / 待办 全部"
-                )
+                lines.append(tr(self.config, "todo_usage"))
                 reply = "\n".join(lines)
         elif action in ("全部", "历史", "all"):
             todos = self.report_store.list_todos(
                 include_done=True, limit=50
             )
             if not todos:
-                reply = "📝 暂无待办记录。"
+                reply = tr(self.config, "todo_all_empty")
             else:
-                lines = ["📝 全部待办", "──────────"]
+                lines = [tr(self.config, "todo_all_title"), "──────────"]
                 for item in todos:
                     mark = "✅" if item["status"] == "done" else "⬜"
                     lines.append(
@@ -862,40 +877,40 @@ class StatusCardPlugin(Star):
                 reply = "\n".join(lines)
         elif action in ("添加", "add"):
             if not argument:
-                reply = "用法：待办 添加 <内容>"
+                reply = tr(self.config, "todo_add_usage")
             else:
                 todo_id = self.report_store.add_todo(
                     argument, ts, day, source="command"
                 )
                 reply = (
-                    f"✅ 已添加待办 #{todo_id}：{argument[:80]}"
+                    tr(
+                        self.config,
+                        "todo_added",
+                        id=todo_id,
+                        content=argument[:80],
+                    )
                     if todo_id
-                    else "添加失败，请查看后台日志。"
+                    else tr(self.config, "todo_add_failed")
                 )
         elif action in ("完成", "done"):
             todo_id = self._parse_todo_id(argument)
             if todo_id is None:
-                reply = "用法：待办 完成 <编号>"
+                reply = tr(self.config, "todo_complete_usage")
             elif self.report_store.complete_todo(todo_id, ts, day):
-                reply = f"✅ 已完成待办 #{todo_id}。"
+                reply = tr(self.config, "todo_completed", id=todo_id)
             else:
-                reply = f"未找到未完成的待办 #{todo_id}。"
+                reply = tr(
+                    self.config, "todo_not_found_pending", id=todo_id
+                )
         elif action in ("删除", "delete"):
             todo_id = self._parse_todo_id(argument)
             if todo_id is None:
-                reply = "用法：待办 删除 <编号>"
+                reply = tr(self.config, "todo_delete_usage")
             elif self.report_store.delete_todo(todo_id):
-                reply = f"🗑️ 已删除待办 #{todo_id}。"
+                reply = tr(self.config, "todo_deleted", id=todo_id)
             else:
-                reply = f"未找到待办 #{todo_id}。"
+                reply = tr(self.config, "todo_not_found", id=todo_id)
         else:
-            reply = (
-                "📝 待办用法\n"
-                "待办 / 待办 列表：查看未完成\n"
-                "待办 全部：查看全部\n"
-                "待办 添加 <内容>：新增\n"
-                "待办 完成 <编号>：标记完成\n"
-                "待办 删除 <编号>：删除"
-            )
+            reply = tr(self.config, "todo_help")
         yield event.plain_result(reply)
         event.stop_event()

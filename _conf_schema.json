@@ -95,6 +95,12 @@
         },
         "hint": "数值越大，图片越清晰、文件越大、出图越慢；高度会随内容自动扩展。默认 1170 与旧版高清效果相当。"
       },
+      "language": {
+        "description": "命令提示语言",
+        "type": "string",
+        "default": "zh-CN",
+        "hint": "填 zh-CN 或 en-US；页面文案跟随 AstrBot WebUI 语言，此项只影响 QQ 命令回复。"
+      },
       "process_top_n": {
         "description": "进程表显示条数",
         "type": "int",
@@ -938,6 +944,15 @@
           "enabled": true
         },
         "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
+      },
+      "theme": {
+        "description": "日报主题",
+        "type": "string",
+        "default": "light",
+        "condition": {
+          "enabled": true
+        },
+        "hint": "light（浅色，默认）或 dark（深色）。"
       },
       "history_days": {
         "description": "趋势天数",

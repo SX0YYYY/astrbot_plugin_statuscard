@@ -26,6 +26,49 @@
     );
   }
 
+  function t(key, fallback, vars) {
+    let text = fallback || key;
+    if (bridge && typeof bridge.t === "function") {
+      text = bridge.t("pages.status.strings." + key, text);
+    }
+    if (vars) {
+      Object.keys(vars).forEach((name) => {
+        text = text.split("{" + name + "}").join(String(vars[name]));
+      });
+    }
+    return text;
+  }
+
+  function currentLocale() {
+    if (bridge && typeof bridge.getLocale === "function") {
+      return bridge.getLocale() || "zh-CN";
+    }
+    return "zh-CN";
+  }
+
+  function applyStaticI18n() {
+    document.querySelectorAll("[data-i18n]").forEach((element) => {
+      const key = element.getAttribute("data-i18n");
+      element.textContent = t(key, element.textContent);
+    });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+      const key = element.getAttribute("data-i18n-placeholder");
+      element.setAttribute(
+        "placeholder",
+        t(key, element.getAttribute("placeholder") || ""),
+      );
+    });
+    document.querySelectorAll("[data-i18n-aria]").forEach((element) => {
+      const key = element.getAttribute("data-i18n-aria");
+      element.setAttribute(
+        "aria-label",
+        t(key, element.getAttribute("aria-label") || ""),
+      );
+    });
+    document.documentElement.lang = currentLocale();
+    document.title = t("app_name", "系统状态看板");
+  }
+
   function toast(message) {
     const el = $("toast");
     if (!el) return;
@@ -37,7 +80,9 @@
 
   async function apiGet(name, params) {
     if (!bridge || typeof bridge.apiGet !== "function") {
-      throw new Error("插件页面桥接不可用，请从 AstrBot 插件页面打开");
+      throw new Error(
+        t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
+      );
     }
     const data = await bridge.apiGet(name, params);
     return typeof data === "string" ? JSON.parse(data) : data;
@@ -45,7 +90,9 @@
 
   async function apiPost(name, body) {
     if (!bridge || typeof bridge.apiPost !== "function") {
-      throw new Error("插件页面桥接不可用，请从 AstrBot 插件页面打开");
+      throw new Error(
+        t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
+      );
     }
     const data = await bridge.apiPost(name, body);
     return typeof data === "string" ? JSON.parse(data) : data;
@@ -157,7 +204,7 @@
       .flatMap((item) => item.values)
       .filter((value) => value !== null && Number.isFinite(value));
     if (!labels.length || !values.length) {
-      container.innerHTML = empty("暂无图表数据");
+      container.innerHTML = empty(t("empty_chart", "暂无图表数据"));
       return;
     }
     const width = 640;
@@ -181,7 +228,9 @@
       width +
       " " +
       height +
-      '" role="img" aria-label="趋势图">';
+      '" role="img" aria-label="' +
+      esc(t("chart_label", "趋势图")) +
+      '">';
     svg +=
       '<rect class="plot-bg" x="' +
       left +
@@ -312,51 +361,69 @@
 
     $("metrics").innerHTML = [
       metric(
-        "CPU",
+        t("metric_cpu", "CPU"),
         (cpu.percent || 0).toFixed(1) + "%",
-        (cpu.count || 0) +
-          " 核 · 负载 " +
-          (cpu.load1 === null || cpu.load1 === undefined
-            ? "--"
-            : cpu.load1),
+        t("metric_cores", "{count} 核 · 负载 {load}", {
+          count: cpu.count || 0,
+          load:
+            cpu.load1 === null || cpu.load1 === undefined
+              ? "--"
+              : cpu.load1,
+        }),
         cpu.percent,
       ),
       metric(
-        "内存",
+        t("metric_memory", "内存"),
         (memory.percent || 0).toFixed(1) + "%",
-        (memory.used_text || "--") + " / " + (memory.total_text || "--"),
+        t("metric_used_total", "{used} / {total}", {
+          used: memory.used_text || "--",
+          total: memory.total_text || "--",
+        }),
         memory.percent,
       ),
       metric(
-        "SWAP",
+        t("metric_swap", "SWAP"),
         (swap.percent || 0).toFixed(1) + "%",
-        (swap.used_text || "--") + " / " + (swap.total_text || "--"),
+        t("metric_used_total", "{used} / {total}", {
+          used: swap.used_text || "--",
+          total: swap.total_text || "--",
+        }),
         swap.percent,
       ),
       metric(
-        "磁盘",
+        t("metric_disk", "磁盘"),
         disk.percent === null || disk.percent === undefined
           ? "--"
           : disk.percent.toFixed(1) + "%",
-        (disk.used_text || "--") + " / " + (disk.total_text || "--"),
+        t("metric_used_total", "{used} / {total}", {
+          used: disk.used_text || "--",
+          total: disk.total_text || "--",
+        }),
         disk.percent,
       ),
-      metric("运行时间", data.uptime || "--", "AstrBot " + (data.astrbot_version || "--")),
       metric(
-        "待办",
+        t("metric_uptime", "运行时间"),
+        data.uptime || "--",
+        t("label_astrbot", "AstrBot {version}", {
+          version: data.astrbot_version || "--",
+        }),
+      ),
+      metric(
+        t("metric_todos", "待办"),
         String((data.todos && data.todos.open) || 0),
-        "未完成",
+        t("metric_open", "未完成"),
         null,
       ),
     ].join("");
 
     const network = data.network || {};
-    $("network-month").textContent = network.month || "本月流量";
+    $("network-month").textContent =
+      network.month || t("label_month_flow", "本月流量");
     $("network").innerHTML = [
-      ["上行", formatRate(network.up_rate || 0)],
-      ["下行", formatRate(network.down_rate || 0)],
-      ["本月上行", network.month_up_text || "--"],
-      ["本月下行", network.month_down_text || "--"],
+      [t("network_up", "上行"), formatRate(network.up_rate || 0)],
+      [t("network_down", "下行"), formatRate(network.down_rate || 0)],
+      [t("network_month_up", "本月上行"), network.month_up_text || "--"],
+      [t("network_month_down", "本月下行"), network.month_down_text || "--"],
     ]
       .map(
         (pair) =>
@@ -369,13 +436,15 @@
       .join("");
 
     const monitors = data.monitors || {};
-    $("monitor-summary").textContent =
-      "正常 " +
-      (monitors.ok || 0) +
-      " · 异常 " +
-      (monitors.fail || 0) +
-      " · 未知 " +
-      (monitors.unknown || 0);
+    $("monitor-summary").textContent = t(
+      "monitor_summary",
+      "正常 {ok} · 异常 {fail} · 未知 {unknown}",
+      {
+        ok: monitors.ok || 0,
+        fail: monitors.fail || 0,
+        unknown: monitors.unknown || 0,
+      },
+    );
     const items = monitors.items || [];
     $("monitors").innerHTML = items.length
       ? items
@@ -384,8 +453,10 @@
               item.status === "fail" && item.last_error
                 ? item.last_error
                 : item.last_checked
-                  ? "最近检查 " + formatTime(item.last_checked)
-                  : "尚未检查";
+                  ? t("monitor_last_check", "最近检查 {time}", {
+                      time: formatTime(item.last_checked),
+                    })
+                  : t("monitor_not_checked", "尚未检查");
             return (
               '<div class="monitor"><i class="dot ' +
               esc(item.status) +
@@ -397,7 +468,7 @@
             );
           })
           .join("")
-      : empty("没有配置服务监测目标");
+      : empty(t("monitor_none", "没有配置服务监测目标"));
 
     const processes = data.processes || [];
     const tbody = $("process-table").querySelector("tbody");
@@ -416,7 +487,9 @@
               "</td></tr>",
           )
           .join("")
-      : '<tr><td colspan="4">暂无进程采样</td></tr>';
+      : '<tr><td colspan="4">' +
+        esc(t("empty_process", "暂无进程采样")) +
+        "</td></tr>";
   }
 
   // ------------------------------------------------------------------
@@ -457,12 +530,12 @@
     const networkLabels = network.map((point) => formatTime(point.ts));
     const networkSeries = [
       {
-        name: "上行",
+        name: t("network_up", "上行"),
         color: "#10b981",
         values: network.map((point) => point.up),
       },
       {
-        name: "下行",
+        name: t("network_down", "下行"),
         color: "#ef4444",
         values: network.map((point) => point.down),
       },
@@ -481,17 +554,25 @@
 
   function statusText(status) {
     return (
-      { alert: "异常", recovery: "恢复", failed: "推送失败" }[status] ||
+      {
+        alert: t("status_alert", "异常"),
+        recovery: t("status_recovery", "恢复"),
+        failed: t("status_failed", "推送失败"),
+      }[status] ||
       status ||
-      "事件"
+      t("status_alert", "事件")
     );
   }
 
   function kindText(kind) {
     return (
-      { resource: "资源", offline: "掉线", service: "服务" }[kind] ||
+      {
+        resource: t("kind_resource", "资源"),
+        offline: t("kind_offline", "掉线"),
+        service: t("kind_service", "服务"),
+      }[kind] ||
       kind ||
-      "事件"
+      t("kind_service", "事件")
     );
   }
 
@@ -529,7 +610,7 @@
             );
           })
           .join("")
-      : empty("所选范围内没有异常事件");
+      : empty(t("empty_events", "所选范围内没有异常事件"));
   }
 
   // ------------------------------------------------------------------
@@ -542,14 +623,16 @@
     if (resources.available && resources.yesterday) {
       const yesterday = resources.yesterday;
       blocks.push(
-        '<div class="detail-block"><h3>资源</h3><div class="detail-grid">' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_resource", "资源")) +
+          '</h3><div class="detail-grid">' +
           [
-            ["CPU 均值", yesterday.cpu && yesterday.cpu.avg_text],
-            ["CPU 峰值", yesterday.cpu && yesterday.cpu.peak_text],
-            ["RAM 均值", yesterday.ram && yesterday.ram.avg_text],
-            ["RAM 峰值", yesterday.ram && yesterday.ram.peak_text],
-            ["SWAP 均值", yesterday.swap && yesterday.swap.avg_text],
-            ["磁盘均值", yesterday.disk && yesterday.disk.avg_text],
+            [t("report_cpu_avg", "CPU 均值"), yesterday.cpu && yesterday.cpu.avg_text],
+            [t("report_cpu_peak", "CPU 峰值"), yesterday.cpu && yesterday.cpu.peak_text],
+            [t("report_ram_avg", "RAM 均值"), yesterday.ram && yesterday.ram.avg_text],
+            [t("report_ram_peak", "RAM 峰值"), yesterday.ram && yesterday.ram.peak_text],
+            [t("report_swap_avg", "SWAP 均值"), yesterday.swap && yesterday.swap.avg_text],
+            [t("report_disk_avg", "磁盘均值"), yesterday.disk && yesterday.disk.avg_text],
           ]
             .map(
               (pair) =>
@@ -567,13 +650,15 @@
     if (qq.yesterday) {
       const yesterday = qq.yesterday;
       blocks.push(
-        '<div class="detail-block"><h3>QQ</h3><div class="detail-grid">' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_qq", "QQ")) +
+          '</h3><div class="detail-grid">' +
           [
-            ["好友", yesterday.friends_text],
-            ["群聊", yesterday.groups_text],
-            ["群员", yesterday.members_text],
-            ["发送", yesterday.sent_text],
-            ["接收", yesterday.recv_text],
+            [t("report_friends", "好友"), yesterday.friends_text],
+            [t("report_groups", "群聊"), yesterday.groups_text],
+            [t("report_members", "群员"), yesterday.members_text],
+            [t("report_sent", "发送"), yesterday.sent_text],
+            [t("report_recv", "接收"), yesterday.recv_text],
           ]
             .map(
               (pair) =>
@@ -590,11 +675,13 @@
     const token = data.token || {};
     if (token.available) {
       blocks.push(
-        '<div class="detail-block"><h3>Token</h3><div class="detail-grid">' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_token", "Token")) +
+          '</h3><div class="detail-grid">' +
           [
-            ["总量", token.total_text],
-            ["调用次数", token.calls_text],
-            ["成功率", token.success_text],
+            [t("report_total", "总量"), token.total_text],
+            [t("report_calls", "调用次数"), token.calls_text],
+            [t("report_success", "成功率"), token.success_text],
           ]
             .map(
               (pair) =>
@@ -607,7 +694,13 @@
             .join("") +
           "</div>" +
           (token.top_models && token.top_models.length
-            ? '<div class="table-wrap"><table class="table"><thead><tr><th>模型</th><th>Token</th><th>占比</th></tr></thead><tbody>' +
+            ? '<div class="table-wrap"><table class="table"><thead><tr><th>' +
+              esc(t("table_model", "模型")) +
+              "</th><th>" +
+              esc(t("table_tokens", "Token")) +
+              "</th><th>" +
+              esc(t("table_share", "占比")) +
+              "</th></tr></thead><tbody>" +
               token.top_models
                 .map(
                   (model) =>
@@ -628,11 +721,13 @@
     const todo = data.todo || {};
     if (todo.available) {
       blocks.push(
-        '<div class="detail-block"><h3>待办</h3><div class="detail-grid">' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_todo", "待办")) +
+          '</h3><div class="detail-grid">' +
           [
-            ["昨日新增", todo.created_count],
-            ["昨日完成", todo.completed_count],
-            ["未完成", todo.open_count],
+            [t("report_created", "昨日新增"), todo.created_count],
+            [t("report_completed", "昨日完成"), todo.completed_count],
+            [t("report_open", "未完成"), todo.open_count],
           ]
             .map(
               (pair) =>
@@ -649,7 +744,17 @@
     const website = data.website || {};
     if (website.available && website.targets && website.targets.length) {
       blocks.push(
-        '<div class="detail-block"><h3>网站延迟</h3><div class="table-wrap"><table class="table"><thead><tr><th>目标</th><th>平均</th><th>峰值</th><th>可用率</th></tr></thead><tbody>' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_website", "网站延迟")) +
+          '</h3><div class="table-wrap"><table class="table"><thead><tr><th>' +
+          esc(t("table_target", "目标")) +
+          "</th><th>" +
+          esc(t("table_avg", "平均")) +
+          "</th><th>" +
+          esc(t("table_peak", "峰值")) +
+          "</th><th>" +
+          esc(t("table_availability", "可用率")) +
+          "</th></tr></thead><tbody>" +
           website.targets
             .map(
               (target) =>
@@ -670,7 +775,17 @@
     const process = data.process || {};
     if (process.available && process.cpu && process.cpu.length) {
       blocks.push(
-        '<div class="detail-block"><h3>Top 进程</h3><div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>进程</th><th>CPU</th><th>内存</th></tr></thead><tbody>' +
+        '<div class="detail-block"><h3>' +
+          esc(t("report_process", "Top 进程")) +
+          '</h3><div class="table-wrap"><table class="table"><thead><tr><th>' +
+          esc(t("table_rank", "#")) +
+          "</th><th>" +
+          esc(t("table_process", "进程")) +
+          "</th><th>" +
+          esc(t("table_cpu", "CPU")) +
+          "</th><th>" +
+          esc(t("table_mem", "内存")) +
+          "</th></tr></thead><tbody>" +
           process.cpu
             .map(
               (item) =>
@@ -694,14 +809,34 @@
   async function loadReports() {
     const data = await apiGet("reports");
     $("report-day").textContent = data.day
-      ? "数据日 " + data.day
-      : "暂无数据";
+      ? t("report_data_day", "数据日 {day}", { day: data.day })
+      : t("report_no_data", "暂无数据");
     const summary = data.summary || {};
     $("report-summary").innerHTML = [
-      metric("异常 / 失败", summary.anomaly_count || 0, "昨日", null),
-      metric("Token", summary.token_total_text || "暂无数据", "最近 7 天", null),
-      metric("发送", summary.sent_text || "--", "昨日", null),
-      metric("接收", summary.recv_text || "--", "昨日", null),
+      metric(
+        t("report_anomaly", "异常 / 失败"),
+        summary.anomaly_count || 0,
+        t("report_yesterday", "昨日"),
+        null,
+      ),
+      metric(
+        t("report_token", "Token"),
+        summary.token_total_text || t("report_no_data", "暂无数据"),
+        t("report_last_7d", "最近 7 天"),
+        null,
+      ),
+      metric(
+        t("report_sent", "发送"),
+        summary.sent_text || "--",
+        t("report_yesterday", "昨日"),
+        null,
+      ),
+      metric(
+        t("report_recv", "接收"),
+        summary.recv_text || "--",
+        t("report_yesterday", "昨日"),
+        null,
+      ),
     ].join("");
     $("report-details").innerHTML = reportDetails(data);
 
@@ -716,13 +851,17 @@
               "</td><td>" +
               esc(formatDateTime(run.ts)) +
               "</td><td>" +
-              (run.ok ? "成功" : "失败") +
+              (run.ok
+                ? t("result_ok", "成功")
+                : t("result_fail", "失败")) +
               "</td><td>" +
               esc(run.detail || "--") +
               "</td></tr>",
           )
           .join("")
-      : '<tr><td colspan="4">暂无发送记录</td></tr>';
+      : '<tr><td colspan="4">' +
+        esc(t("empty_runs", "暂无发送记录")) +
+        "</td></tr>";
   }
 
   // ------------------------------------------------------------------
@@ -734,8 +873,11 @@
     const todos = data.todos || [];
     const open = todos.filter((item) => item.status !== "done");
     const done = todos.filter((item) => item.status === "done");
-    $("todo-summary").textContent =
-      "未完成 " + open.length + " · 已完成 " + done.length;
+    $("todo-summary").textContent = t(
+      "todo_summary",
+      "未完成 {open} · 已完成 {done}",
+      { open: open.length, done: done.length },
+    );
     $("todo-list").innerHTML = todos.length
       ? todos
           .map((item) => {
@@ -750,31 +892,39 @@
               '</span><span class="todo-meta">' +
               esc(
                 isDone
-                  ? "已完成 " + (item.done_day || "")
-                  : "创建于 " + (item.created_day || ""),
+                  ? t("todo_done_on", "已完成 {day}", {
+                      day: item.done_day || "",
+                    })
+                  : t("todo_created_on", "创建于 {day}", {
+                      day: item.created_day || "",
+                    }),
               ) +
               '</span><span class="todo-actions">' +
               (isDone
                 ? ""
                 : '<button type="button" data-action="complete" data-id="' +
                   esc(item.id) +
-                  '">完成</button>') +
+                  '">' +
+                  esc(t("todo_complete", "完成")) +
+                  "</button>") +
               '<button type="button" class="danger" data-action="delete" data-id="' +
               esc(item.id) +
-              '">删除</button></span></div>'
+              '">' +
+              esc(t("todo_delete", "删除")) +
+              "</button></span></div>"
             );
           })
           .join("")
-      : empty("暂无待办；在上方输入内容后点击“添加”。");
+      : empty(t("empty_todos", "暂无待办；在上方输入内容后点击“添加”。"));
     state.todosLoaded = true;
   }
 
   async function todoAction(action, id) {
     const data = await apiPost("todos", { action: action, id: Number(id) });
     if (!data || data.ok === false) {
-      throw new Error((data && data.message) || "操作失败");
+      throw new Error((data && data.message) || t("error_operation", "操作失败"));
     }
-    toast(data.message || "操作完成");
+    toast(data.message || t("toast_done", "操作完成"));
     await loadTodos();
     if (state.tab === "overview") {
       await loadOverview();
@@ -824,9 +974,18 @@
   // ------------------------------------------------------------------
 
   function bind() {
-    document.querySelectorAll(".tab").forEach((button) => {
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    tabs.forEach((button, index) => {
       button.addEventListener("click", () => {
         activateTab(button.dataset.tab);
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const offset = event.key === "ArrowRight" ? 1 : -1;
+        const next = tabs[(index + offset + tabs.length) % tabs.length];
+        next.focus();
+        activateTab(next.dataset.tab);
       });
     });
     $("refresh").addEventListener("click", refreshCurrent);
@@ -837,7 +996,9 @@
         document
           .querySelectorAll("#range-switch button")
           .forEach((item) => item.classList.toggle("active", item === button));
-        loadHistory().catch((error) => toast(error.message || "加载失败"));
+        loadHistory().catch((error) =>
+          toast(error.message || t("error_load", "加载失败")),
+        );
       });
     });
 
@@ -847,7 +1008,9 @@
         document
           .querySelectorAll("#event-switch button")
           .forEach((item) => item.classList.toggle("active", item === button));
-        loadEvents().catch((error) => toast(error.message || "加载失败"));
+        loadEvents().catch((error) =>
+          toast(error.message || t("error_load", "加载失败")),
+        );
       });
     });
 
@@ -856,7 +1019,7 @@
       const input = $("todo-input");
       const content = input.value.trim();
       if (!content) {
-        toast("请输入待办内容");
+        toast(t("toast_enter_todo", "请输入待办内容"));
         return;
       }
       try {
@@ -865,13 +1028,15 @@
           content: content,
         });
         if (!data || data.ok === false) {
-          throw new Error((data && data.message) || "添加失败");
+          throw new Error(
+            (data && data.message) || t("error_add_failed", "添加失败"),
+          );
         }
         input.value = "";
-        toast(data.message || "已添加");
+        toast(data.message || t("toast_added", "已添加"));
         await loadTodos();
       } catch (error) {
-        toast(error.message || "添加失败");
+        toast(error.message || t("error_add_failed", "添加失败"));
       }
     });
 
@@ -881,7 +1046,7 @@
       try {
         await todoAction(button.dataset.action, button.dataset.id);
       } catch (error) {
-        toast(error.message || "操作失败");
+        toast(error.message || t("error_operation", "操作失败"));
       }
     });
 
@@ -904,6 +1069,7 @@
         // The page still works if the initial context is delayed.
       }
     }
+    applyStaticI18n();
     await activateTab("overview");
   }
 

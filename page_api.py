@@ -30,7 +30,7 @@ from .version_resolver import resolve_astrbot_version
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
-PLUGIN_VERSION = "2.7.0"
+PLUGIN_VERSION = "2.8.0"
 
 RANGE_SECONDS = {
     "24h": 86400,

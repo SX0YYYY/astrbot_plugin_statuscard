@@ -434,3 +434,85 @@ body {
   text-align: center;
   line-height: 1.6;
 }
+
+[data-theme="dark"] body {
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .section {
+  background: #111a2e;
+  border-color: #1e293b;
+}
+
+[data-theme="dark"] .section-head h2 {
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .section-head > span,
+[data-theme="dark"] .stat-label,
+[data-theme="dark"] .chart-title,
+[data-theme="dark"] .legend,
+[data-theme="dark"] .footer {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .stat,
+[data-theme="dark"] .chart-block,
+[data-theme="dark"] .event-row,
+[data-theme="dark"] .empty,
+[data-theme="dark"] .todo-list {
+  background: #0f172a;
+  border-color: #1e293b;
+}
+
+[data-theme="dark"] .stat-value,
+[data-theme="dark"] .event-main strong,
+[data-theme="dark"] .todo-content {
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .stat-sub,
+[data-theme="dark"] .stat-delta,
+[data-theme="dark"] .event-time,
+[data-theme="dark"] .event-kind,
+[data-theme="dark"] .event-detail,
+[data-theme="dark"] .event-duration,
+[data-theme="dark"] .note,
+[data-theme="dark"] .todo-meta,
+[data-theme="dark"] .todo-id {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .grid {
+  stroke: #1e293b;
+}
+
+[data-theme="dark"] .plot-bg {
+  fill: #0f172a;
+}
+
+[data-theme="dark"] .axis {
+  fill: #94a3b8;
+}
+
+[data-theme="dark"] .peak {
+  fill: #cbd5e1;
+}
+
+[data-theme="dark"] .model-table th,
+[data-theme="dark"] .model-table td {
+  border-bottom-color: #1e293b;
+}
+
+[data-theme="dark"] .model-table th {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .todo-row {
+  border-bottom-color: #1e293b;
+}
+
+[data-theme="dark"] .todo-row.done .todo-content {
+  color: #64748b;
+}
