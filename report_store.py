@@ -471,6 +471,22 @@ class ReportStore:
         result["ok"] = bool(result["ok"])
         return result
 
+    def list_report_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT day, ts, ok, detail FROM report_runs
+            ORDER BY ts DESC, id DESC LIMIT ?
+            """,
+            (max(1, min(200, limit)),),
+        )
+        keys = ("day", "ts", "ok", "detail")
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(zip(keys, row))
+            item["ok"] = bool(item["ok"])
+            out.append(item)
+        return out
+
     def prune(
         self,
         resource_days: int = 30,

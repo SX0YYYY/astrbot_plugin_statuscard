@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.6.0-blue)
+![Version](https://img.shields.io/badge/version-2.7.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -22,6 +22,19 @@
 - **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟、Top 进程和待办；图片失败回退文字；默认关闭，可用 `预览日报` 手动查看
 - **待办**：管理员可用 `待办` 命令记录和完成待办，日报自动汇总昨日新增/完成/未完成
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
+- **Web 看板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件、日报和待办
+
+## Web 看板
+
+插件在 AstrBot WebUI 的插件详情中提供“系统状态看板”页面，包含五个标签：
+
+- **概览**：CPU / 内存 / SWAP / 磁盘、网络速率、服务监测状态、Top 进程和运行时间
+- **历史**：资源 24 小时 / 7 天 / 30 天趋势和网络速率折线
+- **事件**：最近 1 / 7 / 30 天的告警、恢复和推送失败记录
+- **日报**：昨日日报摘要、关键数据和发送记录
+- **待办**：查看、添加、完成、删除待办
+
+页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API（4.29 已验证）；旧版 AstrBot 不支持时会跳过注册，QQ 命令仍可正常使用。
 
 ## 效果预览
 
@@ -398,7 +411,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `48 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
+当前测试预期为 `51 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
 
 ## 更新日志
 

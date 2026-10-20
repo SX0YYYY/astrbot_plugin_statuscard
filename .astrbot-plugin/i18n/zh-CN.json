@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "display_name": "系统状态卡片"
+  },
+  "pages": {
+    "status": {
+      "title": "系统状态看板"
+    }
+  }
+}

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>系统状态看板</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">SC</div>
+        <div class="brand-text">
+          <h1>系统状态看板</h1>
+          <p id="subtitle">加载中…</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="pill" id="plugin-version">v--</span>
+        <button class="ghost" id="refresh" type="button">刷新</button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="看板标签">
+      <button class="tab active" data-tab="overview" role="tab" aria-selected="true">概览</button>
+      <button class="tab" data-tab="history" role="tab" aria-selected="false">历史</button>
+      <button class="tab" data-tab="events" role="tab" aria-selected="false">事件</button>
+      <button class="tab" data-tab="reports" role="tab" aria-selected="false">日报</button>
+      <button class="tab" data-tab="todos" role="tab" aria-selected="false">待办</button>
+    </nav>
+
+    <main>
+      <section class="panel active" id="panel-overview" role="tabpanel">
+        <div class="metric-grid" id="metrics"></div>
+        <div class="card">
+          <div class="card-head">
+            <h2>网络</h2>
+            <span id="network-month">本月流量</span>
+          </div>
+          <div class="network-grid" id="network"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>服务监测</h2>
+            <span id="monitor-summary">--</span>
+          </div>
+          <div class="monitor-list" id="monitors"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Top 进程</h2>
+            <span>最近一次采样</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="process-table">
+              <thead><tr><th>#</th><th>进程</th><th>CPU</th><th>内存</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-history" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>资源趋势</h2>
+            <div class="segmented" id="range-switch">
+              <button type="button" data-range="24h" class="active">24 小时</button>
+              <button type="button" data-range="7d">7 天</button>
+              <button type="button" data-range="30d">30 天</button>
+            </div>
+          </div>
+          <div class="legend" id="history-legend"></div>
+          <div class="chart" id="history-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>网络速率</h2>
+            <span>来自 state.json 的采样</span>
+          </div>
+          <div class="legend" id="network-legend"></div>
+          <div class="chart" id="network-chart"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-events" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>异常事件</h2>
+            <div class="segmented" id="event-switch">
+              <button type="button" data-days="1" class="active">今天</button>
+              <button type="button" data-days="7">7 天</button>
+              <button type="button" data-days="30">30 天</button>
+            </div>
+          </div>
+          <div class="event-list" id="event-list"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-reports" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>昨日日报</h2>
+            <span id="report-day">--</span>
+          </div>
+          <div class="metric-grid" id="report-summary"></div>
+          <div id="report-details"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>发送记录</h2>
+            <span>最近 30 次</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="report-runs">
+              <thead><tr><th>日期</th><th>时间</th><th>结果</th><th>方式</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-todos" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>待办</h2>
+            <span id="todo-summary">--</span>
+          </div>
+          <form class="todo-form" id="todo-form">
+            <input id="todo-input" maxlength="200" placeholder="添加待办，例如：检查备份" autocomplete="off" />
+            <button type="submit">添加</button>
+          </form>
+          <div class="todo-list" id="todo-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

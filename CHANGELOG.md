@@ -4,6 +4,24 @@
 
 暂无。
 
+## v2.7.0 — 2026-10-20
+
+### 新增
+
+- 新增 AstrBot 插件页面 `pages/status`，在 WebUI 中提供多标签看板：概览、历史、事件、日报、待办。
+- 新增 6 个插件 Web API：`overview`、`history`、`events`、`reports`、`todos`（GET/POST）。
+- 页面支持资源/网络趋势（纯 SVG）、监测状态、Top 进程、异常事件、日报摘要/发送记录和待办管理。
+- 页面标题通过 `.astrbot-plugin/i18n/zh-CN.json` 注册为“系统状态看板”。
+
+### 测试
+
+- 新增页面 API 辅助函数测试（降采样边界、待办编号校验），pytest 51 passed。
+
+### 说明
+
+- 页面只读取聚合数值，不展示消息内容、用户 ID 或 UMO。
+- 页面通过 AstrBot 的插件页面桥接访问，需要 AstrBot 支持 `register_web_api`；不支持时插件仍可正常使用 QQ 命令。
+
 ## v2.6.0 — 2026-10-20
 
 ### 新增

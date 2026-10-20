@@ -29,6 +29,7 @@ from .collectors import (
     uploaded_file_path,
 )
 from .monitor import ServiceMonitor
+from .page_api import PageApi
 from .report import DailyReporter, ReportCollector
 from .report_store import ReportStore
 from .sampler import Sampler
@@ -44,7 +45,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.6.0",
+    "2.7.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -81,6 +82,8 @@ class StatusCardPlugin(Star):
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
         self._diag: dict[str, float] = {}
+        self.page_api = PageApi(self)
+        self.page_api.register()
         self._check_config_permissions()
 
     def _check_config_permissions(self) -> None:
@@ -650,7 +653,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.6.0")
+        lines.append("插件: v2.7.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
