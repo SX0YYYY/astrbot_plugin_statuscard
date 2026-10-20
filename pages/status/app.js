@@ -1,7 +1,6 @@
 (function () {
   "use strict";
 
-  const bridge = window.AstrBotPluginPage;
   const state = {
     tab: "overview",
     historyRange: "24h",
@@ -19,6 +18,19 @@
     "'": "&#39;",
   };
 
+  function getBridge() {
+    return window.AstrBotPluginPage || null;
+  }
+
+  async function waitForBridge(timeout) {
+    const limit = timeout === undefined ? 3000 : timeout;
+    const started = Date.now();
+    while (!getBridge() && Date.now() - started < limit) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return getBridge();
+  }
+
   function esc(value) {
     return String(value === null || value === undefined ? "" : value).replace(
       /[&<>"']/g,
@@ -28,6 +40,7 @@
 
   function t(key, fallback, vars) {
     let text = fallback || key;
+    const bridge = getBridge();
     if (bridge && typeof bridge.t === "function") {
       text = bridge.t("pages.status.strings." + key, text);
     }
@@ -40,6 +53,7 @@
   }
 
   function currentLocale() {
+    const bridge = getBridge();
     if (bridge && typeof bridge.getLocale === "function") {
       return bridge.getLocale() || "zh-CN";
     }
@@ -79,6 +93,7 @@
   }
 
   async function apiGet(name, params) {
+    const bridge = getBridge();
     if (!bridge || typeof bridge.apiGet !== "function") {
       throw new Error(
         t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
@@ -89,6 +104,7 @@
   }
 
   async function apiPost(name, body) {
+    const bridge = getBridge();
     if (!bridge || typeof bridge.apiPost !== "function") {
       throw new Error(
         t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
@@ -1050,19 +1066,33 @@
       }
     });
 
-    if (bridge && typeof bridge.onContext === "function") {
-      bridge.onContext((context) => {
-        if (!context) return;
-        document.documentElement.dataset.theme = context.isDark
-          ? "dark"
-          : "light";
-      });
-    }
+  }
+
+  function bindTheme() {
+    const bridge = getBridge();
+    if (!bridge || typeof bridge.onContext !== "function") return;
+    bridge.onContext((context) => {
+      if (!context) return;
+      document.documentElement.dataset.theme = context.isDark
+        ? "dark"
+        : "light";
+    });
   }
 
   async function init() {
     bind();
-    if (bridge && typeof bridge.ready === "function") {
+    const bridge = await waitForBridge();
+    if (!bridge) {
+      const message = t(
+        "error_bridge",
+        "插件页面桥接不可用，请从 AstrBot 插件页面打开",
+      );
+      $("subtitle").textContent = message;
+      toast(message);
+      return;
+    }
+    bindTheme();
+    if (typeof bridge.ready === "function") {
       try {
         await bridge.ready();
       } catch (error) {
