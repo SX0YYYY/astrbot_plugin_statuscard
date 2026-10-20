@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.9.2-blue)
+![Version](https://img.shields.io/badge/version-2.9.3-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)

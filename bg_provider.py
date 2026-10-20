@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-try:
-    from astrbot.api import logger  # type: ignore
-except Exception:  # pragma: no cover - fallback for local test env
-    logger = logging.getLogger("astrbot_plugin_statuscard")
+from astrbot.api import logger
 
 
 ASSETS_PATH = Path(__file__).parent / "res" / "assets"

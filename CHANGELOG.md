@@ -4,6 +4,17 @@
 
 暂无。
 
+## v2.9.3 — 2026-10-20
+
+### 变更
+
+- 按 AstrBot 官方插件规范，全部模块改用 `from astrbot.api import logger`，不再使用标准库 `logging`。
+- 测试环境通过 `conftest.py` 注入 `astrbot.api.logger` 桩，保持 pytest 可离线运行。
+
+### 测试
+
+- pytest 66 passed。
+
 ## v2.9.2 — 2026-10-20
 
 ### 修复

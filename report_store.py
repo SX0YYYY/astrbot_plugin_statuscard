@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import sqlite3
 import threading
@@ -8,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("astrbot_plugin_statuscard")
+from astrbot.api import logger
 
 SCHEMA_VERSION = 3
 

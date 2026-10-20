@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -11,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psutil
+from astrbot.api import logger
 
 from .collectors import (
     _call_action,
@@ -29,8 +29,6 @@ from .collectors import (
 )
 from .state import StateStore
 from .utils import retry_delay, truncate_text
-
-logger = logging.getLogger("astrbot_plugin_statuscard")
 
 
 def _now_text(config: Any = None) -> str:

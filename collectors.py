@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 import os
 import platform
@@ -25,11 +24,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import psutil
+from astrbot.api import logger
 
 from .utils import CpuFreq, readable_python_version
 from .version_resolver import resolve_astrbot_version
 
-logger = logging.getLogger("astrbot_plugin_statuscard")
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _TZ_WARNED: set[str] = set()
 

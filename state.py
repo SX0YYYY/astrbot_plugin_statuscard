@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("astrbot_plugin_statuscard")
+from astrbot.api import logger
 
 SCHEMA_VERSION = 1
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import socket
 import time
@@ -8,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 import psutil
+from astrbot.api import logger
 
 try:
     from quart import jsonify, request
@@ -27,8 +27,6 @@ from .collectors import (
 from .report_view import DailyReportBuilder
 from .version import __version__
 from .version_resolver import resolve_astrbot_version
-
-logger = logging.getLogger("astrbot_plugin_statuscard")
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
 PLUGIN_VERSION = __version__

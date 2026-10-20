@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import subprocess
 import time
 from datetime import datetime
@@ -9,12 +8,11 @@ from typing import Any
 
 import httpx
 import psutil
+from astrbot.api import logger
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
 from .utils import redact_url, retry_delay
-
-logger = logging.getLogger("astrbot_plugin_statuscard")
 
 
 KIND_LABELS = {

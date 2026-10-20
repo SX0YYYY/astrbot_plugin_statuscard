@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import socket
 import time
@@ -9,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 
 import psutil
+from astrbot.api import logger
 
 from .collectors import (
     cached_cpu_percent,
@@ -32,8 +32,6 @@ from .report_view import (
 from .sampler import read_message_stats_total
 from .state import StateStore
 from .version_resolver import resolve_astrbot_version
-
-logger = logging.getLogger("astrbot_plugin_statuscard")
 
 
 def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from pathlib import Path
 from typing import Any
 
 import psutil
+from astrbot.api import logger
 
 from .collectors import (
     ensure_system_cpu,
@@ -16,8 +16,6 @@ from .collectors import (
     sample_system_cpu,
 )
 from .state import StateStore
-
-logger = logging.getLogger("astrbot_plugin_statuscard")
 
 
 def _message_stats_dir() -> Path | None:
