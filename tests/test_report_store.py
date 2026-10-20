@@ -80,3 +80,16 @@ def test_report_store_prunes_old_rows(tmp_path: Path) -> None:
     assert store.list_events("2020-01-01") == []
     # Daily snapshots are kept for trend comparison.
     assert store.get_snapshot("2020-01-01") is not None
+
+
+def test_report_store_latest_run(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    store.add_report_run("2026-10-20", 100, True, "image")
+    store.add_report_run("2026-10-20", 200, False, "send failed")
+
+    latest = store.latest_report_run("2026-10-20")
+    assert latest is not None
+    assert latest["ts"] == 200
+    assert latest["ok"] is False
+    assert latest["detail"] == "send failed"
+    assert store.latest_report_run("2026-10-19") is None

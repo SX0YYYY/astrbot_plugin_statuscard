@@ -254,6 +254,26 @@ class ReportStore:
             (day, int(ts), 1 if ok else 0, detail[:500]),
         )
 
+    def latest_report_run(self, day: str | None = None) -> dict[str, Any] | None:
+        sql = (
+            "SELECT day, ts, ok, detail FROM report_runs "
+            "ORDER BY ts DESC, id DESC LIMIT 1"
+        )
+        params: tuple[Any, ...] = ()
+        if day is not None:
+            sql = (
+                "SELECT day, ts, ok, detail FROM report_runs "
+                "WHERE day = ? ORDER BY ts DESC, id DESC LIMIT 1"
+            )
+            params = (day,)
+        rows = self._query(sql, params)
+        if not rows:
+            return None
+        keys = ("day", "ts", "ok", "detail")
+        result = dict(zip(keys, rows[0]))
+        result["ok"] = bool(result["ok"])
+        return result
+
     def prune(
         self,
         resource_days: int = 30,

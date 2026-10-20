@@ -228,8 +228,9 @@
             "description": "发送时间",
             "type": "string",
             "default": "09:00",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
             "condition": {"enabled": true},
-            "hint": "24 小时制，例如 09:00 或 20:00。"
+            "hint": "24 小时制，格式 HH:MM，例如 09:00 或 20:00。"
           },
           "with_image": {
             "description": "发送状态图（关闭则发文字摘要）",
@@ -347,6 +348,7 @@
             "description": "监听端口",
             "type": "int",
             "default": 9968,
+            "slider": {"min": 1, "max": 65535, "step": 1},
             "condition": {"enabled": true}
           },
           "path": {
@@ -470,7 +472,8 @@
                 "description": "端口",
                 "type": "int",
                 "default": 0,
-                "hint": "例如 8765"
+                "slider": {"min": 0, "max": 65535, "step": 1},
+                "hint": "1–65535；0 表示未配置。例如 8765。"
               },
               "enabled": {
                 "description": "启用",
@@ -593,6 +596,7 @@
         "description": "维护静默截止时间",
         "type": "string",
         "default": "",
+        "pattern": "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$",
         "condition": {"show_advanced": true},
         "hint": "格式 YYYY-MM-DD HH:MM；到时间前只探测、不发送异常/恢复通知。留空表示不静默。"
       },
@@ -635,10 +639,56 @@
     }
   },
   "daily_report": {
-    "description": "日报数据",
+    "description": "日报",
     "type": "object",
-    "hint": "记录资源趋势、QQ 每日快照和异常事件，为后续日报发送积累数据。默认开启记录，开销很小。",
+    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势和 Token 消耗；默认关闭发送，只记录数据，开销很小。",
     "items": {
+      "enabled": {
+        "description": "启用每日日报",
+        "type": "bool",
+        "default": false,
+        "hint": "每天定时生成并发送日报；默认关闭，避免群消息噪音。"
+      },
+      "time": {
+        "description": "日报发送时间",
+        "type": "string",
+        "default": "21:00",
+        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+        "condition": {"enabled": true},
+        "hint": "24 小时制 HH:MM；建议与每日定时状态图错开。"
+      },
+      "targets": {
+        "description": "日报推送目标",
+        "type": "list",
+        "default": [],
+        "items": {"type": "string"},
+        "condition": {"enabled": true},
+        "hint": "留空复用“主动告警”的推送目标；也可以填 QQ 群号或完整 UMO。"
+      },
+      "sections": {
+        "description": "日报内容",
+        "type": "list",
+        "default": ["resource", "anomaly", "qq", "token"],
+        "options": ["resource", "anomaly", "qq", "token"],
+        "labels": ["资源趋势", "异常汇总", "QQ 趋势", "Token 消耗"],
+        "render_type": "checkbox",
+        "condition": {"enabled": true},
+        "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。"
+      },
+      "with_image": {
+        "description": "发送图片",
+        "type": "bool",
+        "default": true,
+        "condition": {"enabled": true},
+        "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
+      },
+      "history_days": {
+        "description": "趋势天数",
+        "type": "int",
+        "default": 7,
+        "slider": {"min": 7, "max": 30, "step": 7},
+        "condition": {"enabled": true}
+      },
       "collect": {
         "description": "记录日报历史数据",
         "type": "bool",
@@ -649,6 +699,14 @@
         "description": "显示高级日报选项",
         "type": "bool",
         "default": false
+      },
+      "render_timeout": {
+        "description": "日报渲染超时（秒）",
+        "type": "int",
+        "default": 180,
+        "slider": {"min": 30, "max": 600, "step": 10},
+        "condition": {"show_advanced": true},
+        "hint": "超时后回退文字摘要。"
       },
       "resource_sample_seconds": {
         "description": "资源采样间隔（秒）",

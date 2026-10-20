@@ -291,6 +291,18 @@ def test_monitor_warns_on_unknown_type_and_missing_field(
     assert "禁用项" not in caplog.text
 
 
+def test_monitor_warns_on_invalid_tcp_port(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("WARNING", logger="astrbot_plugin_statuscard")
+    monitor = _monitor(
+        tmp_path,
+        [{"__template_key": "tcp", "name": "坏端口", "port": 70000}],
+    )
+    assert len(monitor.items) == 1
+    assert "1–65535" in caplog.text
+
+
 def test_monitor_item_key_matches_target(tmp_path: Path) -> None:
     monitor = _monitor(
         tmp_path,

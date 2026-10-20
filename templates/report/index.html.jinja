@@ -1,0 +1,251 @@
+{% macro chart_svg(chart) %}
+{% if chart and not chart.empty %}
+<svg class="chart" viewBox="0 0 {{ chart.width }} {{ chart.height }}" preserveAspectRatio="none" role="img">
+  <rect x="{{ chart.left }}" y="{{ chart.top }}" width="{{ chart.plot_w }}" height="{{ chart.plot_h }}" class="plot-bg" />
+  {% for line in chart.y_labels %}
+  <line x1="{{ chart.left }}" y1="{{ line.y }}" x2="{{ chart.left + chart.plot_w }}" y2="{{ line.y }}" class="grid" />
+  <text x="{{ chart.left - 6 }}" y="{{ line.y + 4 }}" text-anchor="end" class="axis">{{ line.text }}</text>
+  {% endfor %}
+  {% for series in chart.series %}
+  {% for segment in series.segments %}
+  <polyline points="{{ segment }}" fill="none" stroke="{{ series.color }}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" />
+  {% endfor %}
+  {% endfor %}
+  {% for point in chart.peaks %}
+  <circle cx="{{ point.x }}" cy="{{ point.y }}" r="3" fill="{{ point.color }}" />
+  <text x="{{ point.x }}" y="{{ point.y - 7 }}" text-anchor="middle" class="peak">{{ point.text }}</text>
+  {% endfor %}
+  {% for label in chart.x_labels %}
+  <text x="{{ label.x }}" y="{{ chart.height - 6 }}" text-anchor="middle" class="axis">{{ label.text }}</text>
+  {% endfor %}
+</svg>
+{% else %}
+<div class="empty small">暂无图表数据</div>
+{% endif %}
+{% endmacro %}
+
+{% macro legend(chart) %}
+{% if chart and chart.series %}
+<div class="legend">
+  {% for series in chart.series %}
+  <span class="legend-item"><i style="background: {{ series.color }}"></i>{{ series.name }}</span>
+  {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=650, initial-scale=1.0" />
+  <title>{{ d.title }} · {{ d.day }}</title>
+  <style>__REPORT_CSS__</style>
+</head>
+<body>
+  <div class="report-shell">
+    <header class="hero">
+      <div>
+        <div class="kicker">DAILY REPORT</div>
+        <h1>{{ d.title }}</h1>
+        <div class="hero-meta">{{ d.day }} · {{ d.window }} · {{ d.timezone }}</div>
+      </div>
+      <div class="hero-right">
+        <div>{{ d.host }}</div>
+        {% if d.astrbot_version %}<div>AstrBot {{ d.astrbot_version }}</div>{% endif %}
+        <div>生成于 {{ d.generated_at }}</div>
+      </div>
+    </header>
+
+    <section class="summary">
+      <div class="summary-item"><span>异常 / 失败</span><strong>{{ d.summary.anomaly_count }}</strong></div>
+      <div class="summary-item"><span>Token</span><strong>{{ d.summary.token_total_text }}</strong></div>
+      <div class="summary-item"><span>发送</span><strong>{{ d.summary.sent_text }}</strong></div>
+      <div class="summary-item"><span>接收</span><strong>{{ d.summary.recv_text }}</strong></div>
+    </section>
+
+    {% if "resource" in d.sections and d.resources %}
+    <section class="section">
+      <div class="section-head">
+        <h2>资源趋势</h2>
+        <span>昨日 24 小时 · 最近 {{ d.history_days }} 天</span>
+      </div>
+      {% if not d.resources.available %}
+      <div class="empty">{{ d.resources.empty_reason }}</div>
+      {% else %}
+      <div class="stat-grid resource-grid">
+        {% for key, label in [("cpu", "CPU"), ("ram", "RAM"), ("swap", "SWAP"), ("disk", "磁盘"), ("load1", "每核负载")] %}
+        <div class="stat">
+          <div class="stat-label">{{ label }}</div>
+          <div class="stat-value">{{ d.resources.yesterday[key].avg_text }}</div>
+          <div class="stat-sub">峰值 {{ d.resources.yesterday[key].peak_text }}</div>
+          <div class="stat-delta">较前日 {{ d.resources.yesterday[key].delta_text }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">昨日 24 小时 <span>按小时均值</span></div>
+        {{ legend(d.resources.charts.hourly) }}
+        {{ chart_svg(d.resources.charts.hourly) }}
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">最近 {{ d.history_days }} 天 <span>日均值</span></div>
+        {{ legend(d.resources.charts.daily) }}
+        {{ chart_svg(d.resources.charts.daily) }}
+      </div>
+      {% if d.resources.history_note %}
+      <p class="note">{{ d.resources.history_note }}</p>
+      {% endif %}
+      {% if d.resources.coverage_note %}
+      <p class="note">{{ d.resources.coverage_note }}</p>
+      {% endif %}
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if "anomaly" in d.sections and d.anomalies %}
+    <section class="section">
+      <div class="section-head">
+        <h2>异常汇总</h2>
+        <span>异常 / 失败 {{ d.anomalies.count }} 次</span>
+      </div>
+      {% if d.anomalies["items"] %}
+      <div class="event-list">
+        {% for item in d.anomalies["items"] %}
+        <div class="event-row">
+          <div class="event-time">{{ item.time }}</div>
+          <div class="event-main">
+            <span class="badge {{ item.status_key }}">{{ item.status }}</span>
+            <strong>{{ item.name }}</strong>
+            <span class="event-kind">{{ item.kind }}</span>
+            <span class="event-detail">{{ item.detail }}</span>
+          </div>
+          <div class="event-duration">{{ item.duration }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% if d.anomalies.total > d.anomalies["items"]|length %}
+      <p class="note">另有 {{ d.anomalies.total - d.anomalies["items"]|length }} 条事件，详见后台日志。</p>
+      {% endif %}
+      {% else %}
+      <div class="empty">{{ d.anomalies.empty_reason }}</div>
+      {% endif %}
+      <p class="note">服务监测 {{ d.anomalies.normal.monitors }} 项；资源规则 {{ d.anomalies.normal.resource_rules }} 条。正常项只给数量，不逐条列出。</p>
+    </section>
+    {% endif %}
+
+    {% if "qq" in d.sections and d.qq %}
+    <section class="section">
+      <div class="section-head">
+        <h2>QQ 趋势</h2>
+        <span>最近 {{ d.history_days }} 天</span>
+      </div>
+      {% if not d.qq.available %}
+      <div class="empty">{{ d.qq.empty_reason }}</div>
+      {% else %}
+      <div class="stat-grid qq-grid">
+        <div class="stat">
+          <div class="stat-label">好友</div>
+          <div class="stat-value">{{ d.qq.yesterday.friends_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">群聊</div>
+          <div class="stat-value">{{ d.qq.yesterday.groups_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">群员</div>
+          <div class="stat-value">{{ d.qq.yesterday.members_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">发送</div>
+          <div class="stat-value">{{ d.qq.yesterday.sent_text }}</div>
+          <div class="stat-sub">较前日 {{ d.qq.yesterday.sent_delta_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">接收</div>
+          <div class="stat-value">{{ d.qq.yesterday.recv_text }}</div>
+          <div class="stat-sub">较前日 {{ d.qq.yesterday.recv_delta_text }}</div>
+        </div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">好友 / 群聊 <span>每日快照</span></div>
+        {{ legend(d.qq.charts.friends_groups) }}
+        {{ chart_svg(d.qq.charts.friends_groups) }}
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">群员 <span>各群 member_count 之和</span></div>
+        {{ legend(d.qq.charts.members) }}
+        {{ chart_svg(d.qq.charts.members) }}
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">发送 / 接收 <span>按日</span></div>
+        {{ legend(d.qq.charts.traffic) }}
+        {{ chart_svg(d.qq.charts.traffic) }}
+      </div>
+      {% if d.qq.reset_days %}
+      <p class="note">接收统计在 {{ d.qq.reset_days|join("、") }} 发生重置，已按 0 处理。</p>
+      {% endif %}
+      {% if d.qq.recv_note %}
+      <p class="note">{{ d.qq.recv_note }}</p>
+      {% endif %}
+      {% if d.qq.snapshot_note %}
+      <p class="note">{{ d.qq.snapshot_note }}</p>
+      {% endif %}
+      <p class="note">{{ d.qq.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if "token" in d.sections and d.token %}
+    <section class="section">
+      <div class="section-head">
+        <h2>Token 消耗</h2>
+        <span>最近 {{ d.history_days }} 天</span>
+      </div>
+      {% if not d.token.available %}
+      <div class="empty">{{ d.token.empty_reason }}</div>
+      {% else %}
+      <div class="stat-grid token-grid">
+        <div class="stat">
+          <div class="stat-label">总 Token</div>
+          <div class="stat-value">{{ d.token.total_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">调用次数</div>
+          <div class="stat-value">{{ d.token.calls_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">成功率</div>
+          <div class="stat-value">{{ d.token.success_text }}</div>
+        </div>
+      </div>
+      {% if d.token.top_models %}
+      <table class="model-table">
+        <thead><tr><th>模型</th><th>Token</th><th>占比</th></tr></thead>
+        <tbody>
+          {% for model in d.token.top_models %}
+          <tr>
+            <td>{{ model.name }}</td>
+            <td>{{ model.tokens_text }}</td>
+            <td>{{ model.share_text }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+      <div class="chart-block">
+        <div class="chart-title">Token 趋势 <span>按日</span></div>
+        {{ legend(d.token.trend) }}
+        {{ chart_svg(d.token.trend) }}
+      </div>
+      <p class="note">{{ d.token.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <footer class="footer">
+      {{ d.footer_note }}<br />
+      {{ d.title }} · {{ d.day }} · 生成于 {{ d.generated_at }}
+    </footer>
+  </div>
+</body>
+</html>

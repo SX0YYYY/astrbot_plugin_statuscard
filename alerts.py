@@ -635,7 +635,10 @@ class AlertEngine:
             cfg_get(self.config, "alerts.komari_webhook.host", "127.0.0.1")
             or "127.0.0.1"
         )
-        port = cfg_int(self.config, "alerts.komari_webhook.port", 9968)
+        port = max(
+            1,
+            min(65535, cfg_int(self.config, "alerts.komari_webhook.port", 9968)),
+        )
         path = str(
             cfg_get(self.config, "alerts.komari_webhook.path", "/webhook")
             or "/webhook"

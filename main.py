@@ -28,11 +28,11 @@ from .collectors import (
     uploaded_file_path,
 )
 from .monitor import ServiceMonitor
-from .report import ReportCollector
+from .report import DailyReporter, ReportCollector
 from .report_store import ReportStore
 from .sampler import Sampler
 from .state import StateStore
-from .t2i_renderer import build_default_html
+from .t2i_renderer import build_default_html, build_report_html
 from .utils import is_supported_platform
 
 
@@ -42,8 +42,8 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
 @register(
     PLUGIN_NAME,
     "烬辞",
-    "以图片卡片显示系统运行状态，并支持主动告警推送",
-    "2.4.1",
+    "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
+    "2.5.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -60,6 +60,9 @@ class StatusCardPlugin(Star):
         )
         self.report = ReportCollector(
             self, self.state, self.config, self.report_store
+        )
+        self.daily_report = DailyReporter(
+            self, self.report_store, self.config
         )
         self.alerts = AlertEngine(
             self,
@@ -148,16 +151,20 @@ class StatusCardPlugin(Star):
     async def initialize(self):
         self.sampler.start()
         self.report.start()
+        self.daily_report.start()
         self.alerts.start()
         self.monitor.start()
         logger.info(
-            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, monitors_enabled=%s)",
+            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, "
+            "monitors_enabled=%s, daily_report_enabled=%s)",
             self.data_dir,
             cfg_bool(self.config, "alerts.enabled", False),
             cfg_bool(self.config, "monitors.enabled", False),
+            cfg_bool(self.config, "daily_report.enabled", False),
         )
 
     async def terminate(self):
+        await self.daily_report.stop()
         await self.report.stop()
         await self.monitor.stop()
         await self.alerts.stop()
@@ -363,6 +370,29 @@ class StatusCardPlugin(Star):
     async def build_status_image(self) -> str | None:
         """Render a status image without an incoming event (scheduled daily status image)."""
         return await self._render_status_image(event=None)
+
+    async def render_report_image(self, view: dict) -> str:
+        """Render a daily-report view through the same T2I options as the card."""
+
+        render_width = max(
+            1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
+        )
+        logical_width = max(650, min(1600, round(render_width / 1.8)))
+        html = build_report_html(view, render_width=logical_width)
+        timeout = max(
+            30,
+            min(600, cfg_int(self.config, "daily_report.render_timeout", 180)),
+        )
+        options = {
+            "type": "jpeg",
+            "quality": 90,
+            "full_page": True,
+            "device_scale_factor_level": "ultra",
+        }
+        return await asyncio.wait_for(
+            self.html_render(html, {}, return_url=True, options=options),
+            timeout=timeout,
+        )
 
     async def _resolve_background(self, event: AstrMessageEvent | None):
         bg_bytes = None
@@ -594,7 +624,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.4.1")
+        lines.append("插件: v2.5.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -679,5 +709,34 @@ class StatusCardPlugin(Star):
             + f" / 快照 {store_stats.get('snapshots', 0)} 天"
             + f" / 事件 {store_stats.get('events', 0)} 条"
         )
+        daily_status = self.daily_report.status()
+        lines.append(
+            "日报发送: "
+            + ("开启" if daily_status.get("enabled") else "关闭")
+            + f"，时间 {daily_status.get('time', '--')}"
+            + f"，目标 {len(daily_status.get('targets') or [])} 个"
+            + f"，内容 {','.join(daily_status.get('sections') or [])}"
+        )
+        last_run = daily_status.get("last_run")
+        if isinstance(last_run, dict):
+            lines.append(
+                "最近日报: "
+                + ("成功" if last_run.get("ok") else "失败")
+                + f"（{last_run.get('day') or '--'}，"
+                + f"{str(last_run.get('detail') or '无详情')[:40]}）"
+            )
+        else:
+            lines.append("最近日报: 暂无发送记录")
         lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
         yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("预览日报")
+    async def cmd_preview_report(self, event: AstrMessageEvent):
+        """Build and send yesterday's daily report to the current chat."""
+        event.should_call_llm(False)
+        ok, detail = await self.daily_report.preview(
+            getattr(event, "unified_msg_origin", None)
+        )
+        if not ok:
+            yield event.plain_result(detail)

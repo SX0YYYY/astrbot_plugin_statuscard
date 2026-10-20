@@ -125,6 +125,14 @@ class ServiceMonitor:
                     kind,
                     required,
                 )
+            if kind == "tcp":
+                port = cfg_int(item, "port", 0)
+                if port and not (1 <= port <= 65535):
+                    logger.warning(
+                        "监测项 %r（tcp）端口 %s 超出 1–65535，检查时会始终判定为异常",
+                        str(item.get("name") or kind),
+                        port,
+                    )
             normalized = dict(item)
             normalized["__template_key"] = kind
             normalized["name"] = str(item.get("name") or kind)
@@ -496,8 +504,8 @@ class ServiceMonitor:
             host = str(item.get("host") or "127.0.0.1").strip()
             port = cfg_int(item, "port", 0)
             target = f"{host}:{port}"
-            if not port:
-                return False, "端口未配置", target
+            if not port or not (1 <= port <= 65535):
+                return False, "端口未配置或超出 1–65535", target
             try:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port), timeout=timeout

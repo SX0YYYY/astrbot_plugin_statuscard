@@ -11,6 +11,7 @@ from markupsafe import Markup, escape
 ROOT = Path(__file__).parent
 TPL_DIR = ROOT / "templates" / "default" / "res" / "templates"
 CSS_FILE = ROOT / "templates" / "default" / "res" / "css" / "index.css"
+REPORT_DIR = ROOT / "templates" / "report"
 DEFAULT_AVATAR = ROOT / "res" / "assets" / "default_avatar.webp"
 
 
@@ -127,3 +128,22 @@ def build_default_html(
     )
     template = env.from_string(tmpl)
     return template.render(d=view)
+
+
+def build_report_html(view: dict[str, Any], render_width: int = 650) -> str:
+    """Render the daily-report template without any JavaScript dependency."""
+
+    width = max(650, min(1600, int(render_width or 650)))
+    css = _read_text(REPORT_DIR / "report.css").replace(
+        "width: 650px", f"width: {width}px"
+    )
+    template_text = _read_text(REPORT_DIR / "index.html.jinja")
+    template_text = template_text.replace("__REPORT_CSS__", css)
+    template_text = template_text.replace(
+        'content="width=650, initial-scale=1.0"',
+        f'content="width={width}, initial-scale=1.0"',
+    )
+    env = jinja2.Environment(
+        autoescape=jinja2.select_autoescape(["html", "xml"])
+    )
+    return env.from_string(template_text).render(d=view)

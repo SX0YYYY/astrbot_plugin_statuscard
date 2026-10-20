@@ -1,6 +1,12 @@
+![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![License](https://img.shields.io/badge/license-AGPL--3.0-green)
+![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
+
 # 系统状态卡片
 
-把服务器的 CPU、内存、磁盘、网络、进程等信息，做成一张状态图发到 QQ 群；需要时还能在服务掉线、资源过高或每天固定时间主动通知你。
+把服务器的 CPU、内存、磁盘、网络、进程等信息，做成一张状态图发到 QQ 群；需要时还能在服务掉线、资源过高或每天固定时间主动通知你，并发送资源/异常/QQ/Token 日报。
 
 > **默认就能用。** 安装并重载插件后，由管理员发送 `查看状态` 即可出图；头像默认用 QQ 头像，背景默认用内置背景，不需要先配置任何东西。
 
@@ -13,7 +19,13 @@
 - **进程信息**：进程状态统计 + CPU 占用最高的进程表
 - **主动告警**：资源阈值、Bot 掉线/恢复、每日定时状态图、Komari Webhook 转发
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
-- **日报数据底座**：记录资源趋势、QQ 每日快照和异常事件，为后续日报发送积累数据（v2.4.0 只记录，不发送日报）
+- **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势和 Token 消耗；图片失败回退文字；默认关闭，可用 `预览日报` 手动查看
+
+## 效果预览
+
+![状态卡示例](docs/statuscard-example.png)
+
+示例图使用脱敏配置生成，主机名、进程名和 QQ 统计已隐藏；实际卡片会显示真实数据。
 
 ## 平台支持
 
@@ -47,6 +59,7 @@
 1. **直接发 `查看状态`**：默认配置就能出图。
 2. **想换头像/背景**：进插件配置页，把“头像来源”或“背景来源”改成“自定义上传”，上传图片后保存。
 3. **想收告警**：在“主动告警”里打开开关，填一个 QQ 群号；需要服务监测时再到“服务可用性监测”里添加目标。
+4. **想看日报**：在“日报”里开启每日日报，或直接用 `预览日报` 查看昨日汇总。
 
 ## 命令
 
@@ -56,6 +69,7 @@
 | `测试通知` | 向当前会话发送一条测试通知，验证推送链路（仅管理员） |
 | `立即检测` | 立即检查所有监测目标，只返回异常项和汇总（仅管理员） |
 | `状态卡诊断` | 输出平台、OneBot、告警/监测/静默状态、最近采集与渲染耗时、最近推送结果（仅管理员） |
+| `预览日报` | 生成昨日日报并发送到当前会话（仅管理员） |
 
 ### 触发方式
 
@@ -65,7 +79,7 @@
 
 ## 配置页导览
 
-配置页只有五个分组，默认只显示最常用的项目；带“高级”字样的开关打开后，才会出现更多选项。
+配置页只有六个分组，默认只显示最常用的项目；带“高级”字样的开关打开后，才会出现更多选项。
 
 ### 头像
 
@@ -116,12 +130,17 @@
 
 > 监测项类型未知、或缺少网址/端口/容器名/服务名/进程关键字时，插件启动会在日志中给出 warning，不会静默跳过；填完可以用管理员命令 `立即检测` 验证。
 
-### 日报数据
+### 日报
 
-- **记录日报历史数据**：默认开启；每 5 分钟记录一次资源占用，每天记录一次好友/群/群员和接收累计，并记录告警/监测事件
-- **显示高级日报选项**：资源采样间隔、资源保留天数、异常事件保留天数
-- 本版本只积累数据，**不会发送日报**；日报图片和定时发送在后续版本提供
-- 资源、QQ 数量、接收量和异常事件从启用后开始积累；发送量和 Token 可以回填 AstrBot 历史数据库
+- **启用每日日报**：默认关闭；开启后按设定时间发送到“推送目标”
+- **发送时间**：默认 `21:00`，建议与每日定时状态图错开
+- **推送目标**：留空复用“主动告警”的推送目标
+- **日报内容**：资源趋势 / 异常汇总 / QQ 趋势 / Token 消耗，可勾选
+- **发送图片**：关闭或图片失败时发送文字摘要
+- **趋势天数**：7 / 14 / 30 天
+- **记录日报历史数据**：默认开启；每 5 分钟记录资源占用，每天记录好友/群/群员和接收累计，并记录告警/监测事件
+- 资源、QQ 数量、接收量和异常事件从启用后开始积累；前几天会显示“数据积累中”，不会伪造历史
+- 即使未开启定时发送，管理员也可以发送 `预览日报` 手动查看昨日日报
 
 ## 常见场景
 
@@ -200,6 +219,8 @@
 - 插件会访问 QQ 头像地址 `q1.qlogo.cn`，以及“网站测试目标”中配置的网站
 - 如果不想暴露主机名、进程名、网络或 QQ 统计，打开“显示高级显示选项”，在“状态卡脱敏项”中勾选对应项目
 - 公开群使用前，建议至少隐藏主机名和进程信息
+- 日报数据库 `data/plugin_data/astrbot_plugin_statuscard/report.db` 只保存资源数值采样、QQ 数量/接收累计、异常事件和日报生成记录；不保存消息内容、用户 ID、UMO 或 Token 密钥
+- `state.json` 和 `report.db` 在 Linux 下会尝试设置为 600 权限；资源数据默认保留 30 天，事件默认保留 90 天
 
 ## 数据口径
 
@@ -213,30 +234,38 @@
 
 只有需要排错或精细调整时才需要看这部分。
 
-| 配置项 | 说明 |
-|---|---|
-| `display.render_width` | 输出图片宽度，1170–2880 像素；内部按 T2I 的 1.8 倍高清倍率换算 |
-| `display.compact` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
-| `display.render_timeout` | 渲染超时，默认 180 秒；超时后回退为文字摘要 |
-| `display.cooldown_seconds` | 同一会话冷却，默认 10 秒；0 表示不限制 |
-| `display.website_targets` | 网站测试目标；默认只测百度，可增删 |
-| `display.website_cache_seconds` | 网站测试缓存，默认 60 秒；0 表示每次重新请求 |
-| `display.disk_paths` | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
-| `display.timezone` | 时区，默认 `Asia/Shanghai` |
-| `display.redact` | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
-| `alerts.cpu_threshold` 等 | 资源阈值；打开“显示高级告警选项”后可调 |
-| `alerts.interval_seconds` | 告警采样间隔，默认 60 秒 |
-| `alerts.sustain_samples` | 连续超过阈值几次才告警，默认 3 次 |
-| `monitors.interval_seconds` | 服务监测轮询间隔，默认 60 秒 |
-| `monitors.fail_threshold` | 连续失败几次后告警，默认 2 次 |
-| `monitors.silence_until` | 维护静默截止时间，`YYYY-MM-DD HH:MM`；到期前只探测不推送 |
-| `monitors.max_response_bytes` | HTTP 关键字检查最大读取字节数，默认 262144 |
-| `monitors.items[].suppress_when_down` | HTTP 监测项依赖的另一个监测项名称；依赖项异常时抑制本项告警 |
-| `alerts.komari_webhook.require_token` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
-| `daily_report.collect` | 记录日报历史数据，默认 true |
-| `daily_report.resource_sample_seconds` | 资源采样间隔，默认 300 秒 |
-| `daily_report.retention_days` | 资源数据保留天数，默认 30 天 |
-| `daily_report.event_retention_days` | 异常事件保留天数，默认 90 天 |
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `display.render_width` | `1170` | 输出图片宽度，1170–2880 像素；内部按 T2I 的 1.8 倍高清倍率换算 |
+| `display.compact` | `false` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
+| `display.render_timeout` | `180` | 渲染超时（秒）；超时后回退为文字摘要 |
+| `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
+| `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删 |
+| `display.website_cache_seconds` | `60` | 网站测试缓存；0 表示每次重新请求 |
+| `display.disk_paths` | 空 | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
+| `display.timezone` | `Asia/Shanghai` | 卡片、告警、监测和日报统一使用的时区 |
+| `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
+| `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
+| `alerts.interval_seconds` | `60` | 告警采样间隔（秒） |
+| `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警 |
+| `alerts.cooldown_seconds` | `1800` | 同一规则告警冷却（秒） |
+| `monitors.interval_seconds` | `60` | 服务监测轮询间隔（秒） |
+| `monitors.fail_threshold` | `2` | 连续失败几次后告警 |
+| `monitors.silence_until` | 空 | 维护静默截止时间，`YYYY-MM-DD HH:MM`；到期前只探测不推送 |
+| `monitors.max_response_bytes` | `262144` | HTTP 关键字检查最大读取字节数 |
+| `monitors.items[].suppress_when_down` | 空 | HTTP 监测项依赖的另一个监测项名称；依赖项异常时抑制本项告警 |
+| `alerts.komari_webhook.require_token` | `false` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
+| `daily_report.enabled` | `false` | 启用每日定时日报 |
+| `daily_report.time` | `21:00` | 日报发送时间，24 小时制 `HH:MM` |
+| `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |
+| `daily_report.sections` | 全部 | 勾选资源 / 异常 / QQ / Token |
+| `daily_report.with_image` | `true` | 发送图片；关闭或失败时发文字摘要 |
+| `daily_report.history_days` | `7` | 趋势天数，7–30 天 |
+| `daily_report.render_timeout` | `180` | 日报渲染超时（秒） |
+| `daily_report.collect` | `true` | 记录日报历史数据 |
+| `daily_report.resource_sample_seconds` | `300` | 资源采样间隔（秒） |
+| `daily_report.retention_days` | `30` | 资源数据保留天数 |
+| `daily_report.event_retention_days` | `90` | 异常事件保留天数 |
 
 ### 配置文件位置
 
@@ -313,11 +342,33 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 ### 日报在哪里看
 
-当前版本（v2.4.0）只记录日报数据，不会发送日报；日报图片、趋势图和定时发送尚未实现。管理员可以发送 `状态卡诊断`，查看已积累的资源条数、快照天数和事件条数。
+- 管理员发送 `预览日报`，会立即生成昨日日报并发送到当前会话。
+- 在“日报”里开启“启用每日日报”后，每天在设定时间自动发送；推送目标留空时复用“主动告警”的目标。
+- 前几天资源 7 天趋势、QQ 快照和接收趋势会显示“数据积累中”，因为历史数据从启用后才开始记录；发送量和 Token 可以回填 AstrBot 历史数据库。
+- `状态卡诊断` 会显示日报开关、发送时间、目标数量、内容模块和最近一次发送结果。
 
 ### 如何卸载和数据清理
 
 删除插件目录、`data/config/astrbot_plugin_statuscard_config.json` 和 `data/plugin_data/astrbot_plugin_statuscard/` 即可。卸载前建议先备份 `state.json`；如需保留日报历史，同时备份 `report.db`。
+
+## Roadmap
+
+- **日报可选模块**：待办记录、网站延迟趋势、Top 异常进程、图片分页/压缩
+- **多机器人完整支持**：按监测项/告警目标配置平台，真实双账号验证
+- **通知渠道**：邮件、出站 Webhook、其他 IM 平台
+- **状态页/历史看板**：把 `report.db` 的趋势数据用于 Web 查看
+- **公开发布**：插件市场、公开仓库、issue 模板和安全策略（当前仓库私有）
+
+## 开发与测试
+
+测试使用 pytest，不依赖 AstrBot 运行时：
+
+```bash
+cd astrbot_plugin_statuscard
+python -m pytest -q
+```
+
+当前测试预期为 `39 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
 
 ## 更新日志
 

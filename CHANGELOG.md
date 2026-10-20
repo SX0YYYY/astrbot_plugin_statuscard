@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+暂无。
+
+## v2.5.0 — 2026-10-20
+
+### 新增
+
+- 新增日报聚合层 `report_view.py`：资源昨日/7 天趋势、异常事件配对、QQ 快照与发送趋势、Token 按日与 Top 模型统计。
+- 新增 `templates/report/` 日报模板与样式，以及 `t2i_renderer.build_report_html()`；图表为纯 SVG，不依赖 JavaScript。
+- 新增 `daily_report.enabled/time/targets/sections/with_image/history_days/render_timeout` 配置；日报默认关闭，内容模块可勾选。
+- 新增每日定时日报发送（独立于每日定时状态图）、图片失败文字回退、`report_runs` 发送记录和重复发送保护。
+- 新增管理员命令 `预览日报`，可手动生成昨日日报并发送到当前会话。
+- 日报数据不足时显示“数据积累中”，不伪造历史；主机名遵循 `display.redact`。
+
+### 变更
+
+- 文档补齐顶部 badges、效果预览、Roadmap、`report.db` 隐私与保留说明、配置默认值和开发测试说明。
+- `metadata.yaml` 增加 `short_desc`，描述补充日报。
+- 配置 schema 为每日定时状态图时间、维护静默时间补充格式提示，为 Komari Webhook 和 TCP 端口补充范围提示。
+- 服务监测在 TCP 端口超出 1–65535 时启动输出 warning，探测时直接判定为配置错误；Komari Webhook 端口在启动时钳制到合法范围。
+- 新增日报聚合/模板/发送记录测试和 TCP 端口越界测试，测试数变为 39 passed。
+
 ## v2.4.1 — 2026-10-20
 
 ### 修复

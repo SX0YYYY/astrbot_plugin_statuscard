@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import time
+from datetime import timedelta
 from typing import Any
 
 import psutil
@@ -19,8 +21,10 @@ from .collectors import (
     swap_stat,
 )
 from .report_store import ReportStore
+from .report_view import VALID_SECTIONS, DailyReportBuilder, build_report_text
 from .sampler import read_message_stats_total
 from .state import StateStore
+from .version_resolver import resolve_astrbot_version
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
@@ -211,4 +215,273 @@ class ReportCollector:
             "retention_days": self.retention_days,
             "event_retention_days": self.event_retention_days,
             "store": self.store.stats(),
+        }
+
+
+class DailyReporter:
+    """Scheduled daily report builder, sender and manual preview entry."""
+
+    def __init__(self, plugin: Any, store: ReportStore, config: Any):
+        self.plugin = plugin
+        self.store = store
+        self.config = config
+        self.builder = DailyReportBuilder(store, config)
+        self._task: asyncio.Task | None = None
+        self._running = False
+        self._last_sent_day: str | None = None
+
+    # ------------------------------------------------------------------
+    # configuration helpers (read per call so edits apply after reload)
+    # ------------------------------------------------------------------
+
+    def _enabled(self) -> bool:
+        return cfg_bool(self.config, "daily_report.enabled", False)
+
+    def _with_image(self) -> bool:
+        return cfg_bool(self.config, "daily_report.with_image", True)
+
+    def _time_text(self) -> str:
+        return str(
+            cfg_get(self.config, "daily_report.time", "21:00") or "21:00"
+        ).strip()
+
+    def _history_days(self) -> int:
+        return max(
+            7, min(30, cfg_int(self.config, "daily_report.history_days", 7))
+        )
+
+    def _sections(self) -> list[str]:
+        raw = cfg_get(
+            self.config, "daily_report.sections", list(VALID_SECTIONS)
+        )
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = []
+        allowed = {str(item) for item in raw if isinstance(item, str)}
+        selected = [item for item in VALID_SECTIONS if item in allowed]
+        return selected or list(VALID_SECTIONS)
+
+    def _targets(self) -> list[str]:
+        raw = cfg_get(self.config, "daily_report.targets", [])
+        if not raw:
+            raw = cfg_get(self.config, "alerts.targets", [])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        platform_id = str(
+            cfg_get(self.config, "alerts.platform_id", "default") or "default"
+        )
+        out: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if not value:
+                continue
+            target = (
+                value if ":" in value else f"{platform_id}:GroupMessage:{value}"
+            )
+            if target not in out:
+                out.append(target)
+        return out
+
+    def _build_view(self, day=None) -> dict[str, Any]:
+        meta = {
+            "host": socket.gethostname(),
+            "astrbot_version": resolve_astrbot_version(
+                getattr(self.plugin, "context", None)
+            ),
+        }
+        return self.builder.build(
+            day=day,
+            history_days=self._history_days(),
+            sections=self._sections(),
+            meta=meta,
+        )
+
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        if not self._enabled():
+            logger.info("日报定时发送未启用（daily_report.enabled=false）")
+            return
+        targets = self._targets()
+        if not targets:
+            logger.warning("日报已启用，但推送目标为空；发送时会跳过")
+        self._running = True
+        self._task = asyncio.create_task(self._loop())
+        logger.info(
+            "日报定时发送已启动：%s，目标 %d 个，内容=%s，历史=%d 天",
+            self._time_text(),
+            len(targets),
+            self._sections(),
+            self._history_days(),
+        )
+
+    async def stop(self) -> None:
+        self._running = False
+        task = self._task
+        self._task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _loop(self) -> None:
+        last_logged = None
+        warned = False
+        while self._running:
+            try:
+                if not self._enabled():
+                    await asyncio.sleep(60)
+                    continue
+                time_text = self._time_text()
+                try:
+                    hour, minute = [
+                        int(part) for part in time_text.split(":", 1)
+                    ]
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        raise ValueError("out of range")
+                    warned = False
+                except Exception:
+                    if not warned:
+                        logger.warning(
+                            "日报发送时间格式非法：%s（应为 HH:MM）",
+                            time_text,
+                        )
+                        warned = True
+                    await asyncio.sleep(60)
+                    continue
+                tz_name = str(
+                    cfg_get(
+                        self.config, "display.timezone", "Asia/Shanghai"
+                    )
+                    or "Asia/Shanghai"
+                )
+                now = now_in_timezone(self.config)
+                target = now.replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+                if target <= now:
+                    target += timedelta(days=1)
+                if last_logged != target:
+                    logger.info(
+                        "日报将在 %s 发送（%.0f 秒后）",
+                        target.strftime("%Y-%m-%d %H:%M"),
+                        max(1.0, (target - now).total_seconds()),
+                    )
+                    last_logged = target
+                wait = max(1.0, (target - now).total_seconds())
+                if wait > 60:
+                    await asyncio.sleep(60)
+                    continue
+                await asyncio.sleep(wait)
+                if not self._enabled():
+                    continue
+                if (
+                    self._time_text() != time_text
+                    or str(
+                        cfg_get(
+                            self.config, "display.timezone", "Asia/Shanghai"
+                        )
+                        or "Asia/Shanghai"
+                    )
+                    != tz_name
+                ):
+                    continue
+                await self._send_scheduled()
+                last_logged = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("日报定时任务失败")
+                await asyncio.sleep(60)
+
+    # ------------------------------------------------------------------
+    # sending
+    # ------------------------------------------------------------------
+
+    async def _send_scheduled(self) -> None:
+        targets = self._targets()
+        try:
+            view = self._build_view()
+        except Exception:
+            logger.exception("日报数据聚合失败")
+            self._record("", False, "build failed")
+            return
+        day = str(view.get("day") or "")
+        if not targets:
+            logger.warning("日报推送目标为空，跳过发送")
+            self._record(day, False, "targets empty")
+            return
+        if self._last_sent_day == day:
+            logger.info("日报 %s 已发送过，跳过重复发送", day)
+            return
+        if self._with_image():
+            image_url = None
+            try:
+                image_url = await self.plugin.render_report_image(view)
+            except Exception:
+                logger.exception("日报渲染失败，回退文字摘要")
+            if image_url and await self.plugin.send_image(targets, image_url):
+                self._last_sent_day = day
+                self._record(day, True, "image")
+                logger.info("日报已发送（图片）：%s", targets)
+                return
+        if await self.plugin.send_text(targets, build_report_text(view)):
+            self._last_sent_day = day
+            self._record(day, True, "text")
+            logger.info("日报已发送（文字）：%s", targets)
+        else:
+            self._record(day, False, "send failed")
+            logger.warning("日报发送失败：%s", targets)
+
+    async def preview(self, target_umo: str | None) -> tuple[bool, str]:
+        if not target_umo:
+            return False, "无法确定当前会话，日报预览未发送。"
+        try:
+            view = self._build_view()
+        except Exception:
+            logger.exception("日报预览数据聚合失败")
+            return False, "日报预览生成失败，请查看后台日志。"
+        if self._with_image():
+            image_url = None
+            try:
+                image_url = await self.plugin.render_report_image(view)
+            except Exception:
+                logger.exception("日报预览渲染失败，回退文字摘要")
+            if image_url and await self.plugin.send_image(
+                [target_umo], image_url
+            ):
+                return True, "日报预览已发送。"
+        if await self.plugin.send_text([target_umo], build_report_text(view)):
+            return True, "日报预览已发送（文字）。"
+        return False, "日报预览发送失败，请查看后台日志。"
+
+    def _record(self, day: str, ok: bool, detail: str) -> None:
+        try:
+            self.store.add_report_run(day, int(time.time()), ok, detail)
+        except Exception:
+            logger.exception("写入日报发送记录失败")
+
+    def status(self) -> dict[str, Any]:
+        try:
+            last_run = self.store.latest_report_run()
+        except Exception:
+            last_run = None
+        return {
+            "enabled": self._enabled(),
+            "running": self._running,
+            "time": self._time_text(),
+            "targets": self._targets(),
+            "sections": self._sections(),
+            "with_image": self._with_image(),
+            "history_days": self._history_days(),
+            "last_run": last_run,
         }
