@@ -12,7 +12,7 @@ import psutil
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
-from .utils import retry_delay
+from .utils import redact_url, retry_delay
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
@@ -184,7 +184,13 @@ class ServiceMonitor:
             now = time.time()
             day = now_in_timezone(self.config).strftime("%Y-%m-%d")
             self.report_store.add_event(
-                int(now), day, "service", name, detail, status, target
+                int(now),
+                day,
+                "service",
+                name,
+                redact_url(detail),
+                status,
+                redact_url(target),
             )
         except Exception:
             logger.exception("记录服务监测事件失败")
@@ -323,6 +329,7 @@ class ServiceMonitor:
     async def _check_item(self, item: dict[str, Any]) -> None:
         key = self._item_key(item)
         ok, detail, target_text = await self._probe(item)
+        target_text = redact_url(target_text)
         now = time.time()
         monitors = self.state.data.setdefault("monitors", {})
         states = monitors.setdefault("items", {})
@@ -635,7 +642,9 @@ class ServiceMonitor:
             logger.warning("服务监测推送目标为空")
             return False
         try:
-            return await self.plugin.send_text(self.targets, text)
+            return await self.plugin.send_text(
+                self.targets, text, source="monitor"
+            )
         except Exception:
             logger.exception("服务监测推送失败")
             return False

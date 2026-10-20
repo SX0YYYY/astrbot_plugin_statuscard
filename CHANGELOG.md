@@ -4,6 +4,27 @@
 
 暂无。
 
+## v2.9.2 — 2026-10-20
+
+### 修复
+
+- 插件重载后无法从日志确认定时任务是否排程：`start()` 同步打印下次发送时间，后台任务异常退出会记录错误。
+- `状态卡诊断` 增加下次日报/每日状态图时间和任务运行状态，并显示最近推送来源与失败目标。
+- 每日定时状态图增加当日防重复发送，重试不会重复刷图。
+- 资源告警和掉线恢复在上报前再次超阈值时，不再丢弃待补发的恢复通知。
+- 日报 `daily_report.sections` 显式清空后不再回退默认四项，也不会发送空日报。
+- 监测 URL 写入 `report.db` 前去掉 query/fragment；Komari Webhook 消息截断到 2000 字符。
+- 页面在 `display.redact` 含 `network` 时隐藏网络速率、月流量和折线。
+- `provider_stats` 查询增加 LIMIT 20000，插件页面 `/reports` 增加 60 秒缓存。
+
+### 变更
+
+- `state.delivery` 增加 `source`、`ok_targets`、`failed_targets`，便于定位多目标部分失败。
+- `report_store.SCHEMA_VERSION` 修正为 3。
+- 统一版本号格式，删除 `i18n` 中废弃的 `alert_disabled`。
+- README 补充 `display.process_top_n` 和 `state.delivery` 隐私说明。
+- `pytest` 66 passed。
+
 ## v2.9.1 — 2026-10-20
 
 ### 移除

@@ -298,11 +298,15 @@ class _FakePlugin:
     async def render_report_image(self, view: dict) -> str:
         return "https://example.invalid/report.jpg"
 
-    async def send_image(self, targets: list[str], url: str) -> bool:
+    async def send_image(
+        self, targets: list[str], url: str, source: str = "unknown"
+    ) -> bool:
         self.images.append((targets, url))
         return self.image_ok
 
-    async def send_text(self, targets: list[str], text: str) -> bool:
+    async def send_text(
+        self, targets: list[str], text: str, source: str = "unknown"
+    ) -> bool:
         self.texts.append((targets, text))
         return self.text_ok
 
@@ -348,6 +352,33 @@ def test_daily_reporter_defaults_for_old_config(tmp_path: Path) -> None:
     assert reporter._targets() == []
     assert reporter._history_days() == 7
     assert reporter._time_text() == "21:00"
+
+
+def test_daily_reporter_empty_sections_skip_send(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    plugin = _FakePlugin()
+    config = _report_config()
+    config["daily_report"]["sections"] = []
+    reporter = DailyReporter(plugin, store, config)
+
+    assert reporter._sections() == []
+    reporter._build_view = lambda day=None: _sample_report_view()
+    asyncio.run(reporter._send_scheduled())
+
+    assert plugin.images == []
+    assert plugin.texts == []
+    runs = store.list_report_runs(limit=5)
+    assert runs and runs[0]["detail"] == "sections empty"
+
+
+def test_builder_empty_sections_returns_no_modules(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    view = DailyReportBuilder(store, CONFIG).build(
+        day="2026-10-20", sections=[], meta={}
+    )
+    assert view["sections"] == []
+    assert "resources" not in view
+    assert "未选择日报内容" in build_report_text(view)
 
 
 def test_qq_section_respects_qq_stats_redact(tmp_path: Path) -> None:

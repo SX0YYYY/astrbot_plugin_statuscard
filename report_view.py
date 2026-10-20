@@ -263,9 +263,12 @@ class DailyReportBuilder:
         target = self._resolve_day(day)
         previous = target - timedelta(days=1)
         history_days = max(7, min(30, int(history_days or 7)))
+        requested = (
+            list(DEFAULT_SECTIONS) if sections is None else sections
+        )
         selected = [
             item
-            for item in (sections or list(DEFAULT_SECTIONS))
+            for item in requested
             if item in VALID_SECTIONS
         ]
         selected = [item for item in VALID_SECTIONS if item in selected]
@@ -1162,6 +1165,8 @@ class DailyReportBuilder:
                        token_input_other, token_input_cached, token_output
                 FROM provider_stats
                 WHERE date(created_at) BETWEEN ? AND ?
+                ORDER BY created_at DESC
+                LIMIT 20000
                 """,
                 (
                     (start_day - timedelta(days=2)).isoformat(),
@@ -1187,6 +1192,8 @@ def build_report_text(view: dict[str, Any]) -> str:
         f"📊 {view.get('title') or '系统日报'} {view.get('day') or ''}",
         "──────────────",
     ]
+    if not sections:
+        lines.append("未选择日报内容（daily_report.sections 为空）。")
     resources = view.get("resources") or {}
     if "resource" in sections:
         if resources.get("available") and resources.get("yesterday"):

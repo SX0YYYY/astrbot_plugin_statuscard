@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.9.1-blue)
+![Version](https://img.shields.io/badge/version-2.9.2-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -243,6 +243,8 @@
 - 公开群使用前，建议至少隐藏主机名和进程信息
 - 日报数据库 `data/plugin_data/astrbot_plugin_statuscard/report.db` 保存资源数值采样、网站延迟、Top 进程、QQ 数量/接收累计、异常事件和日报生成记录；不保存聊天消息、用户 ID、UMO 或 Token 密钥
 - 网站名称、进程名会写入本地 `report.db`；在“状态卡脱敏项”中勾选“进程信息”只会隐藏展示，不会删除本地记录
+- 监测 URL 写入 `report.db` 前会去掉 query 和 fragment；含 `?token=` 等参数的地址不会把参数持久化
+- `state.json` 的 `delivery` 字段只保存最近一次主动推送的时间、类型、来源、成功/失败目标和数量，用于诊断；不含消息内容
 - `state.json` 和 `report.db` 在 Linux 下会尝试设置为 600 权限；资源/网站/进程数据默认保留 30 天，事件默认保留 90 天
 
 ## 数据口径
@@ -264,6 +266,7 @@
 | `display.render_width` | `1170` | 输出图片宽度，1170–2880 像素；内部按 T2I 的 1.8 倍高清倍率换算 |
 | `display.language` | `zh-CN` | QQ 命令提示语言，`zh-CN` 或 `en-US`；页面跟随 WebUI 语言 |
 | `display.compact` | `false` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
+| `display.process_top_n` | `8` | 状态卡进程表展示的 CPU 最高进程数量，3–20 |
 | `display.render_timeout` | `180` | 渲染超时（秒）；超时后回退为文字摘要 |
 | `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
 | `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删 |

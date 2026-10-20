@@ -523,7 +523,9 @@ def test_retry_delay_short_backoff() -> None:
 
 
 class _FailingPlugin:
-    async def send_text(self, targets: list[str], text: str) -> bool:
+    async def send_text(
+        self, targets: list[str], text: str, source: str = "unknown"
+    ) -> bool:
         return False
 
 
@@ -544,3 +546,73 @@ def test_alert_failure_uses_short_retry(tmp_path: Path) -> None:
     rule = state.data["alerts"]["rules"]["cpu"]
     assert rule["retry_count"] == 1
     assert 0 < rule["next_attempt"] - time.time() <= 31
+
+
+def test_pending_recovery_survives_renewed_threshold(
+    tmp_path: Path,
+) -> None:
+    state = StateStore(tmp_path / "state.json")
+    state.data["alerts"] = {
+        "rules": {
+            "cpu": {
+                "pending_recovery": "✅ recovered",
+                "recovery_retry_count": 1,
+            }
+        }
+    }
+    config = {
+        "alerts": {
+            "enabled": True,
+            "targets": ["123456"],
+            "sustain_samples": 1,
+            "cooldown_seconds": 1800,
+        }
+    }
+    engine = AlertEngine(_FailingPlugin(), state, config)
+    asyncio.run(
+        engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%")
+    )
+    rule = state.data["alerts"]["rules"]["cpu"]
+    assert rule["pending_recovery"] == "✅ recovered"
+
+
+class _DailyPlugin:
+    def __init__(self) -> None:
+        self.context = None
+        self.images = 0
+        self.texts = 0
+
+    async def build_status_image(self) -> str:
+        return "https://example.invalid/status.jpg"
+
+    async def send_image(
+        self, targets: list[str], url: str, source: str = "unknown"
+    ) -> bool:
+        self.images += 1
+        return True
+
+    async def send_text(
+        self, targets: list[str], text: str, source: str = "unknown"
+    ) -> bool:
+        self.texts += 1
+        return True
+
+    async def build_summary_text(self) -> str:
+        return "summary"
+
+
+def test_daily_summary_sends_once_per_day(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.json")
+    config = {
+        "alerts": {
+            "enabled": True,
+            "targets": ["123456"],
+            "daily_summary": {"enabled": True, "with_image": True},
+        },
+        "display": {"timezone": "Asia/Shanghai"},
+    }
+    plugin = _DailyPlugin()
+    engine = AlertEngine(plugin, state, config)
+    assert asyncio.run(engine._send_daily_summary()) is True
+    assert asyncio.run(engine._send_daily_summary()) is True
+    assert plugin.images == 1

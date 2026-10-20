@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 @dataclass
@@ -69,4 +70,34 @@ def clean_report_sections(sections: Any) -> list[str] | None:
         if isinstance(item, str) and item != "todo"
     ]
     return cleaned if cleaned != sections else None
+
+
+def redact_url(url: Any) -> str:
+    """Strip query strings and fragments before persisting a probe target.
+
+    Monitor URLs may contain credentials in ``?token=`` style parameters, so
+    only the scheme/host/path portion is kept for ``report.db`` and reports.
+    Non-URL text is returned unchanged.
+    """
+
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except Exception:
+        return text
+    if not parts.netloc:
+        return text
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def truncate_text(text: Any, limit: int = 2000) -> str:
+    """Clamp user-supplied text to a chat-safe length."""
+
+    value = str(text or "")
+    limit = max(1, int(limit))
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 12)].rstrip() + "\n…（已截断）"
 

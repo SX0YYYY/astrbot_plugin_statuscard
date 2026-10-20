@@ -28,7 +28,7 @@ from .collectors import (
     swap_stat,
 )
 from .state import StateStore
-from .utils import retry_delay
+from .utils import retry_delay, truncate_text
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
@@ -94,14 +94,56 @@ class AlertEngine:
         )
         self._monitor_task: asyncio.Task | None = None
         self._daily_task: asyncio.Task | None = None
+        self._webhook_task: asyncio.Task | None = None
         self._running = False
         self._webhook_runner: Any = None
         self._webhook_site: Any = None
         self._primed = False
+        self._daily_last_sent_day: str | None = None
+        self._next_daily_text: str | None = None
 
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
+
+    def _compute_daily_target(self) -> datetime | None:
+        """Return the next daily-summary time, or None if config is invalid."""
+
+        try:
+            time_text = str(
+                cfg_get(
+                    self.config, "alerts.daily_summary.time", "09:00"
+                )
+                or "09:00"
+            ).strip()
+            hour, minute = [int(x) for x in time_text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+            now = now_in_timezone(self.config)
+            target = now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            return target
+        except Exception:
+            return None
+
+    def _log_next_daily(self) -> None:
+        target = self._compute_daily_target()
+        if target is None:
+            return
+        self._next_daily_text = target.strftime("%Y-%m-%d %H:%M")
+        logger.info("每日定时状态图将在 %s 发送", self._next_daily_text)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "状态卡后台任务异常退出: %r", exc, exc_info=exc
+            )
 
     def start(self) -> None:
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
@@ -111,8 +153,11 @@ class AlertEngine:
         self._running = alerts_on or daily_on
         if alerts_on:
             self._monitor_task = asyncio.create_task(self._monitor_loop())
+            self._monitor_task.add_done_callback(self._on_task_done)
         if daily_on:
             self._daily_task = asyncio.create_task(self._daily_loop())
+            self._daily_task.add_done_callback(self._on_task_done)
+            self._log_next_daily()
         self._start_webhook_task()
         if not self._running:
             logger.info("状态卡主动告警与每日定时状态图均未启用")
@@ -133,11 +178,17 @@ class AlertEngine:
     def _start_webhook_task(self) -> None:
         if not cfg_bool(self.config, "alerts.komari_webhook.enabled", False):
             return
-        asyncio.create_task(self.start_webhook())
+        self._webhook_task = asyncio.create_task(self.start_webhook())
+        self._webhook_task.add_done_callback(self._on_task_done)
 
     async def stop(self) -> None:
         self._running = False
-        for task in (self._monitor_task, self._daily_task):
+        tasks = (
+            self._monitor_task,
+            self._daily_task,
+            self._webhook_task,
+        )
+        for task in tasks:
             if task and not task.done():
                 task.cancel()
                 try:
@@ -146,6 +197,7 @@ class AlertEngine:
                     pass
         self._monitor_task = None
         self._daily_task = None
+        self._webhook_task = None
         await self.stop_webhook()
 
     # ------------------------------------------------------------------
@@ -173,11 +225,13 @@ class AlertEngine:
                 out.append(target)
         return out
 
-    async def _send(self, text: str) -> bool:
+    async def _send(self, text: str, source: str = "alert") -> bool:
         if not self.targets:
             logger.warning("告警目标为空，跳过发送")
             return False
-        if not await self.plugin.send_text(self.targets, text):
+        if not await self.plugin.send_text(
+            self.targets, text, source=source
+        ):
             logger.warning("告警发送失败：%s", text.splitlines()[0] if text else "")
             return False
         return True
@@ -212,7 +266,7 @@ class AlertEngine:
             f"时间: {_now_text(self.config)}\n"
             "如果你收到这条消息，说明主动推送链路正常。"
         )
-        return await self.plugin.send_text(targets, text)
+        return await self.plugin.send_text(targets, text, source="test")
 
     # ------------------------------------------------------------------
     # monitor loop
@@ -319,10 +373,9 @@ class AlertEngine:
         last_sent = float(st.get("last_sent") or 0)
 
         if value >= threshold:
-            st.pop("pending_recovery", None)
-            st.pop("recovery_attempt", None)
-            st.pop("recovery_next_attempt", None)
-            st.pop("recovery_retry_count", None)
+            # Keep any unsent recovery notice: dropping it here would silently
+            # lose the "recovered" message when the value crosses the threshold
+            # again before the retry succeeds.
             count += 1
             st["count"] = count
             if not alerting and count >= self.sustain:
@@ -502,10 +555,8 @@ class AlertEngine:
                         )
             return
 
-        st.pop("pending_recovery", None)
-        st.pop("recovery_attempt", None)
-        st.pop("recovery_next_attempt", None)
-        st.pop("recovery_retry_count", None)
+        # Keep pending_recovery for the next online transition instead of
+        # dropping a recovery notice that has not been delivered yet.
         count += 1
         st["count"] = count
         if not st.get("alerting") and count >= self.sustain:
@@ -593,9 +644,12 @@ class AlertEngine:
                 if target <= now:
                     target += timedelta(days=1)
                 if last_logged != target:
+                    self._next_daily_text = target.strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
                     logger.info(
                         "每日定时状态图将在 %s 发送（%.0f 秒后）",
-                        target.strftime("%Y-%m-%d %H:%M"),
+                        self._next_daily_text,
                         max(1.0, (target - now).total_seconds()),
                     )
                     last_logged = target
@@ -640,6 +694,10 @@ class AlertEngine:
                 await asyncio.sleep(60)
 
     async def _send_daily_summary(self) -> bool:
+        today = now_in_timezone(self.config).strftime("%Y-%m-%d")
+        if self._daily_last_sent_day == today:
+            logger.info("每日定时状态图 %s 已发送，跳过重复发送", today)
+            return True
         if not self.targets:
             logger.warning("每日定时状态图已启用，但告警目标为空，跳过发送")
             return True
@@ -653,13 +711,20 @@ class AlertEngine:
                 logger.exception("每日定时状态图渲染失败")
                 image_url = None
             if image_url:
-                ok = await self.plugin.send_image(self.targets, image_url)
+                ok = await self.plugin.send_image(
+                    self.targets, image_url, source="daily_summary"
+                )
                 if ok:
+                    self._daily_last_sent_day = today
                     logger.info("每日定时状态图已发送（图片）：%s", self.targets)
                     return True
         summary = await self.plugin.build_summary_text()
-        ok = await self._send("📅 每日定时状态图\n──────────────\n" + summary)
+        ok = await self._send(
+            "📅 每日定时状态图\n──────────────\n" + summary,
+            source="daily_summary",
+        )
         if ok:
+            self._daily_last_sent_day = today
             logger.info("每日定时状态图已发送（文字）：%s", self.targets)
             return True
         logger.warning("每日定时状态图发送失败：%s", self.targets)
@@ -739,7 +804,7 @@ class AlertEngine:
                     "message": raw.decode("utf-8", errors="replace")[:4000]
                 }
             text = self._format_komari(data)
-            ok = await self._send(text)
+            ok = await self._send(text, source="webhook")
             if not ok:
                 return web.json_response(
                     {"status": "error", "message": "delivery failed"},
@@ -778,9 +843,11 @@ class AlertEngine:
     @staticmethod
     def _format_komari(data: Any) -> str:
         if not isinstance(data, dict):
-            return "🔔 Komari 监控通知\n──────────────\n" + json.dumps(
-                data, ensure_ascii=False, indent=2
-            )[:4000]
+            return truncate_text(
+                "🔔 Komari 监控通知\n──────────────\n"
+                + json.dumps(data, ensure_ascii=False, indent=2)[:4000],
+                2000,
+            )
 
         title = str(data.get("title") or data.get("event") or "").strip()
         message = str(data.get("message") or data.get("text") or "").strip()
@@ -814,7 +881,7 @@ class AlertEngine:
             lines.append(
                 json.dumps(data, ensure_ascii=False, indent=2)[:4000]
             )
-        return "\n".join(lines)
+        return truncate_text("\n".join(lines), 2000)
 
     # ------------------------------------------------------------------
     # status
@@ -844,6 +911,8 @@ class AlertEngine:
             "daily_summary_running": bool(
                 self._daily_task is not None and not self._daily_task.done()
             ),
+            "daily_summary_next": self._next_daily_text,
+            "daily_summary_last_sent_day": self._daily_last_sent_day,
             "komari_webhook": bool(
                 cfg_bool(self.config, "alerts.komari_webhook.enabled", False)
             ),

@@ -342,6 +342,8 @@ class DailyReporter:
         self._last_sent_day: str | None = None
         self._pending_retry: tuple[str, float] | None = None
         self._pending_retry_count = 0
+        self._next_run_text: str | None = None
+        self._disabled_logged = False
 
     # ------------------------------------------------------------------
     # configuration helpers (read per call so edits apply after reload)
@@ -363,17 +365,23 @@ class DailyReporter:
             7, min(30, cfg_int(self.config, "daily_report.history_days", 7))
         )
 
-    def _sections(self) -> list[str]:
-        raw = cfg_get(
-            self.config, "daily_report.sections", list(DEFAULT_SECTIONS)
-        )
+    def _sections(self) -> list[str] | None:
+        """Return selected sections, or None when the key is unset.
+
+        ``None`` means "use the built-in defaults"; an empty list means the
+        user explicitly cleared every module, so nothing should be rendered
+        or sent.
+        """
+
+        raw = cfg_get(self.config, "daily_report.sections", None)
+        if raw is None:
+            return list(DEFAULT_SECTIONS)
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, list):
-            raw = []
+            return list(DEFAULT_SECTIONS)
         allowed = {str(item) for item in raw if isinstance(item, str)}
-        selected = [item for item in VALID_SECTIONS if item in allowed]
-        return selected or list(DEFAULT_SECTIONS)
+        return [item for item in VALID_SECTIONS if item in allowed]
 
     def _targets(self) -> list[str]:
         raw = cfg_get(self.config, "daily_report.targets", [])
@@ -418,6 +426,33 @@ class DailyReporter:
     # lifecycle
     # ------------------------------------------------------------------
 
+    def _compute_next_run(self) -> str | None:
+        """Return the next scheduled send time, or None if config is invalid."""
+
+        try:
+            time_text = self._time_text()
+            hour, minute = [int(part) for part in time_text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+            now = now_in_timezone(self.config)
+            target = now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            return target.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return None
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "日报定时任务异常退出: %r", exc, exc_info=exc
+            )
+
     def start(self) -> None:
         if not self._enabled():
             logger.info("日报定时发送未启用（daily_report.enabled=false）")
@@ -427,11 +462,15 @@ class DailyReporter:
             logger.warning("日报已启用，但推送目标为空；发送时会跳过")
         self._running = True
         self._task = asyncio.create_task(self._loop())
+        self._task.add_done_callback(self._on_task_done)
+        self._next_run_text = self._compute_next_run()
+        if self._next_run_text:
+            logger.info("日报将在 %s 发送", self._next_run_text)
         logger.info(
             "日报定时发送已启动：%s，目标 %d 个，内容=%s，历史=%d 天",
             self._time_text(),
             len(targets),
-            self._sections(),
+            self._sections() or [],
             self._history_days(),
         )
 
@@ -452,10 +491,16 @@ class DailyReporter:
         while self._running:
             try:
                 if not self._enabled():
+                    if not self._disabled_logged:
+                        logger.warning(
+                            "日报定时任务暂停：daily_report.enabled=false"
+                        )
+                        self._disabled_logged = True
                     self._pending_retry = None
                     self._pending_retry_count = 0
                     await asyncio.sleep(60)
                     continue
+                self._disabled_logged = False
                 if self._pending_retry:
                     _day, due = self._pending_retry
                     if time.time() < due:
@@ -495,9 +540,10 @@ class DailyReporter:
                 if target <= now:
                     target += timedelta(days=1)
                 if last_logged != target:
+                    self._next_run_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
                         "日报将在 %s 发送（%.0f 秒后）",
-                        target.strftime("%Y-%m-%d %H:%M"),
+                        self._next_run_text,
                         max(1.0, (target - now).total_seconds()),
                     )
                     last_logged = target
@@ -555,6 +601,13 @@ class DailyReporter:
 
     async def _send_scheduled(self) -> None:
         targets = self._targets()
+        if self._sections() is not None and not self._sections():
+            logger.warning(
+                "日报内容为空（daily_report.sections=[]），跳过发送"
+            )
+            self._record("", False, "sections empty")
+            self._clear_retry()
+            return
         try:
             view = self._build_view()
         except Exception:
@@ -578,13 +631,17 @@ class DailyReporter:
                 image_url = await self.plugin.render_report_image(view)
             except Exception:
                 logger.exception("日报渲染失败，回退文字摘要")
-            if image_url and await self.plugin.send_image(targets, image_url):
+            if image_url and await self.plugin.send_image(
+                targets, image_url, source="report"
+            ):
                 self._last_sent_day = day
                 self._record(day, True, "image")
                 self._clear_retry()
                 logger.info("日报已发送（图片）：%s", targets)
                 return
-        if await self.plugin.send_text(targets, build_report_text(view)):
+        if await self.plugin.send_text(
+            targets, build_report_text(view), source="report"
+        ):
             self._last_sent_day = day
             self._record(day, True, "text")
             self._clear_retry()
@@ -609,10 +666,12 @@ class DailyReporter:
             except Exception:
                 logger.exception("日报预览渲染失败，回退文字摘要")
             if image_url and await self.plugin.send_image(
-                [target_umo], image_url
+                [target_umo], image_url, source="report_preview"
             ):
                 return True, tr(self.config, "report_preview_sent")
-        if await self.plugin.send_text([target_umo], build_report_text(view)):
+        if await self.plugin.send_text(
+            [target_umo], build_report_text(view), source="report_preview"
+        ):
             return True, tr(self.config, "report_preview_sent_text")
         return False, tr(self.config, "report_preview_send_failed")
 
@@ -635,5 +694,6 @@ class DailyReporter:
             "sections": self._sections(),
             "with_image": self._with_image(),
             "history_days": self._history_days(),
+            "next_run": self._next_run_text,
             "last_run": last_run,
         }

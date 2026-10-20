@@ -10,7 +10,7 @@ from typing import Any
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ReportStore:

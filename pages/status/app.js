@@ -428,21 +428,28 @@
     const network = data.network || {};
     $("network-month").textContent =
       network.month || t("label_month_flow", "本月流量");
-    $("network").innerHTML = [
-      [t("network_up", "上行"), formatRate(network.up_rate || 0)],
-      [t("network_down", "下行"), formatRate(network.down_rate || 0)],
-      [t("network_month_up", "本月上行"), network.month_up_text || "--"],
-      [t("network_month_down", "本月下行"), network.month_down_text || "--"],
-    ]
-      .map(
-        (pair) =>
-          '<div class="network-item"><span>' +
-          esc(pair[0]) +
-          "</span><strong>" +
-          esc(pair[1]) +
-          "</strong></div>",
-      )
-      .join("");
+    if (data.network_redacted) {
+      $("network").innerHTML =
+        '<div class="network-item"><span>' +
+        esc(t("network_redacted", "网络数据已按脱敏配置隐藏")) +
+        "</span></div>";
+    } else {
+      $("network").innerHTML = [
+        [t("network_up", "上行"), formatRate(network.up_rate || 0)],
+        [t("network_down", "下行"), formatRate(network.down_rate || 0)],
+        [t("network_month_up", "本月上行"), network.month_up_text || "--"],
+        [t("network_month_down", "本月下行"), network.month_down_text || "--"],
+      ]
+        .map(
+          (pair) =>
+            '<div class="network-item"><span>' +
+            esc(pair[0]) +
+            "</span><strong>" +
+            esc(pair[1]) +
+            "</strong></div>",
+        )
+        .join("");
+    }
 
     const monitors = data.monitors || {};
     $("monitor-summary").textContent = t(
@@ -536,6 +543,14 @@
     });
 
     const network = data.network || [];
+    if (data.network_redacted) {
+      renderLegend($("network-legend"), []);
+      $("network-chart").innerHTML =
+        '<p class="muted">' +
+        esc(t("network_redacted", "网络数据已按脱敏配置隐藏")) +
+        "</p>";
+      return;
+    }
     const networkLabels = network.map((point) => formatTime(point.ts));
     const networkSeries = [
       {

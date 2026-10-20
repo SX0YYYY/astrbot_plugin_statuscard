@@ -540,7 +540,13 @@ class StatusCardPlugin(Star):
         return False
 
     def _record_delivery(
-        self, kind: str, targets: list[str], ok: bool
+        self,
+        kind: str,
+        targets: list[str],
+        ok: bool,
+        source: str = "unknown",
+        ok_targets: list[str] | None = None,
+        failed_targets: list[str] | None = None,
     ) -> None:
         try:
             self.state.data["delivery"] = {
@@ -548,31 +554,66 @@ class StatusCardPlugin(Star):
                 "kind": kind,
                 "ok": ok,
                 "target_count": len(targets),
+                "source": source,
+                "ok_targets": list(ok_targets or []),
+                "failed_targets": list(failed_targets or []),
             }
             self.state.save()
         except Exception as exc:
             logger.warning("记录主动推送结果失败: %s", exc)
 
-    async def send_text(self, targets: list[str], text: str) -> bool:
-        any_ok = False
+    async def send_text(
+        self,
+        targets: list[str],
+        text: str,
+        source: str = "unknown",
+    ) -> bool:
+        ok_targets: list[str] = []
+        failed_targets: list[str] = []
         for target in targets:
             if await self._send_chain(
                 target, lambda: MessageChain([Comp.Plain(text)]), "消息"
             ):
-                any_ok = True
-        self._record_delivery("text", targets, any_ok)
+                ok_targets.append(target)
+            else:
+                failed_targets.append(target)
+        any_ok = bool(ok_targets)
+        self._record_delivery(
+            "text",
+            targets,
+            any_ok,
+            source=source,
+            ok_targets=ok_targets,
+            failed_targets=failed_targets,
+        )
         return any_ok
 
-    async def send_image(self, targets: list[str], image_url: str) -> bool:
-        any_ok = False
+    async def send_image(
+        self,
+        targets: list[str],
+        image_url: str,
+        source: str = "unknown",
+    ) -> bool:
+        ok_targets: list[str] = []
+        failed_targets: list[str] = []
         for target in targets:
             if await self._send_chain(
                 target,
                 lambda: MessageChain([Comp.Image.fromURL(image_url)]),
                 "图片",
             ):
-                any_ok = True
-        self._record_delivery("image", targets, any_ok)
+                ok_targets.append(target)
+            else:
+                failed_targets.append(target)
+        any_ok = bool(ok_targets)
+        self._record_delivery(
+            "image",
+            targets,
+            any_ok,
+            source=source,
+            ok_targets=ok_targets,
+            failed_targets=failed_targets,
+        )
         return any_ok
 
     async def build_summary_text(
@@ -766,8 +807,15 @@ class StatusCardPlugin(Star):
             lines.append(
                 "最近主动推送: "
                 + ("成功" if delivery.get("ok") else "失败")
-                + f"（{delivery.get('kind', '?')}，{age}s 前）"
+                + f"（{delivery.get('kind', '?')}，"
+                + f"来源 {delivery.get('source', '未知')}，{age}s 前）"
             )
+            failed_targets = delivery.get("failed_targets") or []
+            if failed_targets:
+                lines.append(
+                    "失败目标: "
+                    + "、".join(str(item) for item in failed_targets[:3])
+                )
         else:
             lines.append("最近主动推送: 暂无记录")
         report_status = self.report.status()
@@ -792,6 +840,21 @@ class StatusCardPlugin(Star):
             + f"，目标 {len(daily_status.get('targets') or [])} 个"
             + f"，内容 {','.join(daily_status.get('sections') or [])}"
         )
+        if daily_status.get("next_run"):
+            lines.append(
+                "下次日报: " + str(daily_status.get("next_run"))
+            )
+        elif daily_status.get("enabled"):
+            lines.append("下次日报: 待排程（任务可能未启动）")
+        alarm_status = self.alerts.status()
+        if alarm_status.get("daily_summary"):
+            next_daily = alarm_status.get("daily_summary_next")
+            running = alarm_status.get("daily_summary_running")
+            lines.append(
+                "下次每日状态图: "
+                + (str(next_daily) if next_daily else "--")
+                + ("（任务运行中）" if running else "（任务未运行）")
+            )
         last_run = daily_status.get("last_run")
         if isinstance(last_run, dict):
             lines.append(

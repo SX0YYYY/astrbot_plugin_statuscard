@@ -50,6 +50,8 @@ class PageApi:
 
     def __init__(self, plugin: Any):
         self.plugin = plugin
+        self._reports_cache: tuple[float, dict[str, Any]] | None = None
+        self._reports_cache_seconds = 60.0
 
     # ------------------------------------------------------------------
     # registration
@@ -97,6 +99,22 @@ class PageApi:
         if "hostname" in self._redact():
             return "已隐藏"
         return socket.gethostname()
+
+    @staticmethod
+    def _network_view(
+        redacted: bool, net: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the overview network payload, honouring ``network`` redaction."""
+
+        if redacted:
+            return {"redacted": True}
+        return {
+            "up_rate": round(float(net.get("up_rate") or 0.0), 1),
+            "down_rate": round(float(net.get("down_rate") or 0.0), 1),
+            "month_up_text": format_bytes(net.get("month_up")),
+            "month_down_text": format_bytes(net.get("month_down")),
+            "month": net.get("month") or "",
+        }
 
     def _platform(self) -> str:
         return str(
@@ -182,6 +200,8 @@ class PageApi:
         mem = memory_stat()
         swap = swap_stat()
         net = plugin.state.get("net", {}) or {}
+        redact = self._redact()
+        network_view = self._network_view("network" in redact, net)
         load1: float | None = None
         if hasattr(os, "getloadavg"):
             try:
@@ -242,15 +262,8 @@ class PageApi:
                     "total_text": format_bytes(swap.total),
                 },
                 "disk": self._disk(),
-                "network": {
-                    "up_rate": round(float(net.get("up_rate") or 0.0), 1),
-                    "down_rate": round(
-                        float(net.get("down_rate") or 0.0), 1
-                    ),
-                    "month_up_text": format_bytes(net.get("month_up")),
-                    "month_down_text": format_bytes(net.get("month_down")),
-                    "month": net.get("month") or "",
-                },
+                "network": network_view,
+                "network_redacted": "network" in redact,
                 "monitors": {
                     "enabled": bool(monitor_status.get("enabled")),
                     "total": len(monitor_items),
@@ -297,24 +310,31 @@ class PageApi:
         ]
         net = self.plugin.state.get("net", {}) or {}
         history = net.get("history") or []
-        net_points = [
-            {
-                "ts": int(item[0]),
-                "up": float(item[1]),
-                "down": float(item[2]),
-            }
-            for item in history[-120:]
-            if isinstance(item, (list, tuple)) and len(item) >= 3
-        ]
+        network_redacted = "network" in self._redact()
+        if network_redacted:
+            net_points: list[dict[str, Any]] = []
+            network_note = "已按脱敏配置隐藏网络数据。"
+        else:
+            net_points = [
+                {
+                    "ts": int(item[0]),
+                    "up": float(item[1]),
+                    "down": float(item[2]),
+                }
+                for item in history[-120:]
+                if isinstance(item, (list, tuple)) and len(item) >= 3
+            ]
+            network_note = (
+                "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
+            )
         return jsonify(
             {
                 "ok": True,
                 "range": key,
                 "points": points,
                 "network": net_points,
-                "network_note": (
-                    "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
-                ),
+                "network_redacted": network_redacted,
+                "network_note": network_note,
             }
         )
 
@@ -373,15 +393,22 @@ class PageApi:
 
     async def reports(self):
         plugin = self.plugin
+        now_ts = time.time()
+        cached = self._reports_cache
+        if cached and now_ts - cached[0] < self._reports_cache_seconds:
+            return jsonify(cached[1])
         view: dict[str, Any] = {}
         try:
             builder = DailyReportBuilder(
                 plugin.report_store, plugin.config
             )
+            sections = cfg_get(
+                plugin.config, "daily_report.sections", None
+            )
             view = builder.build(
                 day=None,
                 history_days=7,
-                sections=None,
+                sections=sections,
                 meta={
                     "host": self._host(),
                     "astrbot_version": self._astrbot_version(),
@@ -389,20 +416,20 @@ class PageApi:
             )
         except Exception:
             logger.exception("插件页面聚合日报失败")
-        return jsonify(
-            {
-                "ok": True,
-                "day": view.get("day"),
-                "sections": view.get("sections"),
-                "summary": view.get("summary"),
-                "resources": view.get("resources"),
-                "anomalies": view.get("anomalies"),
-                "qq": view.get("qq"),
-                "token": view.get("token"),
-                "website": view.get("website"),
-                "process": view.get("process"),
-                "runs": plugin.report_store.list_report_runs(limit=30),
-                "snapshots": plugin.report_store.list_snapshots(30),
-            }
-        )
+        payload = {
+            "ok": True,
+            "day": view.get("day"),
+            "sections": view.get("sections"),
+            "summary": view.get("summary"),
+            "resources": view.get("resources"),
+            "anomalies": view.get("anomalies"),
+            "qq": view.get("qq"),
+            "token": view.get("token"),
+            "website": view.get("website"),
+            "process": view.get("process"),
+            "runs": plugin.report_store.list_report_runs(limit=30),
+            "snapshots": plugin.report_store.list_snapshots(30),
+        }
+        self._reports_cache = (now_ts, payload)
+        return jsonify(payload)
 
