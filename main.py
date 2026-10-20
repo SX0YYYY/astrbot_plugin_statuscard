@@ -25,7 +25,6 @@ from .collectors import (
     cfg_int,
     effective_media_source,
     fetch_avatar_bytes,
-    now_in_timezone,
     uploaded_file_path,
 )
 from .i18n import tr
@@ -46,7 +45,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.8.1",
+    "2.9.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -670,7 +669,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.8.1")
+        lines.append("插件: v2.9.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -775,7 +774,6 @@ class StatusCardPlugin(Star):
             "日报扩展: "
             + f"网站 {store_stats.get('websites', 0)} 条"
             + f" / 进程 {store_stats.get('processes', 0)} 条"
-            + f" / 待办 {store_stats.get('todos', 0)} 条"
         )
         daily_status = self.daily_report.status()
         lines.append(
@@ -809,108 +807,3 @@ class StatusCardPlugin(Star):
         yield event.plain_result(detail)
         event.stop_event()
 
-    @staticmethod
-    def _parse_todo_id(value: str) -> int | None:
-        text = str(value or "").strip().lstrip("#")
-        try:
-            todo_id = int(text)
-        except (TypeError, ValueError):
-            return None
-        return todo_id if todo_id > 0 else None
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("待办", alias={"todo"})
-    async def cmd_todo(self, event: AstrMessageEvent):
-        """Manage the daily-report todo list from QQ."""
-        event.should_call_llm(False)
-        raw = str(getattr(event, "message_str", "") or "").strip()
-        for prefix in ("*", "／", "/"):
-            raw = raw.lstrip(prefix).strip()
-        if raw.startswith("@") or raw.startswith("[CQ:at"):
-            _, _, raw = raw.partition(" ")
-            raw = raw.strip()
-        for command_name in ("待办", "todo"):
-            if raw.lower().startswith(command_name):
-                raw = raw[len(command_name) :].strip()
-                break
-        parts = raw.split(maxsplit=1)
-        action = parts[0] if parts else ""
-        argument = parts[1].strip() if len(parts) > 1 else ""
-
-        now = now_in_timezone(self.config)
-        day = now.strftime("%Y-%m-%d")
-        ts = int(now.timestamp())
-
-        if action in ("", "列表", "list"):
-            todos = self.report_store.list_todos(
-                include_done=False, limit=30
-            )
-            if not todos:
-                reply = tr(self.config, "todo_empty")
-            else:
-                lines = [
-                    tr(self.config, "todo_list_title", count=len(todos)),
-                    "──────────",
-                ]
-                for item in todos:
-                    lines.append(
-                        f"#{item['id']} [{item['created_day']}] "
-                        f"{item['content']}"
-                    )
-                lines.append("")
-                lines.append(tr(self.config, "todo_usage"))
-                reply = "\n".join(lines)
-        elif action in ("全部", "历史", "all"):
-            todos = self.report_store.list_todos(
-                include_done=True, limit=50
-            )
-            if not todos:
-                reply = tr(self.config, "todo_all_empty")
-            else:
-                lines = [tr(self.config, "todo_all_title"), "──────────"]
-                for item in todos:
-                    mark = "✅" if item["status"] == "done" else "⬜"
-                    lines.append(
-                        f"{mark} #{item['id']} [{item['created_day']}] "
-                        f"{item['content']}"
-                    )
-                reply = "\n".join(lines)
-        elif action in ("添加", "add"):
-            if not argument:
-                reply = tr(self.config, "todo_add_usage")
-            else:
-                todo_id = self.report_store.add_todo(
-                    argument, ts, day, source="command"
-                )
-                reply = (
-                    tr(
-                        self.config,
-                        "todo_added",
-                        id=todo_id,
-                        content=argument[:80],
-                    )
-                    if todo_id
-                    else tr(self.config, "todo_add_failed")
-                )
-        elif action in ("完成", "done"):
-            todo_id = self._parse_todo_id(argument)
-            if todo_id is None:
-                reply = tr(self.config, "todo_complete_usage")
-            elif self.report_store.complete_todo(todo_id, ts, day):
-                reply = tr(self.config, "todo_completed", id=todo_id)
-            else:
-                reply = tr(
-                    self.config, "todo_not_found_pending", id=todo_id
-                )
-        elif action in ("删除", "delete"):
-            todo_id = self._parse_todo_id(argument)
-            if todo_id is None:
-                reply = tr(self.config, "todo_delete_usage")
-            elif self.report_store.delete_todo(todo_id):
-                reply = tr(self.config, "todo_deleted", id=todo_id)
-            else:
-                reply = tr(self.config, "todo_not_found", id=todo_id)
-        else:
-            reply = tr(self.config, "todo_help")
-        yield event.plain_result(reply)
-        event.stop_event()

@@ -313,56 +313,6 @@
     </section>
     {% endif %}
 
-    {% if "todo" in d.sections and d.todo %}
-    <section class="section">
-      <div class="section-head">
-        <h2>待办</h2>
-        <span>截至昨日 24:00</span>
-      </div>
-      {% if not d.todo.available %}
-      <div class="empty">{{ d.todo.empty_reason }}</div>
-      {% else %}
-      <div class="stat-grid todo-grid">
-        <div class="stat">
-          <div class="stat-label">昨日新增</div>
-          <div class="stat-value">{{ d.todo.created_count }}</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label">昨日完成</div>
-          <div class="stat-value">{{ d.todo.completed_count }}</div>
-        </div>
-        <div class="stat">
-          <div class="stat-label">未完成</div>
-          <div class="stat-value">{{ d.todo.open_count }}</div>
-        </div>
-      </div>
-      {% if d.todo.open_items %}
-      <div class="todo-list">
-        {% for item in d.todo.open_items %}
-        <div class="todo-row">
-          <span class="todo-id">#{{ item.id }}</span>
-          <span class="todo-content">{{ item.content }}</span>
-          <span class="todo-meta">{{ item.age_text }}</span>
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-      {% if d.todo.completed_items %}
-      <div class="todo-list todo-done">
-        {% for item in d.todo.completed_items %}
-        <div class="todo-row done">
-          <span class="todo-id">#{{ item.id }}</span>
-          <span class="todo-content">{{ item.content }}</span>
-          <span class="todo-meta">已完成</span>
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-      <p class="note">{{ d.todo.note }}</p>
-      {% endif %}
-    </section>
-    {% endif %}
-
     <footer class="footer">
       {{ d.footer_note }}<br />
       {{ d.title }} · {{ d.day }} · 生成于 {{ d.generated_at }}

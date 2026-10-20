@@ -33,7 +33,6 @@ VALID_SECTIONS = (
     "token",
     "website",
     "process",
-    "todo",
 )
 DEFAULT_SECTIONS = ("resource", "anomaly", "qq", "token")
 
@@ -310,8 +309,6 @@ class DailyReportBuilder:
             view["process"] = self._process_section(
                 target, previous, history_days
             )
-        if "todo" in selected:
-            view["todo"] = self._todo_section(target)
         view["summary"] = self._summary(view)
         return view
 
@@ -1038,58 +1035,6 @@ class DailyReportBuilder:
         }
 
     # ------------------------------------------------------------------
-    # todos
-    # ------------------------------------------------------------------
-
-    def _todo_section(self, day: date) -> dict[str, Any]:
-        end_ts = int(
-            datetime.combine(
-                day + timedelta(days=1), time.min, tzinfo=self.tz
-            ).timestamp()
-        )
-        snapshot = self.store.todos_snapshot(day.isoformat(), end_ts)
-        open_items: list[dict[str, Any]] = []
-        for item in snapshot["open"]:
-            created_day = str(item.get("created_day") or day.isoformat())
-            try:
-                age = max(0, (day - date.fromisoformat(created_day)).days)
-            except ValueError:
-                age = 0
-            open_items.append(
-                {
-                    "id": item.get("id"),
-                    "content": str(item.get("content") or "")[:120],
-                    "created_day": created_day,
-                    "age_text": "当日" if age == 0 else f"已 {age} 天",
-                }
-            )
-        completed_items = [
-            {
-                "id": item.get("id"),
-                "content": str(item.get("content") or "")[:120],
-                "done_day": item.get("done_day"),
-            }
-            for item in snapshot["completed"][:5]
-        ]
-        available = bool(
-            open_items or snapshot["created"] or snapshot["completed"]
-        )
-        return {
-            "available": available,
-            "empty_reason": (
-                None
-                if available
-                else "暂无待办记录；可在 QQ 使用“待办 添加 <内容>”添加。"
-            ),
-            "created_count": len(snapshot["created"]),
-            "completed_count": len(snapshot["completed"]),
-            "open_count": len(open_items),
-            "open_items": open_items[:10],
-            "completed_items": completed_items,
-            "note": "口径：截至昨日 24:00；未完成待办会持续保留，完成后从列表移除。",
-        }
-
-    # ------------------------------------------------------------------
     # token
     # ------------------------------------------------------------------
 
@@ -1300,18 +1245,6 @@ def build_report_text(view: dict[str, Any]) -> str:
             lines.append(
                 f"进程: {process.get('empty_reason') or '暂无数据'}"
             )
-    todo = view.get("todo") or {}
-    if "todo" in sections:
-        if todo.get("available"):
-            lines.append(
-                "待办: 昨日新增 {0} / 完成 {1} / 未完成 {2}".format(
-                    todo.get("created_count", 0),
-                    todo.get("completed_count", 0),
-                    todo.get("open_count", 0),
-                )
-            )
-        else:
-            lines.append("待办: 暂无记录")
     lines.append(
         "窗口: {0}（{1}）".format(
             view.get("window") or "", view.get("timezone") or ""

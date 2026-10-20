@@ -358,53 +358,13 @@ body {
   word-break: break-all;
 }
 
-.todo-grid {
-  grid-template-columns: repeat(3, 1fr);
-}
 
-.todo-list {
-  margin-top: 8px;
-  border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #eef2f7;
-  overflow: hidden;
-}
 
-.todo-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 8px 11px;
-  border-bottom: 1px solid #eef2f7;
-}
 
-.todo-row:last-child {
-  border-bottom: none;
-}
 
-.todo-id {
-  min-width: 34px;
-  color: #64748b;
-  font-size: 10px;
-}
 
-.todo-content {
-  flex: 1;
-  min-width: 0;
-  color: #1e293b;
-  word-break: break-word;
-}
 
-.todo-meta {
-  color: #94a3b8;
-  font-size: 10px;
-  white-space: nowrap;
-}
 
-.todo-row.done .todo-content {
-  color: #94a3b8;
-  text-decoration: line-through;
-}
 
 .note {
   margin: 10px 2px 0;
@@ -461,16 +421,9 @@ body {
 [data-theme="dark"] .chart-block,
 [data-theme="dark"] .event-row,
 [data-theme="dark"] .empty,
-[data-theme="dark"] .todo-list {
-  background: #0f172a;
-  border-color: #1e293b;
-}
 
 [data-theme="dark"] .stat-value,
 [data-theme="dark"] .event-main strong,
-[data-theme="dark"] .todo-content {
-  color: #e2e8f0;
-}
 
 [data-theme="dark"] .stat-sub,
 [data-theme="dark"] .stat-delta,
@@ -478,9 +431,7 @@ body {
 [data-theme="dark"] .event-kind,
 [data-theme="dark"] .event-detail,
 [data-theme="dark"] .event-duration,
-[data-theme="dark"] .note,
-[data-theme="dark"] .todo-meta,
-[data-theme="dark"] .todo-id {
+[data-theme="dark"] .note {
   color: #94a3b8;
 }
 
@@ -509,10 +460,4 @@ body {
   color: #94a3b8;
 }
 
-[data-theme="dark"] .todo-row {
-  border-bottom-color: #1e293b;
-}
 
-[data-theme="dark"] .todo-row.done .todo-content {
-  color: #64748b;
-}

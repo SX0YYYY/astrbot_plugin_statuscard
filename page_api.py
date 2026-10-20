@@ -30,7 +30,7 @@ from .version_resolver import resolve_astrbot_version
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
-PLUGIN_VERSION = "2.8.1"
+PLUGIN_VERSION = "2.9.0"
 
 RANGE_SECONDS = {
     "24h": 86400,
@@ -71,8 +71,6 @@ class PageApi:
             ("history", self.history, ["GET"], "历史趋势"),
             ("events", self.events, ["GET"], "异常事件"),
             ("reports", self.reports, ["GET"], "日报摘要"),
-            ("todos", self.todos, ["GET"], "待办列表"),
-            ("todos", self.todos_action, ["POST"], "待办操作"),
         )
         for name, handler, methods, desc in routes:
             register(
@@ -267,13 +265,6 @@ class PageApi:
                     "sections": daily_status.get("sections"),
                     "last_run": daily_status.get("last_run"),
                 },
-                "todos": {
-                    "open": len(
-                        plugin.report_store.list_todos(
-                            include_done=False, limit=100
-                        )
-                    )
-                },
                 "store": plugin.report_store.stats(),
             }
         )
@@ -409,76 +400,8 @@ class PageApi:
                 "token": view.get("token"),
                 "website": view.get("website"),
                 "process": view.get("process"),
-                "todo": view.get("todo"),
                 "runs": plugin.report_store.list_report_runs(limit=30),
                 "snapshots": plugin.report_store.list_snapshots(30),
             }
         )
 
-    # ------------------------------------------------------------------
-    # GET/POST /todos
-    # ------------------------------------------------------------------
-
-    async def todos(self):
-        include_done = str(
-            request.args.get("include_done", "false")
-        ).lower() in {"1", "true", "yes", "on"}
-        return jsonify(
-            {
-                "ok": True,
-                "todos": self.plugin.report_store.list_todos(
-                    include_done=include_done, limit=200
-                ),
-            }
-        )
-
-    async def todos_action(self):
-        payload = await request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "message": "请求体必须是 JSON 对象"}), 400
-        action = str(payload.get("action") or "").strip().lower()
-        now = now_in_timezone(self.plugin.config)
-        day = now.strftime("%Y-%m-%d")
-        ts = int(now.timestamp())
-        store = self.plugin.report_store
-
-        if action == "add":
-            content = str(payload.get("content") or "").strip()
-            if not content:
-                return jsonify({"ok": False, "message": "待办内容不能为空"}), 400
-            todo_id = store.add_todo(content, ts, day, source="web")
-            if not todo_id:
-                return jsonify({"ok": False, "message": "添加失败，请查看后台日志"}), 500
-            message = f"已添加待办 #{todo_id}"
-        elif action == "complete":
-            todo_id = self._todo_id(payload.get("id"))
-            if todo_id is None:
-                return jsonify({"ok": False, "message": "待办编号无效"}), 400
-            if not store.complete_todo(todo_id, ts, day):
-                return jsonify({"ok": False, "message": "未找到未完成的待办"}), 404
-            message = f"已完成待办 #{todo_id}"
-        elif action == "delete":
-            todo_id = self._todo_id(payload.get("id"))
-            if todo_id is None:
-                return jsonify({"ok": False, "message": "待办编号无效"}), 400
-            if not store.delete_todo(todo_id):
-                return jsonify({"ok": False, "message": "未找到待办"}), 404
-            message = f"已删除待办 #{todo_id}"
-        else:
-            return jsonify({"ok": False, "message": "未知操作"}), 400
-
-        return jsonify(
-            {
-                "ok": True,
-                "message": message,
-                "todos": store.list_todos(include_done=True, limit=200),
-            }
-        )
-
-    @staticmethod
-    def _todo_id(value: Any) -> int | None:
-        try:
-            todo_id = int(value)
-        except (TypeError, ValueError):
-            return None
-        return todo_id if todo_id > 0 else None

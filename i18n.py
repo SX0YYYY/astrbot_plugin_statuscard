@@ -30,28 +30,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "report_preview_sent": "日报预览已发送。",
         "report_preview_sent_text": "日报预览已发送（文字）。",
         "report_preview_send_failed": "日报预览发送失败，请查看后台日志。",
-        "todo_empty": "📝 暂无未完成待办。\n用法：待办 添加 <内容> / 待办 完成 <编号> / 待办 删除 <编号>",
-        "todo_list_title": "📝 待办（{count} 项未完成）",
-        "todo_usage": "用法：待办 添加 <内容> / 待办 完成 <编号> / 待办 删除 <编号> / 待办 全部",
-        "todo_all_empty": "📝 暂无待办记录。",
-        "todo_all_title": "📝 全部待办",
-        "todo_add_usage": "用法：待办 添加 <内容>",
-        "todo_added": "✅ 已添加待办 #{id}：{content}",
-        "todo_add_failed": "添加失败，请查看后台日志。",
-        "todo_complete_usage": "用法：待办 完成 <编号>",
-        "todo_completed": "✅ 已完成待办 #{id}。",
-        "todo_not_found_pending": "未找到未完成的待办 #{id}。",
-        "todo_delete_usage": "用法：待办 删除 <编号>",
-        "todo_deleted": "🗑️ 已删除待办 #{id}。",
-        "todo_not_found": "未找到待办 #{id}。",
-        "todo_help": (
-            "📝 待办用法\n"
-            "待办 / 待办 列表：查看未完成\n"
-            "待办 全部：查看全部\n"
-            "待办 添加 <内容>：新增\n"
-            "待办 完成 <编号>：标记完成\n"
-            "待办 删除 <编号>：删除"
-        ),
     },
     "en-US": {
         "platform_unsupported": "Unsupported platform: the status card only supports QQ/OneBot (aiocqhttp).",
@@ -75,28 +53,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "report_preview_sent": "Report preview sent.",
         "report_preview_sent_text": "Report preview sent as text.",
         "report_preview_send_failed": "Failed to send the report preview; check the backend log.",
-        "todo_empty": "📝 No open to-dos.\nUsage: todo add <content> / todo complete <id> / todo delete <id>",
-        "todo_list_title": "📝 To-dos ({count} open)",
-        "todo_usage": "Usage: todo add <content> / todo complete <id> / todo delete <id> / todo all",
-        "todo_all_empty": "📝 No to-dos yet.",
-        "todo_all_title": "📝 All to-dos",
-        "todo_add_usage": "Usage: todo add <content>",
-        "todo_added": "✅ Added to-do #{id}: {content}",
-        "todo_add_failed": "Failed to add; check the backend log.",
-        "todo_complete_usage": "Usage: todo complete <id>",
-        "todo_completed": "✅ Completed to-do #{id}.",
-        "todo_not_found_pending": "No open to-do found for #{id}.",
-        "todo_delete_usage": "Usage: todo delete <id>",
-        "todo_deleted": "🗑️ Deleted to-do #{id}.",
-        "todo_not_found": "To-do #{id} not found.",
-        "todo_help": (
-            "📝 To-do usage\n"
-            "todo / todo list: show open items\n"
-            "todo all: show all items\n"
-            "todo add <content>: add an item\n"
-            "todo complete <id>: mark done\n"
-            "todo delete <id>: delete an item"
-        ),
     },
 }
 

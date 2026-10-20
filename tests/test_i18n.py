@@ -16,7 +16,7 @@ def test_translation_lookup_and_variables() -> None:
         "Only"
     )
     assert (
-        tr({"display": {"language": "en-US"}}, "todo_list_title", count=3)
-        == "📝 To-dos (3 open)"
+        tr({"display": {"language": "en-US"}}, "cooldown", seconds=5)
+        == "Status card cooldown, try again in 5 seconds."
     )
     assert tr({}, "missing_key") == "missing_key"

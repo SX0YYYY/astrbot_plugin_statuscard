@@ -4,6 +4,24 @@
 
 暂无。
 
+## v2.9.0 — 2026-10-20
+
+### 移除
+
+- 移除 `待办` 命令（含 `todo` 别名）、`todos` 表、日报待办模块、Web 看板待办标签和 `daily_report.todo_retention_days` 配置。
+- `report.db` 升级到 schema v3，启动时自动执行 `DROP TABLE IF EXISTS todos`，清理历史待办数据。
+- 命令数回到 5 个：`查看状态`、`测试通知`、`立即检测`、`状态卡诊断`、`预览日报`。
+- 页面 Web API 回到 4 个：`overview`、`history`、`events`、`reports`。
+
+### 变更
+
+- 日报模块保留资源、异常、QQ、Token、网站延迟、Top 进程；默认勾选仍为前四项。
+- 页面标签回到四个：概览、历史、事件、日报。
+
+### 测试
+
+- 删除待办相关测试，pytest 51 passed。
+
 ## v2.8.1 — 2026-10-20
 
 ### 修复

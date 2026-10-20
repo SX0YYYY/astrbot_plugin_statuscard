@@ -183,17 +183,6 @@ class ReportCollector:
                 self.retention_days,
                 self.event_retention_days,
                 int(now),
-                max(
-                    30,
-                    min(
-                        730,
-                        cfg_int(
-                            self.config,
-                            "daily_report.todo_retention_days",
-                            180,
-                        ),
-                    ),
-                ),
             )
             self._last_prune = now
 

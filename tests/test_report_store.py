@@ -63,7 +63,6 @@ def test_report_store_roundtrip(tmp_path: Path) -> None:
     assert stats["events"] == 1
     assert stats["websites"] == 0
     assert stats["processes"] == 0
-    assert stats["todos"] == 0
 
     if os.name == "posix":
         assert (tmp_path / "report.db").stat().st_mode & 0o777 == 0o600
@@ -139,36 +138,6 @@ def test_report_store_website_and_process_samples(tmp_path: Path) -> None:
     assert store.first_sample_ts("process_samples") == start
 
 
-def test_report_store_todo_lifecycle(tmp_path: Path) -> None:
-    store = ReportStore(tmp_path / "report.db")
-    start = 1_700_000_000
-    day = "2026-10-20"
-
-    todo_id = store.add_todo("检查备份", start, day)
-    assert todo_id == 1
-    assert store.get_todo(todo_id)["status"] == "pending"
-    assert len(store.list_todos()) == 1
-    snapshot = store.todos_snapshot(day, start + 86400)
-    assert len(snapshot["created"]) == 1
-    assert len(snapshot["open"]) == 1
-
-    assert store.complete_todo(todo_id, start + 3600, day) is True
-    assert store.complete_todo(todo_id, start + 3600, day) is False
-    snapshot = store.todos_snapshot(day, start + 86400)
-    assert len(snapshot["completed"]) == 1
-    assert snapshot["open"] == []
-
-    # Completed after the reporting window: still open at yesterday 24:00.
-    todo2 = store.add_todo("次日完成", start, day)
-    assert store.complete_todo(todo2, start + 86400 + 60, "2026-10-21")
-    snapshot = store.todos_snapshot(day, start + 86400)
-    assert [item["id"] for item in snapshot["open"]] == [todo2]
-
-    assert store.delete_todo(todo2) is True
-    assert store.delete_todo(todo2) is False
-    assert store.stats()["todos"] == 1
-
-
 def test_report_store_prunes_extended_tables(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     now = 1_000_000_000
@@ -182,15 +151,8 @@ def test_report_store_prunes_extended_tables(tmp_path: Path) -> None:
         "cpu",
         [{"rank": 1, "name": "x", "pid": 1, "cpu": 1.0, "mem_mb": 1.0}],
     )
-    done_id = store.add_todo("old done", old, "2020-01-01")
-    store.complete_todo(done_id, old, "2020-01-01")
-    open_id = store.add_todo("old open", old, "2020-01-01")
 
-    store.prune(
-        resource_days=7, event_days=30, now=now, todo_days=30
-    )
+    store.prune(resource_days=7, event_days=30, now=now)
 
     assert store.list_website_samples(0, now + 1) == []
     assert store.list_process_samples(0, now + 1, "cpu") == []
-    assert store.get_todo(done_id) is None
-    assert store.get_todo(open_id) is not None

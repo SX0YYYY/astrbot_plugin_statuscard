@@ -568,86 +568,17 @@ button.ghost {
   word-break: break-word;
 }
 
-.todo-form {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-}
 
-.todo-form input {
-  flex: 1;
-  min-width: 0;
-  height: 38px;
-  padding: 0 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--panel-soft);
-  color: var(--text);
-}
 
-.todo-list {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
 
-.todo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 11px;
-  background: var(--panel-soft);
-  border: 1px solid var(--line);
-}
 
-.todo.done {
-  opacity: 0.72;
-}
 
-.todo-id {
-  color: var(--faint);
-  font-size: 11px;
-  min-width: 34px;
-}
 
-.todo-content {
-  flex: 1;
-  min-width: 0;
-  word-break: break-word;
-}
 
-.todo.done .todo-content {
-  text-decoration: line-through;
-  color: var(--muted);
-}
 
-.todo-meta {
-  color: var(--faint);
-  font-size: 10px;
-  white-space: nowrap;
-}
 
-.todo-actions {
-  display: flex;
-  gap: 5px;
-  flex: none;
-}
 
-.todo-actions button {
-  height: 27px;
-  padding: 0 8px;
-  border-radius: 7px;
-  font-size: 11px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  color: var(--text);
-}
 
-.todo-actions button.danger {
-  color: var(--bad);
-}
 
 .detail-block {
   margin-top: 12px;
@@ -733,14 +664,7 @@ button.ghost {
     min-width: 0;
   }
 
-  .todo {
-    flex-wrap: wrap;
-  }
 
-  .todo-actions {
-    width: 100%;
-    justify-content: flex-end;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

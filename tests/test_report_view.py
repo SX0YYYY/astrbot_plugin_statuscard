@@ -444,27 +444,6 @@ def test_process_section_tops_and_redact(tmp_path: Path) -> None:
     assert redacted["process"]["cpu"][0]["name"] == "已隐藏"
 
 
-def test_todo_section_snapshot(tmp_path: Path) -> None:
-    store = ReportStore(tmp_path / "report.db")
-    day_start = int(datetime(2026, 10, 20, 0, 0, tzinfo=TZ).timestamp())
-    store.add_todo("昨天创建", day_start + 3600, "2026-10-20")
-    done_id = store.add_todo("昨天完成", day_start + 7200, "2026-10-20")
-    store.complete_todo(done_id, day_start + 10800, "2026-10-20")
-    store.add_todo("前天未完成", day_start - 86400, "2026-10-19")
-
-    view = _builder(tmp_path, store).build(
-        day="2026-10-20", history_days=7, sections=["todo"]
-    )
-    todo = view["todo"]
-    assert todo["available"] is True
-    assert todo["created_count"] == 2
-    assert todo["completed_count"] == 1
-    assert todo["open_count"] == 2
-    ages = {item["content"]: item["age_text"] for item in todo["open_items"]}
-    assert ages["前天未完成"] == "已 1 天"
-    assert ages["昨天创建"] == "当日"
-
-
 def test_report_html_renders_new_sections(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     day = datetime(2026, 10, 20, 0, 0, tzinfo=TZ)
@@ -483,18 +462,16 @@ def test_report_html_renders_new_sections(tmp_path: Path) -> None:
         "mem",
         [{"rank": 1, "name": "python", "pid": 1, "cpu": 50.0, "mem_mb": 100.0}],
     )
-    store.add_todo("检查备份", start, "2026-10-20")
 
     view = _builder(tmp_path, store).build(
         day="2026-10-20",
         history_days=7,
-        sections=["website", "process", "todo"],
+        sections=["website", "process"],
     )
     html = build_report_html(view, render_width=650)
 
     assert "网站延迟" in html
     assert "Top 异常进程" in html
-    assert "待办" in html
     assert "<script" not in html
 
 
@@ -516,7 +493,7 @@ def test_report_text_contains_new_sections() -> None:
         "day": "2026-10-20",
         "window": "2026-10-20 00:00–24:00",
         "timezone": "Asia/Shanghai",
-        "sections": ["website", "process", "todo"],
+        "sections": ["website", "process"],
         "website": {
             "available": True,
             "targets": [
@@ -531,14 +508,7 @@ def test_report_text_contains_new_sections() -> None:
             "available": True,
             "cpu": [{"name": "python", "cpu_text": "50.0%"}],
         },
-        "todo": {
-            "available": True,
-            "created_count": 2,
-            "completed_count": 1,
-            "open_count": 3,
-        },
     }
     text = build_report_text(view)
     assert "网站: Baidu 120 ms（可用率 100%）" in text
     assert "Top 进程: python CPU 50.0%" in text
-    assert "待办: 昨日新增 2 / 完成 1 / 未完成 3" in text

@@ -28,7 +28,6 @@
       <button class="tab" data-tab="history" role="tab" aria-selected="false" data-i18n="tab_history">历史</button>
       <button class="tab" data-tab="events" role="tab" aria-selected="false" data-i18n="tab_events">事件</button>
       <button class="tab" data-tab="reports" role="tab" aria-selected="false" data-i18n="tab_reports">日报</button>
-      <button class="tab" data-tab="todos" role="tab" aria-selected="false" data-i18n="tab_todos">待办</button>
     </nav>
 
     <main>
@@ -132,18 +131,6 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-todos" role="tabpanel">
-        <div class="card">
-          <div class="card-head">
-            <h2 data-i18n="section_todos">待办</h2>
-            <span id="todo-summary">--</span>
-          </div>
-          <form class="todo-form" id="todo-form">
-            <input id="todo-input" maxlength="200" data-i18n-placeholder="todo_placeholder" placeholder="添加待办，例如：检查备份" autocomplete="off" />
-            <button type="submit" data-i18n="todo_add">添加</button>
-          </form>
-          <div class="todo-list" id="todo-list"></div>
-        </div>
       </section>
     </main>
   </div>

@@ -14,11 +14,3 @@ def test_downsample_keeps_limit_and_edges() -> None:
 def test_downsample_keeps_short_series() -> None:
     rows = [{"ts": index} for index in range(10)]
     assert PageApi._downsample(rows, 120) == rows
-
-
-def test_todo_id_validation() -> None:
-    assert PageApi._todo_id("12") == 12
-    assert PageApi._todo_id(3) == 3
-    assert PageApi._todo_id("x") is None
-    assert PageApi._todo_id(0) is None
-    assert PageApi._todo_id(None) is None

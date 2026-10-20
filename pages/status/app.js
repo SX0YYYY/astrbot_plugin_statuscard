@@ -6,7 +6,6 @@
     historyRange: "24h",
     eventDays: "1",
     loaded: new Set(),
-    todosLoaded: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -424,12 +423,6 @@
           version: data.astrbot_version || "--",
         }),
       ),
-      metric(
-        t("metric_todos", "待办"),
-        String((data.todos && data.todos.open) || 0),
-        t("metric_open", "未完成"),
-        null,
-      ),
     ].join("");
 
     const network = data.network || {};
@@ -734,29 +727,6 @@
           "</div>",
       );
     }
-    const todo = data.todo || {};
-    if (todo.available) {
-      blocks.push(
-        '<div class="detail-block"><h3>' +
-          esc(t("report_todo", "待办")) +
-          '</h3><div class="detail-grid">' +
-          [
-            [t("report_created", "昨日新增"), todo.created_count],
-            [t("report_completed", "昨日完成"), todo.completed_count],
-            [t("report_open", "未完成"), todo.open_count],
-          ]
-            .map(
-              (pair) =>
-                '<div class="detail-item"><span>' +
-                esc(pair[0]) +
-                "</span><strong>" +
-                esc(pair[1]) +
-                "</strong></div>",
-            )
-            .join("") +
-          "</div></div>",
-      );
-    }
     const website = data.website || {};
     if (website.available && website.targets && website.targets.length) {
       blocks.push(
@@ -881,73 +851,6 @@
   }
 
   // ------------------------------------------------------------------
-  // todos
-  // ------------------------------------------------------------------
-
-  async function loadTodos() {
-    const data = await apiGet("todos", { include_done: "true" });
-    const todos = data.todos || [];
-    const open = todos.filter((item) => item.status !== "done");
-    const done = todos.filter((item) => item.status === "done");
-    $("todo-summary").textContent = t(
-      "todo_summary",
-      "未完成 {open} · 已完成 {done}",
-      { open: open.length, done: done.length },
-    );
-    $("todo-list").innerHTML = todos.length
-      ? todos
-          .map((item) => {
-            const isDone = item.status === "done";
-            return (
-              '<div class="todo ' +
-              (isDone ? "done" : "") +
-              '"><span class="todo-id">#' +
-              esc(item.id) +
-              '</span><span class="todo-content">' +
-              esc(item.content) +
-              '</span><span class="todo-meta">' +
-              esc(
-                isDone
-                  ? t("todo_done_on", "已完成 {day}", {
-                      day: item.done_day || "",
-                    })
-                  : t("todo_created_on", "创建于 {day}", {
-                      day: item.created_day || "",
-                    }),
-              ) +
-              '</span><span class="todo-actions">' +
-              (isDone
-                ? ""
-                : '<button type="button" data-action="complete" data-id="' +
-                  esc(item.id) +
-                  '">' +
-                  esc(t("todo_complete", "完成")) +
-                  "</button>") +
-              '<button type="button" class="danger" data-action="delete" data-id="' +
-              esc(item.id) +
-              '">' +
-              esc(t("todo_delete", "删除")) +
-              "</button></span></div>"
-            );
-          })
-          .join("")
-      : empty(t("empty_todos", "暂无待办；在上方输入内容后点击“添加”。"));
-    state.todosLoaded = true;
-  }
-
-  async function todoAction(action, id) {
-    const data = await apiPost("todos", { action: action, id: Number(id) });
-    if (!data || data.ok === false) {
-      throw new Error((data && data.message) || t("error_operation", "操作失败"));
-    }
-    toast(data.message || t("toast_done", "操作完成"));
-    await loadTodos();
-    if (state.tab === "overview") {
-      await loadOverview();
-    }
-  }
-
-  // ------------------------------------------------------------------
   // tabs
   // ------------------------------------------------------------------
 
@@ -956,7 +859,6 @@
     if (name === "history") return loadHistory();
     if (name === "events") return loadEvents();
     if (name === "reports") return loadReports();
-    if (name === "todos") return loadTodos();
     return undefined;
   }
 
@@ -981,7 +883,6 @@
 
   async function refreshCurrent() {
     state.loaded.delete(state.tab);
-    if (state.tab === "todos") state.todosLoaded = false;
     await activateTab(state.tab, true);
   }
 
@@ -1030,41 +931,6 @@
       });
     });
 
-    $("todo-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const input = $("todo-input");
-      const content = input.value.trim();
-      if (!content) {
-        toast(t("toast_enter_todo", "请输入待办内容"));
-        return;
-      }
-      try {
-        const data = await apiPost("todos", {
-          action: "add",
-          content: content,
-        });
-        if (!data || data.ok === false) {
-          throw new Error(
-            (data && data.message) || t("error_add_failed", "添加失败"),
-          );
-        }
-        input.value = "";
-        toast(data.message || t("toast_added", "已添加"));
-        await loadTodos();
-      } catch (error) {
-        toast(error.message || t("error_add_failed", "添加失败"));
-      }
-    });
-
-    $("todo-list").addEventListener("click", async (event) => {
-      const button = event.target.closest("button[data-action]");
-      if (!button) return;
-      try {
-        await todoAction(button.dataset.action, button.dataset.id);
-      } catch (error) {
-        toast(error.message || t("error_operation", "操作失败"));
-      }
-    });
 
   }
 

@@ -873,7 +873,7 @@
   "daily_report": {
     "description": "日报",
     "type": "object",
-    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟、Top 进程和待办；默认关闭发送，只记录数据，开销很小。",
+    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；默认关闭发送，只记录数据，开销很小。",
     "items": {
       "enabled": {
         "description": "启用每日日报",
@@ -918,8 +918,7 @@
           "qq",
           "token",
           "website",
-          "process",
-          "todo"
+          "process"
         ],
         "labels": [
           "资源趋势",
@@ -927,8 +926,7 @@
           "QQ 趋势",
           "Token 消耗",
           "网站延迟",
-          "Top 进程",
-          "待办"
+          "Top 进程"
         ],
         "render_type": "checkbox",
         "condition": {
@@ -1044,20 +1042,6 @@
         "condition": {
           "show_advanced": true
         }
-      },
-      "todo_retention_days": {
-        "description": "已完成待办保留天数",
-        "type": "int",
-        "default": 180,
-        "slider": {
-          "min": 30,
-          "max": 730,
-          "step": 30
-        },
-        "condition": {
-          "show_advanced": true
-        },
-        "hint": "未完成待办不会被自动清理。"
       }
     }
   }
