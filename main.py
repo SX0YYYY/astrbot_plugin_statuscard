@@ -25,6 +25,7 @@ from .collectors import (
     cfg_int,
     effective_media_source,
     fetch_avatar_bytes,
+    now_in_timezone,
     uploaded_file_path,
 )
 from .monitor import ServiceMonitor
@@ -43,7 +44,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.5.1",
+    "2.6.0",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -649,7 +650,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.5.1")
+        lines.append("插件: v2.6.0")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -750,6 +751,12 @@ class StatusCardPlugin(Star):
             + f" / 快照 {store_stats.get('snapshots', 0)} 天"
             + f" / 事件 {store_stats.get('events', 0)} 条"
         )
+        lines.append(
+            "日报扩展: "
+            + f"网站 {store_stats.get('websites', 0)} 条"
+            + f" / 进程 {store_stats.get('processes', 0)} 条"
+            + f" / 待办 {store_stats.get('todos', 0)} 条"
+        )
         daily_status = self.daily_report.status()
         lines.append(
             "日报发送: "
@@ -780,4 +787,112 @@ class StatusCardPlugin(Star):
             getattr(event, "unified_msg_origin", None)
         )
         yield event.plain_result(detail)
+        event.stop_event()
+
+    @staticmethod
+    def _parse_todo_id(value: str) -> int | None:
+        text = str(value or "").strip().lstrip("#")
+        try:
+            todo_id = int(text)
+        except (TypeError, ValueError):
+            return None
+        return todo_id if todo_id > 0 else None
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("待办")
+    async def cmd_todo(self, event: AstrMessageEvent):
+        """Manage the daily-report todo list from QQ."""
+        event.should_call_llm(False)
+        raw = str(getattr(event, "message_str", "") or "").strip()
+        for prefix in ("*", "／", "/"):
+            raw = raw.lstrip(prefix).strip()
+        if raw.startswith("@") or raw.startswith("[CQ:at"):
+            _, _, raw = raw.partition(" ")
+            raw = raw.strip()
+        if raw.startswith("待办"):
+            raw = raw[len("待办") :].strip()
+        parts = raw.split(maxsplit=1)
+        action = parts[0] if parts else ""
+        argument = parts[1].strip() if len(parts) > 1 else ""
+
+        now = now_in_timezone(self.config)
+        day = now.strftime("%Y-%m-%d")
+        ts = int(now.timestamp())
+
+        if action in ("", "列表", "list"):
+            todos = self.report_store.list_todos(
+                include_done=False, limit=30
+            )
+            if not todos:
+                reply = (
+                    "📝 暂无未完成待办。\n"
+                    "用法：待办 添加 <内容> / 待办 完成 <编号> / "
+                    "待办 删除 <编号>"
+                )
+            else:
+                lines = [f"📝 待办（{len(todos)} 项未完成）", "──────────"]
+                for item in todos:
+                    lines.append(
+                        f"#{item['id']} [{item['created_day']}] "
+                        f"{item['content']}"
+                    )
+                lines.append("")
+                lines.append(
+                    "用法：待办 添加 <内容> / 待办 完成 <编号> / "
+                    "待办 删除 <编号> / 待办 全部"
+                )
+                reply = "\n".join(lines)
+        elif action in ("全部", "历史", "all"):
+            todos = self.report_store.list_todos(
+                include_done=True, limit=50
+            )
+            if not todos:
+                reply = "📝 暂无待办记录。"
+            else:
+                lines = ["📝 全部待办", "──────────"]
+                for item in todos:
+                    mark = "✅" if item["status"] == "done" else "⬜"
+                    lines.append(
+                        f"{mark} #{item['id']} [{item['created_day']}] "
+                        f"{item['content']}"
+                    )
+                reply = "\n".join(lines)
+        elif action in ("添加", "add"):
+            if not argument:
+                reply = "用法：待办 添加 <内容>"
+            else:
+                todo_id = self.report_store.add_todo(
+                    argument, ts, day, source="command"
+                )
+                reply = (
+                    f"✅ 已添加待办 #{todo_id}：{argument[:80]}"
+                    if todo_id
+                    else "添加失败，请查看后台日志。"
+                )
+        elif action in ("完成", "done"):
+            todo_id = self._parse_todo_id(argument)
+            if todo_id is None:
+                reply = "用法：待办 完成 <编号>"
+            elif self.report_store.complete_todo(todo_id, ts, day):
+                reply = f"✅ 已完成待办 #{todo_id}。"
+            else:
+                reply = f"未找到未完成的待办 #{todo_id}。"
+        elif action in ("删除", "delete"):
+            todo_id = self._parse_todo_id(argument)
+            if todo_id is None:
+                reply = "用法：待办 删除 <编号>"
+            elif self.report_store.delete_todo(todo_id):
+                reply = f"🗑️ 已删除待办 #{todo_id}。"
+            else:
+                reply = f"未找到待办 #{todo_id}。"
+        else:
+            reply = (
+                "📝 待办用法\n"
+                "待办 / 待办 列表：查看未完成\n"
+                "待办 全部：查看全部\n"
+                "待办 添加 <内容>：新增\n"
+                "待办 完成 <编号>：标记完成\n"
+                "待办 删除 <编号>：删除"
+            )
+        yield event.plain_result(reply)
         event.stop_event()

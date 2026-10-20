@@ -242,6 +242,127 @@
     </section>
     {% endif %}
 
+    {% if "website" in d.sections and d.website %}
+    <section class="section">
+      <div class="section-head">
+        <h2>网站延迟</h2>
+        <span>昨日 · 最近 {{ d.history_days }} 天</span>
+      </div>
+      {% if not d.website.available %}
+      <div class="empty">{{ d.website.empty_reason }}</div>
+      {% else %}
+      <table class="model-table">
+        <thead><tr><th>目标</th><th>昨日平均</th><th>峰值</th><th>可用率</th></tr></thead>
+        <tbody>
+          {% for item in d.website.targets %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ item.avg_text }}</td>
+            <td>{{ item.peak_text }}</td>
+            <td>{{ item.availability_text }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="chart-block">
+        <div class="chart-title">延迟趋势 <span>按日平均</span></div>
+        {{ legend(d.website.chart) }}
+        {{ chart_svg(d.website.chart) }}
+      </div>
+      {% if d.website.history_note %}<p class="note">{{ d.website.history_note }}</p>{% endif %}
+      <p class="note">{{ d.website.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if "process" in d.sections and d.process %}
+    <section class="section">
+      <div class="section-head">
+        <h2>Top 异常进程</h2>
+        <span>昨日采样峰值</span>
+      </div>
+      {% if not d.process.available %}
+      <div class="empty">{{ d.process.empty_reason }}</div>
+      {% else %}
+      <div class="split-grid">
+        <div class="split-col">
+          <div class="chart-title">CPU 峰值 Top {{ d.process.top_n }}</div>
+          <table class="model-table compact-table">
+            <thead><tr><th>#</th><th>进程</th><th>CPU</th></tr></thead>
+            <tbody>
+              {% for item in d.process.cpu %}
+              <tr><td>{{ item.rank }}</td><td>{{ item.name }}</td><td>{{ item.cpu_text }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="split-col">
+          <div class="chart-title">内存峰值 Top {{ d.process.top_n }}</div>
+          <table class="model-table compact-table">
+            <thead><tr><th>#</th><th>进程</th><th>内存</th></tr></thead>
+            <tbody>
+              {% for item in d.process.mem %}
+              <tr><td>{{ item.rank }}</td><td>{{ item.name }}</td><td>{{ item.mem_text }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="note">{{ d.process.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if "todo" in d.sections and d.todo %}
+    <section class="section">
+      <div class="section-head">
+        <h2>待办</h2>
+        <span>截至昨日 24:00</span>
+      </div>
+      {% if not d.todo.available %}
+      <div class="empty">{{ d.todo.empty_reason }}</div>
+      {% else %}
+      <div class="stat-grid todo-grid">
+        <div class="stat">
+          <div class="stat-label">昨日新增</div>
+          <div class="stat-value">{{ d.todo.created_count }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">昨日完成</div>
+          <div class="stat-value">{{ d.todo.completed_count }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">未完成</div>
+          <div class="stat-value">{{ d.todo.open_count }}</div>
+        </div>
+      </div>
+      {% if d.todo.open_items %}
+      <div class="todo-list">
+        {% for item in d.todo.open_items %}
+        <div class="todo-row">
+          <span class="todo-id">#{{ item.id }}</span>
+          <span class="todo-content">{{ item.content }}</span>
+          <span class="todo-meta">{{ item.age_text }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if d.todo.completed_items %}
+      <div class="todo-list todo-done">
+        {% for item in d.todo.completed_items %}
+        <div class="todo-row done">
+          <span class="todo-id">#{{ item.id }}</span>
+          <span class="todo-content">{{ item.content }}</span>
+          <span class="todo-meta">已完成</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <p class="note">{{ d.todo.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
     <footer class="footer">
       {{ d.footer_note }}<br />
       {{ d.title }} · {{ d.day }} · 生成于 {{ d.generated_at }}

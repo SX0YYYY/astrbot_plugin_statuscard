@@ -8,16 +8,30 @@
         "description": "头像来源",
         "type": "string",
         "default": "default",
-        "options": ["default", "upload"],
-        "labels": ["默认（QQ 头像）", "自定义上传"],
+        "options": [
+          "default",
+          "upload"
+        ],
+        "labels": [
+          "默认（QQ 头像）",
+          "自定义上传"
+        ],
         "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
       },
       "avatar_upload_files": {
         "description": "上传头像图片",
         "type": "file",
         "default": [],
-        "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
-        "condition": {"avatar_source": "upload"},
+        "file_types": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif"
+        ],
+        "condition": {
+          "avatar_source": "upload"
+        },
         "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
       },
       "avatar_text": {
@@ -37,16 +51,30 @@
         "description": "背景来源",
         "type": "string",
         "default": "default",
-        "options": ["default", "upload"],
-        "labels": ["默认（内置背景）", "自定义上传"],
+        "options": [
+          "default",
+          "upload"
+        ],
+        "labels": [
+          "默认（内置背景）",
+          "自定义上传"
+        ],
         "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
       },
       "bg_upload_files": {
         "description": "上传背景图片",
         "type": "file",
         "default": [],
-        "file_types": ["png", "jpg", "jpeg", "webp", "gif"],
-        "condition": {"background_source": "upload"},
+        "file_types": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif"
+        ],
+        "condition": {
+          "background_source": "upload"
+        },
         "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。聊天中随命令发送的图片仍然优先。"
       }
     }
@@ -60,14 +88,22 @@
         "description": "输出图片宽度（像素）",
         "type": "int",
         "default": 1170,
-        "slider": {"min": 1170, "max": 2880, "step": 30},
+        "slider": {
+          "min": 1170,
+          "max": 2880,
+          "step": 30
+        },
         "hint": "数值越大，图片越清晰、文件越大、出图越慢；高度会随内容自动扩展。默认 1170 与旧版高清效果相当。"
       },
       "process_top_n": {
         "description": "进程表显示条数",
         "type": "int",
         "default": 8,
-        "slider": {"min": 1, "max": 30, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
         "hint": "卡片上展示 CPU 占用最高的前几个进程。"
       },
       "compact": {
@@ -92,17 +128,29 @@
         "description": "同一会话冷却（秒）",
         "type": "int",
         "default": 10,
-        "slider": {"min": 0, "max": 3600, "step": 5},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 5
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "同一会话重复触发状态卡的最小间隔；0 表示不限制。"
       },
       "website_targets": {
         "description": "网站测试目标",
         "type": "template_list",
         "default": [
-          {"__template_key": "site", "name": "Baidu", "url": "https://www.baidu.com/"}
+          {
+            "__template_key": "site",
+            "name": "Baidu",
+            "url": "https://www.baidu.com/"
+          }
         ],
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "状态卡上显示的网站延迟测试；默认只测百度，不需要可以保持默认。",
         "templates": {
           "site": {
@@ -134,55 +182,91 @@
         "description": "网站测试缓存（秒）",
         "type": "int",
         "default": 60,
-        "slider": {"min": 0, "max": 3600, "step": 10},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 10
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "同一批目标在该时间内复用结果，避免每次出图都请求外网；0 表示关闭。"
       },
       "disk_paths": {
         "description": "磁盘挂载点",
         "type": "list",
         "default": [],
-        "items": {"type": "string"},
-        "condition": {"show_advanced": true},
+        "items": {
+          "type": "string"
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "留空自动检测；Linux 通常填 /，Windows 填 C:\\。"
       },
       "timezone": {
         "description": "时区",
         "type": "string",
         "default": "Asia/Shanghai",
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "例如 Asia/Shanghai；留空默认 Asia/Shanghai。"
       },
       "redact": {
         "description": "状态卡脱敏项",
         "type": "list",
         "default": [],
-        "options": ["hostname", "process", "network", "qq_stats"],
-        "labels": ["主机名", "进程信息", "网络数据", "QQ 统计"],
+        "options": [
+          "hostname",
+          "process",
+          "network",
+          "qq_stats"
+        ],
+        "labels": [
+          "主机名",
+          "进程信息",
+          "网络数据",
+          "QQ 统计"
+        ],
         "render_type": "checkbox",
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "勾选后，卡片上对应的信息会显示为“已隐藏”。"
       },
       "privacy_notice": {
         "description": "首次触发隐私提示",
         "type": "bool",
         "default": true,
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "每个会话首次出图前提示状态图会发送到 T2I 服务。"
       },
       "render_timeout": {
         "description": "渲染超时（秒）",
         "type": "int",
         "default": 180,
-        "slider": {"min": 30, "max": 600, "step": 10},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 30,
+          "max": 600,
+          "step": 10
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "超时后回退为文字摘要。"
       },
       "access": {
         "description": "状态卡访问权限（已废弃）",
         "type": "string",
         "default": "admin",
-        "options": ["all", "admin", "allowlist"],
+        "options": [
+          "all",
+          "admin",
+          "allowlist"
+        ],
         "invisible": true,
         "hint": "所有命令已强制仅 AstrBot 管理员可用；保留此字段只为兼容旧配置。"
       },
@@ -190,7 +274,9 @@
         "description": "状态卡白名单（已废弃）",
         "type": "list",
         "default": [],
-        "items": {"type": "string"},
+        "items": {
+          "type": "string"
+        },
         "invisible": true,
         "hint": "所有命令已强制仅管理员可用，此字段不再生效。"
       }
@@ -211,7 +297,9 @@
         "description": "推送目标",
         "type": "list",
         "default": [],
-        "items": {"type": "string"},
+        "items": {
+          "type": "string"
+        },
         "hint": "填 QQ 群号即可，例如 123456789；也支持 default:GroupMessage:123456789。每日定时状态图和服务监测默认复用这里。"
       },
       "daily_summary": {
@@ -229,14 +317,18 @@
             "type": "string",
             "default": "09:00",
             "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
-            "condition": {"enabled": true},
+            "condition": {
+              "enabled": true
+            },
             "hint": "24 小时制，格式 HH:MM，例如 09:00 或 20:00。"
           },
           "with_image": {
             "description": "发送状态图（关闭则发文字摘要）",
             "type": "bool",
             "default": true,
-            "condition": {"enabled": true},
+            "condition": {
+              "enabled": true
+            },
             "hint": "关闭后只发文字摘要。"
           }
         }
@@ -251,85 +343,141 @@
         "description": "CPU 告警阈值（%）",
         "type": "int",
         "default": 85,
-        "slider": {"min": 0, "max": 100, "step": 1},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "mem_threshold": {
         "description": "内存告警阈值（%）",
         "type": "int",
         "default": 90,
-        "slider": {"min": 0, "max": 100, "step": 1},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "swap_threshold": {
         "description": "SWAP 告警阈值（%）",
         "type": "int",
         "default": 90,
-        "slider": {"min": 0, "max": 100, "step": 1},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "disk_threshold": {
         "description": "磁盘告警阈值（%）",
         "type": "int",
         "default": 85,
-        "slider": {"min": 0, "max": 100, "step": 1},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "load_per_core_threshold": {
         "description": "每核负载告警阈值",
         "type": "float",
         "default": 2.0,
-        "slider": {"min": 0, "max": 16, "step": 0.1},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 0,
+          "max": 16,
+          "step": 0.1
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "例如 2.0 表示每个 CPU 核心平均负载超过 2.0 时告警。"
       },
       "interval_seconds": {
         "description": "采样间隔（秒）",
         "type": "int",
         "default": 60,
-        "slider": {"min": 15, "max": 600, "step": 5},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 15,
+          "max": 600,
+          "step": 5
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "sustain_samples": {
         "description": "连续超过阈值几次才告警",
         "type": "int",
         "default": 3,
-        "slider": {"min": 1, "max": 10, "step": 1},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "次数越多越不容易误报，但告警也更慢。"
       },
       "cooldown_seconds": {
         "description": "同一规则告警冷却（秒）",
         "type": "int",
         "default": 1800,
-        "slider": {"min": 0, "max": 86400, "step": 60},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 60
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "冷却期内不会重复发送同一条告警。"
       },
       "recover_notify": {
         "description": "恢复时发送通知",
         "type": "bool",
         "default": true,
-        "condition": {"show_advanced": true}
+        "condition": {
+          "show_advanced": true
+        }
       },
       "offline_notify": {
         "description": "Bot 掉线/恢复通知",
         "type": "bool",
         "default": true,
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "依赖 OneBot 通道；整体断线时会排队，恢复后补发。"
       },
       "platform_id": {
         "description": "平台实例 ID",
         "type": "string",
         "default": "default",
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "通常保持 default；只有多机器人需要指定时再改。"
       },
       "komari_webhook": {
         "description": "Komari Webhook",
         "type": "object",
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "接收 Komari 的 Webhook 并转发到 QQ 群；普通用户不需要配置。",
         "items": {
           "enabled": {
@@ -341,35 +489,49 @@
             "description": "监听地址",
             "type": "string",
             "default": "127.0.0.1",
-            "condition": {"enabled": true},
+            "condition": {
+              "enabled": true
+            },
             "hint": "建议保持 127.0.0.1，只允许本机访问。"
           },
           "port": {
             "description": "监听端口",
             "type": "int",
             "default": 9968,
-            "slider": {"min": 1, "max": 65535, "step": 1},
-            "condition": {"enabled": true}
+            "slider": {
+              "min": 1,
+              "max": 65535,
+              "step": 1
+            },
+            "condition": {
+              "enabled": true
+            }
           },
           "path": {
             "description": "Webhook 路径",
             "type": "string",
             "default": "/webhook",
-            "condition": {"enabled": true}
+            "condition": {
+              "enabled": true
+            }
           },
           "token": {
             "description": "鉴权 Token",
             "type": "string",
             "default": "",
             "secret": true,
-            "condition": {"enabled": true},
+            "condition": {
+              "enabled": true
+            },
             "hint": "留空表示不校验；建议设置。"
           },
           "require_token": {
             "description": "强制要求 Token",
             "type": "bool",
             "default": false,
-            "condition": {"enabled": true},
+            "condition": {
+              "enabled": true
+            },
             "hint": "开启后必须配置 Token，否则 Webhook 拒绝启动；Webhook 暴露到本机以外时建议开启。"
           }
         }
@@ -390,7 +552,9 @@
         "description": "监测推送目标",
         "type": "list",
         "default": [],
-        "items": {"type": "string"},
+        "items": {
+          "type": "string"
+        },
         "hint": "留空会自动使用上面的告警推送目标；通常只填一次。"
       },
       "items": {
@@ -428,28 +592,40 @@
                 "description": "期望状态码",
                 "type": "int",
                 "default": 0,
-                "condition": {"show_advanced": true},
+                "condition": {
+                  "show_advanced": true
+                },
                 "hint": "0 表示任意 2xx/3xx 都算正常；只有接口必须返回特定状态码时才填。"
               },
               "keyword": {
                 "description": "响应中必须包含的文字",
                 "type": "string",
                 "default": "",
-                "condition": {"show_advanced": true}
+                "condition": {
+                  "show_advanced": true
+                }
               },
               "suppress_when_down": {
                 "description": "依赖项异常时抑制告警",
                 "type": "string",
                 "default": "",
-                "condition": {"show_advanced": true},
+                "condition": {
+                  "show_advanced": true
+                },
                 "hint": "填写另一个监测项的名称（例如 NapCat 容器）；该项异常时不再重复推送本 HTTP 告警。"
               },
               "timeout_seconds": {
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
-                "slider": {"min": 1, "max": 60, "step": 1},
-                "condition": {"show_advanced": true}
+                "slider": {
+                  "min": 1,
+                  "max": 60,
+                  "step": 1
+                },
+                "condition": {
+                  "show_advanced": true
+                }
               }
             }
           },
@@ -472,7 +648,11 @@
                 "description": "端口",
                 "type": "int",
                 "default": 0,
-                "slider": {"min": 0, "max": 65535, "step": 1},
+                "slider": {
+                  "min": 0,
+                  "max": 65535,
+                  "step": 1
+                },
                 "hint": "1–65535；0 表示未配置。例如 8765。"
               },
               "enabled": {
@@ -489,8 +669,14 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
-                "slider": {"min": 1, "max": 60, "step": 1},
-                "condition": {"show_advanced": true}
+                "slider": {
+                  "min": 1,
+                  "max": 60,
+                  "step": 1
+                },
+                "condition": {
+                  "show_advanced": true
+                }
               }
             }
           },
@@ -523,8 +709,14 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
-                "slider": {"min": 1, "max": 60, "step": 1},
-                "condition": {"show_advanced": true}
+                "slider": {
+                  "min": 1,
+                  "max": 60,
+                  "step": 1
+                },
+                "condition": {
+                  "show_advanced": true
+                }
               }
             }
           },
@@ -579,8 +771,14 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 10,
-                "slider": {"min": 1, "max": 60, "step": 1},
-                "condition": {"show_advanced": true}
+                "slider": {
+                  "min": 1,
+                  "max": 60,
+                  "step": 1
+                },
+                "condition": {
+                  "show_advanced": true
+                }
               }
             }
           }
@@ -597,43 +795,71 @@
         "type": "string",
         "default": "",
         "pattern": "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$",
-        "condition": {"show_advanced": true},
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "格式 YYYY-MM-DD HH:MM；到时间前只探测、不发送异常/恢复通知。留空表示不静默。"
       },
       "interval_seconds": {
         "description": "轮询间隔（秒）",
         "type": "int",
         "default": 60,
-        "slider": {"min": 15, "max": 600, "step": 5},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 15,
+          "max": 600,
+          "step": 5
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "fail_threshold": {
         "description": "连续失败几次后告警",
         "type": "int",
         "default": 2,
-        "slider": {"min": 1, "max": 10, "step": 1},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "次数越多越不容易误报，但告警也更慢。"
       },
       "cooldown_seconds": {
         "description": "同一目标告警冷却（秒）",
         "type": "int",
         "default": 1800,
-        "slider": {"min": 0, "max": 86400, "step": 60},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 60
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "recover_notify": {
         "description": "恢复时发送通知",
         "type": "bool",
         "default": true,
-        "condition": {"show_advanced": true}
+        "condition": {
+          "show_advanced": true
+        }
       },
       "max_response_bytes": {
         "description": "HTTP 探测最大读取字节数",
         "type": "int",
         "default": 262144,
-        "slider": {"min": 1024, "max": 10485760, "step": 1024},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 1024,
+          "max": 10485760,
+          "step": 1024
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "只在配置了“响应中必须包含的文字”时生效，避免误读大文件。"
       }
     }
@@ -641,7 +867,7 @@
   "daily_report": {
     "description": "日报",
     "type": "object",
-    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势和 Token 消耗；默认关闭发送，只记录数据，开销很小。",
+    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟、Top 进程和待办；默认关闭发送，只记录数据，开销很小。",
     "items": {
       "enabled": {
         "description": "启用每日日报",
@@ -654,46 +880,83 @@
         "type": "string",
         "default": "21:00",
         "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
-        "condition": {"enabled": true},
+        "condition": {
+          "enabled": true
+        },
         "hint": "24 小时制 HH:MM；建议与每日定时状态图错开。"
       },
       "targets": {
         "description": "日报推送目标",
         "type": "list",
         "default": [],
-        "items": {"type": "string"},
-        "condition": {"enabled": true},
+        "items": {
+          "type": "string"
+        },
+        "condition": {
+          "enabled": true
+        },
         "hint": "留空复用“主动告警”的推送目标；也可以填 QQ 群号或完整 UMO。"
       },
       "sections": {
         "description": "日报内容",
         "type": "list",
-        "default": ["resource", "anomaly", "qq", "token"],
-        "options": ["resource", "anomaly", "qq", "token"],
-        "labels": ["资源趋势", "异常汇总", "QQ 趋势", "Token 消耗"],
+        "default": [
+          "resource",
+          "anomaly",
+          "qq",
+          "token"
+        ],
+        "options": [
+          "resource",
+          "anomaly",
+          "qq",
+          "token",
+          "website",
+          "process",
+          "todo"
+        ],
+        "labels": [
+          "资源趋势",
+          "异常汇总",
+          "QQ 趋势",
+          "Token 消耗",
+          "网站延迟",
+          "Top 进程",
+          "待办"
+        ],
         "render_type": "checkbox",
-        "condition": {"enabled": true},
+        "condition": {
+          "enabled": true
+        },
         "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。"
       },
       "with_image": {
         "description": "发送图片",
         "type": "bool",
         "default": true,
-        "condition": {"enabled": true},
+        "condition": {
+          "enabled": true
+        },
         "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
       },
       "history_days": {
         "description": "趋势天数",
         "type": "int",
         "default": 7,
-        "slider": {"min": 7, "max": 30, "step": 7},
-        "condition": {"enabled": true}
+        "slider": {
+          "min": 7,
+          "max": 30,
+          "step": 7
+        },
+        "condition": {
+          "enabled": true
+        }
       },
       "collect": {
         "description": "记录日报历史数据",
         "type": "bool",
         "default": true,
-        "hint": "每 5 分钟记录一次资源占用，每天记录一次 QQ 数量/接收累计，并记录告警和监测事件。"
+        "hint": "每 5 分钟记录一次资源占用、网站延迟和 Top 进程，每天记录一次 QQ 数量/接收累计，并记录告警和监测事件。"
       },
       "show_advanced": {
         "description": "显示高级日报选项",
@@ -704,30 +967,82 @@
         "description": "日报渲染超时（秒）",
         "type": "int",
         "default": 180,
-        "slider": {"min": 30, "max": 600, "step": 10},
-        "condition": {"show_advanced": true},
+        "slider": {
+          "min": 30,
+          "max": 600,
+          "step": 10
+        },
+        "condition": {
+          "show_advanced": true
+        },
         "hint": "超时后回退文字摘要。"
       },
       "resource_sample_seconds": {
         "description": "资源采样间隔（秒）",
         "type": "int",
         "default": 300,
-        "slider": {"min": 60, "max": 1800, "step": 60},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 60,
+          "max": 1800,
+          "step": 60
+        },
+        "condition": {
+          "show_advanced": true
+        }
+      },
+      "process_top_n": {
+        "description": "Top 进程数量",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 3,
+          "max": 10,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "日报中分别列出 CPU 和内存峰值最高的进程数量。"
       },
       "retention_days": {
         "description": "资源数据保留天数",
         "type": "int",
         "default": 30,
-        "slider": {"min": 7, "max": 365, "step": 1},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 7,
+          "max": 365,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
       },
       "event_retention_days": {
         "description": "异常事件保留天数",
         "type": "int",
         "default": 90,
-        "slider": {"min": 30, "max": 730, "step": 30},
-        "condition": {"show_advanced": true}
+        "slider": {
+          "min": 30,
+          "max": 730,
+          "step": 30
+        },
+        "condition": {
+          "show_advanced": true
+        }
+      },
+      "todo_retention_days": {
+        "description": "已完成待办保留天数",
+        "type": "int",
+        "default": 180,
+        "slider": {
+          "min": 30,
+          "max": 730,
+          "step": 30
+        },
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "未完成待办不会被自动清理。"
       }
     }
   }

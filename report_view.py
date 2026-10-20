@@ -26,7 +26,16 @@ RESOURCE_LABELS = {
     "load1": "每核负载",
 }
 RRULE_COUNT = len(RESOURCE_KEYS)
-VALID_SECTIONS = ("resource", "anomaly", "qq", "token")
+VALID_SECTIONS = (
+    "resource",
+    "anomaly",
+    "qq",
+    "token",
+    "website",
+    "process",
+    "todo",
+)
+DEFAULT_SECTIONS = ("resource", "anomaly", "qq", "token")
 
 
 def _fmt_num(value: Any) -> str:
@@ -257,7 +266,7 @@ class DailyReportBuilder:
         history_days = max(7, min(30, int(history_days or 7)))
         selected = [
             item
-            for item in (sections or list(VALID_SECTIONS))
+            for item in (sections or list(DEFAULT_SECTIONS))
             if item in VALID_SECTIONS
         ]
         selected = [item for item in VALID_SECTIONS if item in selected]
@@ -293,6 +302,16 @@ class DailyReportBuilder:
             view["qq"] = self._qq_section(target, history_days)
         if "token" in selected:
             view["token"] = self._token_section(target, history_days)
+        if "website" in selected:
+            view["website"] = self._website_section(
+                target, previous, history_days
+            )
+        if "process" in selected:
+            view["process"] = self._process_section(
+                target, previous, history_days
+            )
+        if "todo" in selected:
+            view["todo"] = self._todo_section(target)
         view["summary"] = self._summary(view)
         return view
 
@@ -798,6 +817,279 @@ class DailyReportBuilder:
         return mapping, min_day, True
 
     # ------------------------------------------------------------------
+    # website latency
+    # ------------------------------------------------------------------
+
+    def _website_section(
+        self, day: date, previous: date, history_days: int
+    ) -> dict[str, Any]:
+        days = [
+            day - timedelta(days=history_days - 1 - index)
+            for index in range(history_days)
+        ]
+        start_ts = int(
+            datetime.combine(days[0], time.min, tzinfo=self.tz).timestamp()
+        )
+        end_ts = int(
+            datetime.combine(
+                day + timedelta(days=1), time.min, tzinfo=self.tz
+            ).timestamp()
+        )
+        rows = self.store.list_website_samples(start_ts, end_ts)
+        names = sorted(
+            {
+                str(row.get("name") or "")
+                for row in rows
+                if row.get("name")
+            }
+        )
+        by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            local = datetime.fromtimestamp(int(row["ts"]), self.tz)
+            key = (local.strftime("%Y-%m-%d"), str(row.get("name") or ""))
+            by_key.setdefault(key, []).append(row)
+
+        def latency_values(items: list[dict[str, Any]]) -> list[float]:
+            return [
+                float(item["latency_ms"])
+                for item in items
+                if item.get("ok")
+                and item.get("latency_ms") is not None
+            ]
+
+        targets: list[dict[str, Any]] = []
+        for name in names:
+            yesterday_rows = by_key.get((day.isoformat(), name), [])
+            if not yesterday_rows:
+                continue
+            ok_count = sum(1 for row in yesterday_rows if row.get("ok"))
+            latencies = latency_values(yesterday_rows)
+            average = sum(latencies) / len(latencies) if latencies else None
+            peak = max(latencies) if latencies else None
+            targets.append(
+                {
+                    "name": name,
+                    "ok_count": ok_count,
+                    "fail_count": len(yesterday_rows) - ok_count,
+                    "total": len(yesterday_rows),
+                    "availability_text": (
+                        f"{ok_count / len(yesterday_rows) * 100:.0f}%"
+                        if yesterday_rows
+                        else "--"
+                    ),
+                    "avg_text": (
+                        f"{average:.0f} ms" if average is not None else "--"
+                    ),
+                    "peak_text": (
+                        f"{peak:.0f} ms" if peak is not None else "--"
+                    ),
+                }
+            )
+
+        colors = ["#4f8cff", "#2ecc71", "#f59e0b", "#8b5cf6", "#ef4444"]
+        series: list[dict[str, Any]] = []
+        for index, name in enumerate(names[:5]):
+            values: list[float | None] = []
+            for item in days:
+                latencies = latency_values(
+                    by_key.get((item.isoformat(), name), [])
+                )
+                values.append(
+                    sum(latencies) / len(latencies) if latencies else None
+                )
+            series.append(
+                {
+                    "name": name,
+                    "color": colors[index % len(colors)],
+                    "values": values,
+                }
+            )
+        chart = _line_chart(
+            [item.strftime("%m-%d") for item in days],
+            series,
+            y_formatter=lambda value: f"{value:.0f}ms",
+            height=160,
+        )
+
+        first_ts = self.store.first_sample_ts("website_samples")
+        first_day = (
+            datetime.fromtimestamp(first_ts, self.tz).strftime("%Y-%m-%d")
+            if first_ts
+            else None
+        )
+        available = bool(targets)
+        if available:
+            empty_reason = None
+        elif first_day:
+            empty_reason = (
+                f"网站延迟从 {first_day} 开始积累，暂无 {day.isoformat()} 数据"
+            )
+        else:
+            empty_reason = "暂无网站延迟采样数据"
+        history_note = None
+        if first_day and first_day > days[0].isoformat():
+            history_note = (
+                f"网站延迟历史从 {first_day} 开始，"
+                f"{history_days} 天趋势仍在积累。"
+            )
+        return {
+            "available": available,
+            "empty_reason": empty_reason,
+            "first_day": first_day,
+            "targets": targets,
+            "chart": chart,
+            "history_note": history_note,
+            "note": "延迟为 HTTP 请求耗时，可用率按“无网络错误”统计；目标复用状态卡的网站测试设置。",
+        }
+
+    # ------------------------------------------------------------------
+    # top processes
+    # ------------------------------------------------------------------
+
+    def _process_section(
+        self, day: date, previous: date, history_days: int
+    ) -> dict[str, Any]:
+        start_ts = int(
+            datetime.combine(day, time.min, tzinfo=self.tz).timestamp()
+        )
+        end_ts = int(
+            datetime.combine(
+                day + timedelta(days=1), time.min, tzinfo=self.tz
+            ).timestamp()
+        )
+        top_n = max(
+            3, min(10, cfg_int(self.config, "daily_report.process_top_n", 5))
+        )
+        cpu_rows = self.store.list_process_samples(
+            start_ts, end_ts, "cpu"
+        )
+        mem_rows = self.store.list_process_samples(start_ts, end_ts, "mem")
+
+        def aggregate(
+            rows: list[dict[str, Any]], key: str
+        ) -> list[dict[str, Any]]:
+            values: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                item = values.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "cpu": 0.0,
+                        "mem_mb": 0.0,
+                        "samples": 0,
+                    },
+                )
+                item["cpu"] = max(
+                    float(item["cpu"]), float(row.get("cpu") or 0.0)
+                )
+                item["mem_mb"] = max(
+                    float(item["mem_mb"]),
+                    float(row.get("mem_mb") or 0.0),
+                )
+                item["samples"] += 1
+            return sorted(
+                values.values(), key=lambda item: item[key], reverse=True
+            )[:top_n]
+
+        redact = "process" in self.redact
+
+        def render(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for index, item in enumerate(items, 1):
+                out.append(
+                    {
+                        "rank": index,
+                        "name": "已隐藏" if redact else item["name"],
+                        "cpu_text": f"{item['cpu']:.1f}%",
+                        "mem_text": f"{item['mem_mb']:.0f} MB",
+                        "samples": item["samples"],
+                    }
+                )
+            return out
+
+        cpu_top = render(aggregate(cpu_rows, "cpu"))
+        mem_top = render(aggregate(mem_rows, "mem_mb"))
+        first_ts = self.store.first_sample_ts("process_samples")
+        first_day = (
+            datetime.fromtimestamp(first_ts, self.tz).strftime("%Y-%m-%d")
+            if first_ts
+            else None
+        )
+        available = bool(cpu_top or mem_top)
+        if available:
+            empty_reason = None
+        elif first_day:
+            empty_reason = (
+                f"进程采样从 {first_day} 开始积累，暂无 {day.isoformat()} 数据"
+            )
+        else:
+            empty_reason = "暂无进程采样数据"
+        return {
+            "available": available,
+            "empty_reason": empty_reason,
+            "first_day": first_day,
+            "top_n": top_n,
+            "cpu": cpu_top,
+            "mem": mem_top,
+            "note": "按进程名聚合昨日采样峰值；同一程序的多进程会合并显示。",
+        }
+
+    # ------------------------------------------------------------------
+    # todos
+    # ------------------------------------------------------------------
+
+    def _todo_section(self, day: date) -> dict[str, Any]:
+        end_ts = int(
+            datetime.combine(
+                day + timedelta(days=1), time.min, tzinfo=self.tz
+            ).timestamp()
+        )
+        snapshot = self.store.todos_snapshot(day.isoformat(), end_ts)
+        open_items: list[dict[str, Any]] = []
+        for item in snapshot["open"]:
+            created_day = str(item.get("created_day") or day.isoformat())
+            try:
+                age = max(0, (day - date.fromisoformat(created_day)).days)
+            except ValueError:
+                age = 0
+            open_items.append(
+                {
+                    "id": item.get("id"),
+                    "content": str(item.get("content") or "")[:120],
+                    "created_day": created_day,
+                    "age_text": "当日" if age == 0 else f"已 {age} 天",
+                }
+            )
+        completed_items = [
+            {
+                "id": item.get("id"),
+                "content": str(item.get("content") or "")[:120],
+                "done_day": item.get("done_day"),
+            }
+            for item in snapshot["completed"][:5]
+        ]
+        available = bool(
+            open_items or snapshot["created"] or snapshot["completed"]
+        )
+        return {
+            "available": available,
+            "empty_reason": (
+                None
+                if available
+                else "暂无待办记录；可在 QQ 使用“待办 添加 <内容>”添加。"
+            ),
+            "created_count": len(snapshot["created"]),
+            "completed_count": len(snapshot["completed"]),
+            "open_count": len(open_items),
+            "open_items": open_items[:10],
+            "completed_items": completed_items,
+            "note": "口径：截至昨日 24:00；未完成待办会持续保留，完成后从列表移除。",
+        }
+
+    # ------------------------------------------------------------------
     # token
     # ------------------------------------------------------------------
 
@@ -979,6 +1271,47 @@ def build_report_text(view: dict[str, Any]) -> str:
             )
         else:
             lines.append(f"Token: {token.get('empty_reason') or '暂无数据'}")
+    website = view.get("website") or {}
+    if "website" in sections:
+        if website.get("available"):
+            parts = [
+                "{0} {1}（可用率 {2}）".format(
+                    item.get("name"),
+                    item.get("avg_text"),
+                    item.get("availability_text"),
+                )
+                for item in website.get("targets", [])[:3]
+            ]
+            lines.append("网站: " + "；".join(parts))
+        else:
+            lines.append(
+                f"网站: {website.get('empty_reason') or '暂无数据'}"
+            )
+    process = view.get("process") or {}
+    if "process" in sections:
+        if process.get("available") and process.get("cpu"):
+            top = process["cpu"][0]
+            lines.append(
+                "Top 进程: {0} CPU {1}".format(
+                    top.get("name"), top.get("cpu_text")
+                )
+            )
+        else:
+            lines.append(
+                f"进程: {process.get('empty_reason') or '暂无数据'}"
+            )
+    todo = view.get("todo") or {}
+    if "todo" in sections:
+        if todo.get("available"):
+            lines.append(
+                "待办: 昨日新增 {0} / 完成 {1} / 未完成 {2}".format(
+                    todo.get("created_count", 0),
+                    todo.get("completed_count", 0),
+                    todo.get("open_count", 0),
+                )
+            )
+        else:
+            lines.append("待办: 暂无记录")
     lines.append(
         "窗口: {0}（{1}）".format(
             view.get("window") or "", view.get("timezone") or ""

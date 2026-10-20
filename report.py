@@ -16,17 +16,68 @@ from .collectors import (
     cfg_get,
     cfg_int,
     collect_bot_info,
+    connection_test,
     memory_stat,
     now_in_timezone,
     swap_stat,
 )
 from .report_store import ReportStore
-from .report_view import VALID_SECTIONS, DailyReportBuilder, build_report_text
+from .report_view import (
+    DEFAULT_SECTIONS,
+    VALID_SECTIONS,
+    DailyReportBuilder,
+    build_report_text,
+)
 from .sampler import read_message_stats_total
 from .state import StateStore
 from .version_resolver import resolve_astrbot_version
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
+
+
+def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
+    """Return separate CPU and memory top lists from one process snapshot."""
+
+    procs: list[psutil.Process] = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            proc.cpu_percent(None)
+            procs.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    # The first call only seeds the per-process CPU baseline; a short gap is
+    # enough for a five-minute sampling interval.
+    time.sleep(0.5)
+    items: list[dict[str, Any]] = []
+    for proc in procs:
+        try:
+            info = proc.info
+            pid = int(info.get("pid") or 0)
+            name = str(info.get("name") or f"pid {pid}")[:80]
+            cpu = float(proc.cpu_percent(None) or 0.0)
+            mem_mb = float(proc.memory_info().rss or 0) / 1048576.0
+            items.append(
+                {"pid": pid, "name": name, "cpu": cpu, "mem_mb": mem_mb}
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if not items:
+        return {}
+
+    def ranked(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {"rank": index + 1, **item}
+            for index, item in enumerate(values[:top_n])
+        ]
+
+    return {
+        "cpu": ranked(
+            sorted(items, key=lambda item: item["cpu"], reverse=True)
+        ),
+        "mem": ranked(
+            sorted(items, key=lambda item: item["mem_mb"], reverse=True)
+        ),
+    }
 
 
 class ReportCollector:
@@ -67,6 +118,8 @@ class ReportCollector:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_resource = 0.0
+        self._last_website = 0.0
+        self._last_process = 0.0
         self._last_prune = 0.0
         self._last_snapshot_attempt = 0.0
 
@@ -80,7 +133,8 @@ class ReportCollector:
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info(
-            "日报数据底座已启动：资源采样 %ss，资源保留 %s 天，事件保留 %s 天",
+            "日报数据底座已启动：资源/网站/进程采样 %ss，资源保留 %s 天，"
+            "事件保留 %s 天",
             self.resource_interval,
             self.retention_days,
             self.event_retention_days,
@@ -115,6 +169,12 @@ class ReportCollector:
         if now - self._last_resource >= self.resource_interval:
             await self._sample_resource(now)
             self._last_resource = now
+        if now - self._last_website >= self.resource_interval:
+            await self._sample_websites(now)
+            self._last_website = now
+        if now - self._last_process >= self.resource_interval:
+            await self._sample_processes(now)
+            self._last_process = now
         await self._maybe_snapshot()
         if now - self._last_prune >= 86400:
             await asyncio.to_thread(
@@ -122,6 +182,17 @@ class ReportCollector:
                 self.retention_days,
                 self.event_retention_days,
                 int(now),
+                max(
+                    30,
+                    min(
+                        730,
+                        cfg_int(
+                            self.config,
+                            "daily_report.todo_retention_days",
+                            180,
+                        ),
+                    ),
+                ),
             )
             self._last_prune = now
 
@@ -160,6 +231,49 @@ class ReportCollector:
             float(disk_io.get("read_rate") or 0.0),
             float(disk_io.get("write_rate") or 0.0),
         )
+
+    async def _sample_websites(self, now: float) -> None:
+        try:
+            targets = cfg_get(self.config, "display.website_targets", None)
+            results = await connection_test(targets, cache_seconds=0)
+            samples = [
+                {
+                    "name": item.name,
+                    "ok": item.status != "ERR",
+                    "latency_ms": item.delay,
+                    "status": item.status,
+                }
+                for item in results
+            ]
+            await asyncio.to_thread(
+                self.store.add_website_samples, int(now), samples
+            )
+        except Exception:
+            logger.exception("网站延迟采样失败")
+
+    async def _sample_processes(self, now: float) -> None:
+        top_n = max(
+            3,
+            min(
+                10,
+                cfg_int(self.config, "daily_report.process_top_n", 5),
+            ),
+        )
+        try:
+            samples = await asyncio.to_thread(
+                _collect_process_samples, top_n
+            )
+        except Exception:
+            logger.exception("Top 进程采样失败")
+            return
+        for metric, rows in samples.items():
+            if rows:
+                await asyncio.to_thread(
+                    self.store.add_process_samples,
+                    int(now),
+                    metric,
+                    rows,
+                )
 
     async def _maybe_snapshot(self) -> None:
         now = now_in_timezone(self.config)
@@ -214,6 +328,13 @@ class ReportCollector:
             "resource_interval": self.resource_interval,
             "retention_days": self.retention_days,
             "event_retention_days": self.event_retention_days,
+            "process_top_n": max(
+                3,
+                min(
+                    10,
+                    cfg_int(self.config, "daily_report.process_top_n", 5),
+                ),
+            ),
             "store": self.store.stats(),
         }
 
@@ -252,7 +373,7 @@ class DailyReporter:
 
     def _sections(self) -> list[str]:
         raw = cfg_get(
-            self.config, "daily_report.sections", list(VALID_SECTIONS)
+            self.config, "daily_report.sections", list(DEFAULT_SECTIONS)
         )
         if isinstance(raw, str):
             raw = [raw]
@@ -260,7 +381,7 @@ class DailyReporter:
             raw = []
         allowed = {str(item) for item in raw if isinstance(item, str)}
         selected = [item for item in VALID_SECTIONS if item in allowed]
-        return selected or list(VALID_SECTIONS)
+        return selected or list(DEFAULT_SECTIONS)
 
     def _targets(self) -> list[str]:
         raw = cfg_get(self.config, "daily_report.targets", [])

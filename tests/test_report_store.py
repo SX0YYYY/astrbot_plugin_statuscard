@@ -58,7 +58,12 @@ def test_report_store_roundtrip(tmp_path: Path) -> None:
     assert snapshot is not None and snapshot["friends"] == 100
 
     stats = store.stats()
-    assert stats == {"resources": 1, "snapshots": 1, "events": 1}
+    assert stats["resources"] == 1
+    assert stats["snapshots"] == 1
+    assert stats["events"] == 1
+    assert stats["websites"] == 0
+    assert stats["processes"] == 0
+    assert stats["todos"] == 0
 
     if os.name == "posix":
         assert (tmp_path / "report.db").stat().st_mode & 0o777 == 0o600
@@ -93,3 +98,99 @@ def test_report_store_latest_run(tmp_path: Path) -> None:
     assert latest["ok"] is False
     assert latest["detail"] == "send failed"
     assert store.latest_report_run("2026-10-19") is None
+
+
+def test_report_store_website_and_process_samples(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    start = 1_700_000_000
+    assert store.add_website_samples(
+        start,
+        [
+            {"name": "Baidu", "ok": True, "latency_ms": 120.5, "status": "200"},
+            {"name": "Baidu", "ok": False, "latency_ms": 3000.0, "status": "ERR"},
+        ],
+    )
+    rows = store.list_website_samples(start, start + 1)
+    assert len(rows) == 2
+    assert rows[0]["name"] == "Baidu"
+    assert rows[0]["ok"] == 1
+    assert rows[1]["ok"] == 0
+    assert store.first_sample_ts("website_samples") == start
+
+    assert store.add_process_samples(
+        start,
+        "cpu",
+        [
+            {"rank": 1, "name": "python", "pid": 10, "cpu": 55.5, "mem_mb": 200.0},
+            {"rank": 2, "name": "nginx", "pid": 20, "cpu": 10.0, "mem_mb": 50.0},
+        ],
+    )
+    assert store.add_process_samples(
+        start,
+        "mem",
+        [
+            {"rank": 1, "name": "python", "pid": 10, "cpu": 55.5, "mem_mb": 200.0},
+        ],
+    )
+    cpu_rows = store.list_process_samples(start, start + 1, "cpu")
+    mem_rows = store.list_process_samples(start, start + 1, "mem")
+    assert [item["name"] for item in cpu_rows] == ["python", "nginx"]
+    assert len(mem_rows) == 1
+    assert store.first_sample_ts("process_samples") == start
+
+
+def test_report_store_todo_lifecycle(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    start = 1_700_000_000
+    day = "2026-10-20"
+
+    todo_id = store.add_todo("检查备份", start, day)
+    assert todo_id == 1
+    assert store.get_todo(todo_id)["status"] == "pending"
+    assert len(store.list_todos()) == 1
+    snapshot = store.todos_snapshot(day, start + 86400)
+    assert len(snapshot["created"]) == 1
+    assert len(snapshot["open"]) == 1
+
+    assert store.complete_todo(todo_id, start + 3600, day) is True
+    assert store.complete_todo(todo_id, start + 3600, day) is False
+    snapshot = store.todos_snapshot(day, start + 86400)
+    assert len(snapshot["completed"]) == 1
+    assert snapshot["open"] == []
+
+    # Completed after the reporting window: still open at yesterday 24:00.
+    todo2 = store.add_todo("次日完成", start, day)
+    assert store.complete_todo(todo2, start + 86400 + 60, "2026-10-21")
+    snapshot = store.todos_snapshot(day, start + 86400)
+    assert [item["id"] for item in snapshot["open"]] == [todo2]
+
+    assert store.delete_todo(todo2) is True
+    assert store.delete_todo(todo2) is False
+    assert store.stats()["todos"] == 1
+
+
+def test_report_store_prunes_extended_tables(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    now = 1_000_000_000
+    old = now - 100 * 86400
+    store.add_website_samples(
+        old,
+        [{"name": "x", "ok": True, "latency_ms": 1.0, "status": "200"}],
+    )
+    store.add_process_samples(
+        old,
+        "cpu",
+        [{"rank": 1, "name": "x", "pid": 1, "cpu": 1.0, "mem_mb": 1.0}],
+    )
+    done_id = store.add_todo("old done", old, "2020-01-01")
+    store.complete_todo(done_id, old, "2020-01-01")
+    open_id = store.add_todo("old open", old, "2020-01-01")
+
+    store.prune(
+        resource_days=7, event_days=30, now=now, todo_days=30
+    )
+
+    assert store.list_website_samples(0, now + 1) == []
+    assert store.list_process_samples(0, now + 1, "cpu") == []
+    assert store.get_todo(done_id) is None
+    assert store.get_todo(open_id) is not None

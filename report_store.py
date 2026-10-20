@@ -10,7 +10,7 @@ from typing import Any
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class ReportStore:
@@ -95,7 +95,51 @@ class ReportStore:
                     ok     INTEGER NOT NULL,
                     detail TEXT
                 );
-                PRAGMA user_version = 1;
+
+                CREATE TABLE IF NOT EXISTS website_samples (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts         INTEGER NOT NULL,
+                    name       TEXT NOT NULL,
+                    ok         INTEGER NOT NULL,
+                    latency_ms REAL,
+                    status     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_website_ts
+                    ON website_samples(ts);
+                CREATE INDEX IF NOT EXISTS idx_website_name_ts
+                    ON website_samples(name, ts);
+
+                CREATE TABLE IF NOT EXISTS process_samples (
+                    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts     INTEGER NOT NULL,
+                    metric TEXT NOT NULL,
+                    rank   INTEGER NOT NULL,
+                    name   TEXT NOT NULL,
+                    pid    INTEGER,
+                    cpu    REAL,
+                    mem_mb REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_process_ts
+                    ON process_samples(ts);
+                CREATE INDEX IF NOT EXISTS idx_process_metric_ts
+                    ON process_samples(metric, ts);
+
+                CREATE TABLE IF NOT EXISTS todos (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content     TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    created_ts  INTEGER NOT NULL,
+                    created_day TEXT NOT NULL,
+                    done_ts     INTEGER,
+                    done_day    TEXT,
+                    source      TEXT NOT NULL DEFAULT 'command'
+                );
+                CREATE INDEX IF NOT EXISTS idx_todos_status
+                    ON todos(status);
+                CREATE INDEX IF NOT EXISTS idx_todos_day
+                    ON todos(created_day, done_day);
+
+                PRAGMA user_version = 2;
                 """
             )
             con.commit()
@@ -120,6 +164,54 @@ class ReportStore:
                         pass
                 logger.exception("日报数据库写入失败")
                 return False
+            finally:
+                if con is not None:
+                    con.close()
+
+    def _write_many(
+        self, sql: str, rows: list[tuple[Any, ...]]
+    ) -> bool:
+        if not self.available or not rows:
+            return False
+        con: sqlite3.Connection | None = None
+        with self._lock:
+            try:
+                con = self._connect()
+                con.executemany(sql, rows)
+                con.commit()
+                return True
+            except Exception:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
+                logger.exception("日报数据库批量写入失败")
+                return False
+            finally:
+                if con is not None:
+                    con.close()
+
+    def _write_returning_id(
+        self, sql: str, params: tuple[Any, ...] = ()
+    ) -> int | None:
+        if not self.available:
+            return None
+        con: sqlite3.Connection | None = None
+        with self._lock:
+            try:
+                con = self._connect()
+                cur = con.execute(sql, params)
+                con.commit()
+                return int(cur.lastrowid or 0)
+            except Exception:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
+                logger.exception("日报数据库写入失败")
+                return None
             finally:
                 if con is not None:
                     con.close()
@@ -243,6 +335,111 @@ class ReportStore:
             ),
         )
 
+    def add_website_samples(
+        self, ts: int, samples: list[dict[str, Any]]
+    ) -> bool:
+        rows = []
+        for item in samples:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            latency = item.get("latency_ms")
+            try:
+                latency = round(float(latency), 1) if latency is not None else None
+            except (TypeError, ValueError):
+                latency = None
+            rows.append(
+                (
+                    int(ts),
+                    name[:120],
+                    1 if item.get("ok") else 0,
+                    latency,
+                    str(item.get("status") or "")[:20],
+                )
+            )
+        return self._write_many(
+            """
+            INSERT INTO website_samples (ts, name, ok, latency_ms, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    def add_process_samples(
+        self, ts: int, metric: str, samples: list[dict[str, Any]]
+    ) -> bool:
+        rows = []
+        for item in samples:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            rows.append(
+                (
+                    int(ts),
+                    str(metric),
+                    int(item.get("rank") or 0),
+                    name[:120],
+                    int(item.get("pid") or 0),
+                    float(item.get("cpu") or 0.0),
+                    float(item.get("mem_mb") or 0.0),
+                )
+            )
+        return self._write_many(
+            """
+            INSERT INTO process_samples
+                (ts, metric, rank, name, pid, cpu, mem_mb)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    def add_todo(
+        self,
+        content: str,
+        created_ts: int,
+        created_day: str,
+        source: str = "command",
+    ) -> int | None:
+        text = str(content or "").strip()
+        if not text:
+            return None
+        todo_id = self._write_returning_id(
+            """
+            INSERT INTO todos
+                (content, status, created_ts, created_day, source)
+            VALUES (?, 'pending', ?, ?, ?)
+            """,
+            (
+                text[:500],
+                int(created_ts),
+                str(created_day),
+                str(source or "command")[:20],
+            ),
+        )
+        return todo_id or None
+
+    def complete_todo(
+        self, todo_id: int, done_ts: int, done_day: str
+    ) -> bool:
+        rows = self._query(
+            "SELECT status FROM todos WHERE id = ?", (int(todo_id),)
+        )
+        if not rows or str(rows[0][0]) != "pending":
+            return False
+        return self._write(
+            """
+            UPDATE todos
+            SET status = 'done', done_ts = ?, done_day = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (int(done_ts), str(done_day), int(todo_id)),
+        )
+
+    def delete_todo(self, todo_id: int) -> bool:
+        if not self.get_todo(int(todo_id)):
+            return False
+        return self._write("DELETE FROM todos WHERE id = ?", (int(todo_id),))
+
     def add_report_run(
         self, day: str, ts: int, ok: bool, detail: str = ""
     ) -> bool:
@@ -279,24 +476,138 @@ class ReportStore:
         resource_days: int = 30,
         event_days: int = 90,
         now: int | None = None,
+        todo_days: int = 180,
     ) -> None:
         now = int(now if now is not None else time.time())
+        resource_cutoff = now - max(1, resource_days) * 86400
+        event_cutoff = now - max(1, event_days) * 86400
         self._write(
             "DELETE FROM resource_samples WHERE ts < ?",
-            (now - max(1, resource_days) * 86400,),
+            (resource_cutoff,),
+        )
+        self._write(
+            "DELETE FROM website_samples WHERE ts < ?",
+            (resource_cutoff,),
+        )
+        self._write(
+            "DELETE FROM process_samples WHERE ts < ?",
+            (resource_cutoff,),
         )
         self._write(
             "DELETE FROM events WHERE ts < ?",
-            (now - max(1, event_days) * 86400,),
+            (event_cutoff,),
         )
         self._write(
             "DELETE FROM report_runs WHERE ts < ?",
-            (now - max(1, event_days) * 86400,),
+            (event_cutoff,),
         )
+        if todo_days > 0:
+            self._write(
+                """
+                DELETE FROM todos
+                WHERE status = 'done' AND done_ts IS NOT NULL
+                  AND done_ts < ?
+                """,
+                (now - todo_days * 86400,),
+            )
 
     # ------------------------------------------------------------------
     # reads
     # ------------------------------------------------------------------
+
+    def get_todo(self, todo_id: int) -> dict[str, Any] | None:
+        rows = self._query(
+            """
+            SELECT id, content, status, created_ts, created_day,
+                   done_ts, done_day, source
+            FROM todos WHERE id = ?
+            """,
+            (int(todo_id),),
+        )
+        if not rows:
+            return None
+        keys = (
+            "id",
+            "content",
+            "status",
+            "created_ts",
+            "created_day",
+            "done_ts",
+            "done_day",
+            "source",
+        )
+        return dict(zip(keys, rows[0]))
+
+    def list_todos(
+        self, include_done: bool = False, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT id, content, status, created_ts, created_day,
+                   done_ts, done_day, source
+            FROM todos
+        """
+        params: tuple[Any, ...] = ()
+        if not include_done:
+            sql += " WHERE status = 'pending'"
+        sql += " ORDER BY status = 'done', created_ts ASC, id ASC LIMIT ?"
+        params = (max(1, min(200, limit)),)
+        rows = self._query(sql, params)
+        keys = (
+            "id",
+            "content",
+            "status",
+            "created_ts",
+            "created_day",
+            "done_ts",
+            "done_day",
+            "source",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def todos_snapshot(
+        self, day: str, end_ts: int
+    ) -> dict[str, list[dict[str, Any]]]:
+        keys = (
+            "id",
+            "content",
+            "status",
+            "created_ts",
+            "created_day",
+            "done_ts",
+            "done_day",
+        )
+        created = self._query(
+            """
+            SELECT id, content, status, created_ts, created_day,
+                   done_ts, done_day
+            FROM todos WHERE created_day = ? ORDER BY id ASC
+            """,
+            (day,),
+        )
+        completed = self._query(
+            """
+            SELECT id, content, status, created_ts, created_day,
+                   done_ts, done_day
+            FROM todos WHERE done_day = ? ORDER BY done_ts ASC, id ASC
+            """,
+            (day,),
+        )
+        opened = self._query(
+            """
+            SELECT id, content, status, created_ts, created_day,
+                   done_ts, done_day
+            FROM todos
+            WHERE created_ts < ?
+              AND (done_ts IS NULL OR done_ts >= ?)
+            ORDER BY created_ts ASC, id ASC
+            """,
+            (int(end_ts), int(end_ts)),
+        )
+        return {
+            "created": [dict(zip(keys, row)) for row in created],
+            "completed": [dict(zip(keys, row)) for row in completed],
+            "open": [dict(zip(keys, row)) for row in opened],
+        }
 
     def snapshot_complete(self, day: str) -> bool:
         rows = self._query(
@@ -368,6 +679,55 @@ class ReportStore:
         )
         return [dict(zip(keys, row)) for row in rows]
 
+    def list_website_samples(
+        self, start_ts: int, end_ts: int, limit: int = 100000
+    ) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT ts, name, ok, latency_ms, status
+            FROM website_samples
+            WHERE ts >= ? AND ts < ?
+            ORDER BY ts ASC LIMIT ?
+            """,
+            (
+                int(start_ts),
+                int(end_ts),
+                max(1, min(200000, limit)),
+            ),
+        )
+        keys = ("ts", "name", "ok", "latency_ms", "status")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def list_process_samples(
+        self,
+        start_ts: int,
+        end_ts: int,
+        metric: str,
+        limit: int = 100000,
+    ) -> list[dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT ts, metric, rank, name, pid, cpu, mem_mb
+            FROM process_samples
+            WHERE metric = ? AND ts >= ? AND ts < ?
+            ORDER BY ts ASC, rank ASC LIMIT ?
+            """,
+            (
+                str(metric),
+                int(start_ts),
+                int(end_ts),
+                max(1, min(200000, limit)),
+            ),
+        )
+        keys = ("ts", "metric", "rank", "name", "pid", "cpu", "mem_mb")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def first_sample_ts(self, table: str) -> int | None:
+        if table not in {"website_samples", "process_samples"}:
+            return None
+        rows = self._query(f"SELECT MIN(ts) FROM {table}")
+        return int(rows[0][0]) if rows and rows[0][0] is not None else None
+
     def list_events(self, day: str, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._query(
             """
@@ -401,12 +761,25 @@ class ReportStore:
 
     def stats(self) -> dict[str, int]:
         if not self.available:
-            return {"resources": 0, "snapshots": 0, "events": 0}
+            return {
+                "resources": 0,
+                "snapshots": 0,
+                "events": 0,
+                "websites": 0,
+                "processes": 0,
+                "todos": 0,
+            }
         resources = self._query("SELECT COUNT(*) FROM resource_samples")
         snapshots = self._query("SELECT COUNT(*) FROM daily_snapshots")
         events = self._query("SELECT COUNT(*) FROM events")
+        websites = self._query("SELECT COUNT(*) FROM website_samples")
+        processes = self._query("SELECT COUNT(*) FROM process_samples")
+        todos = self._query("SELECT COUNT(*) FROM todos")
         return {
             "resources": int(resources[0][0]) if resources else 0,
             "snapshots": int(snapshots[0][0]) if snapshots else 0,
             "events": int(events[0][0]) if events else 0,
+            "websites": int(websites[0][0]) if websites else 0,
+            "processes": int(processes[0][0]) if processes else 0,
+            "todos": int(todos[0][0]) if todos else 0,
         }
