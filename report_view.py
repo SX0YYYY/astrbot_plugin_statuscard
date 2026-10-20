@@ -629,6 +629,21 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _qq_section(self, day: date, history_days: int) -> dict[str, Any]:
+        if "qq_stats" in self.redact:
+            return {
+                "available": False,
+                "empty_reason": "已按脱敏配置隐藏 QQ 统计",
+                "days": [],
+                "labels": [],
+                "yesterday": {},
+                "previous": {},
+                "reset_days": [],
+                "sent_available": False,
+                "snapshot_note": None,
+                "recv_note": None,
+                "charts": {},
+                "note": "",
+            }
         snapshots = {
             str(item.get("day")): item
             for item in self.store.list_snapshots(history_days + 2)

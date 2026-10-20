@@ -28,6 +28,7 @@ from .collectors import (
     swap_stat,
 )
 from .state import StateStore
+from .utils import retry_delay
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
@@ -320,11 +321,15 @@ class AlertEngine:
         if value >= threshold:
             st.pop("pending_recovery", None)
             st.pop("recovery_attempt", None)
+            st.pop("recovery_next_attempt", None)
+            st.pop("recovery_retry_count", None)
             count += 1
             st["count"] = count
             if not alerting and count >= self.sustain:
-                last_attempt = float(st.get("last_attempt") or 0)
-                if now - max(last_attempt, last_sent) >= self.cooldown:
+                next_attempt = float(st.get("next_attempt") or 0)
+                if now >= next_attempt and (
+                    not last_sent or now - last_sent >= self.cooldown
+                ):
                     text = (
                         f"⚠️ 系统告警 · {name}\n"
                         "──────────────\n"
@@ -341,6 +346,8 @@ class AlertEngine:
                         st["alert_since"] = now
                         st["count"] = 0
                         st["last_sent"] = now
+                        st["retry_count"] = 0
+                        st["next_attempt"] = 0
                         self._record_event(
                             "resource",
                             name,
@@ -348,7 +355,9 @@ class AlertEngine:
                             "alert",
                         )
                     else:
-                        # Retry after the cooldown instead of on every sample.
+                        retry_count = int(st.get("retry_count") or 0) + 1
+                        st["retry_count"] = retry_count
+                        st["next_attempt"] = now + retry_delay(retry_count)
                         st["count"] = self.sustain
                         self._record_event(
                             "resource",
@@ -360,15 +369,28 @@ class AlertEngine:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
-                last_attempt = float(st.get("recovery_attempt") or 0)
-                if now - last_attempt >= self.cooldown:
+                next_recovery = float(
+                    st.get("recovery_next_attempt") or 0
+                )
+                if now >= next_recovery:
                     sent = await self._send(str(pending_text))
-                    st["recovery_attempt"] = now
                     if sent:
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
+                        st.pop("recovery_next_attempt", None)
+                        st.pop("recovery_retry_count", None)
+                    else:
+                        retry_count = int(
+                            st.get("recovery_retry_count") or 0
+                        ) + 1
+                        st["recovery_retry_count"] = retry_count
+                        st["recovery_next_attempt"] = (
+                            now + retry_delay(retry_count)
+                        )
             if alerting:
                 st["alerting"] = False
+                st["retry_count"] = 0
+                st["next_attempt"] = 0
                 duration = now - float(st.get("alert_since") or now)
                 st["alert_since"] = 0
                 if self.recover_notify:
@@ -382,7 +404,8 @@ class AlertEngine:
                     sent = await self._send(text)
                     if not sent:
                         st["pending_recovery"] = text
-                        st["recovery_attempt"] = now
+                        st["recovery_retry_count"] = 1
+                        st["recovery_next_attempt"] = now + retry_delay(1)
                     else:
                         self._record_event(
                             "resource",
@@ -417,15 +440,25 @@ class AlertEngine:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
-                last_attempt = float(st.get("recovery_attempt") or 0)
-                if now - last_attempt >= self.cooldown:
+                next_recovery = float(
+                    st.get("recovery_next_attempt") or 0
+                )
+                if now >= next_recovery:
                     sent = await self._send(str(pending_text))
-                    st["recovery_attempt"] = now
                     if sent:
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
+                        st.pop("recovery_next_attempt", None)
+                        st.pop("recovery_retry_count", None)
                         logger.info("Bot 连接恢复通知补发成功")
                     else:
+                        retry_count = int(
+                            st.get("recovery_retry_count") or 0
+                        ) + 1
+                        st["recovery_retry_count"] = retry_count
+                        st["recovery_next_attempt"] = (
+                            now + retry_delay(retry_count)
+                        )
                         logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
             if st.get("alerting") or st.get("pending_alert_text"):
                 duration = now - float(st.get("since") or now)
@@ -462,7 +495,8 @@ class AlertEngine:
                         )
                     else:
                         st["pending_recovery"] = text
-                        st["recovery_attempt"] = now
+                        st["recovery_retry_count"] = 1
+                        st["recovery_next_attempt"] = now + retry_delay(1)
                         logger.warning(
                             "Bot 连接恢复通知发送失败，已排队重试"
                         )
@@ -470,6 +504,8 @@ class AlertEngine:
 
         st.pop("pending_recovery", None)
         st.pop("recovery_attempt", None)
+        st.pop("recovery_next_attempt", None)
+        st.pop("recovery_retry_count", None)
         count += 1
         st["count"] = count
         if not st.get("alerting") and count >= self.sustain:
@@ -585,7 +621,17 @@ class AlertEngine:
                 if current_time_text != time_text or current_tz_name != tz_name:
                     # 最后一分钟内改了时间/时区，重新计算，不按旧目标发送。
                     continue
-                await self._send_daily_summary()
+                if not await self._send_daily_summary():
+                    for attempt in range(3):
+                        await asyncio.sleep(600)
+                        if not self._running:
+                            break
+                        if await self._send_daily_summary():
+                            break
+                        logger.warning(
+                            "每日定时状态图重试失败（第 %d 次）",
+                            attempt + 1,
+                        )
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -593,10 +639,10 @@ class AlertEngine:
                 logger.exception("每日定时状态图任务失败")
                 await asyncio.sleep(60)
 
-    async def _send_daily_summary(self) -> None:
+    async def _send_daily_summary(self) -> bool:
         if not self.targets:
             logger.warning("每日定时状态图已启用，但告警目标为空，跳过发送")
-            return
+            return True
         with_image = cfg_bool(
             self.config, "alerts.daily_summary.with_image", True
         )
@@ -610,13 +656,14 @@ class AlertEngine:
                 ok = await self.plugin.send_image(self.targets, image_url)
                 if ok:
                     logger.info("每日定时状态图已发送（图片）：%s", self.targets)
-                    return
+                    return True
         summary = await self.plugin.build_summary_text()
         ok = await self._send("📅 每日定时状态图\n──────────────\n" + summary)
         if ok:
             logger.info("每日定时状态图已发送（文字）：%s", self.targets)
-        else:
-            logger.warning("每日定时状态图发送失败：%s", self.targets)
+            return True
+        logger.warning("每日定时状态图发送失败：%s", self.targets)
+        return False
 
     # ------------------------------------------------------------------
     # Komari webhook

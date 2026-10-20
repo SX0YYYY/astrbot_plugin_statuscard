@@ -28,7 +28,11 @@ from astrbot_plugin_statuscard.t2i_renderer import (
     _percent_to_color,
     build_default_html,
 )
-from astrbot_plugin_statuscard.utils import is_supported_platform
+from astrbot_plugin_statuscard.utils import (
+    clean_report_sections,
+    is_supported_platform,
+    retry_delay,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -498,3 +502,45 @@ def test_build_default_html_compact_hides_system_info() -> None:
     assert 'class="compact"' in html
     assert "系统信息" not in html
     assert "Linux" not in html
+
+
+def test_clean_report_sections_removes_retired_todo() -> None:
+    assert clean_report_sections(["resource", "todo", "qq"]) == [
+        "resource",
+        "qq",
+    ]
+    assert clean_report_sections(["resource", "qq"]) is None
+    assert clean_report_sections(["todo"]) == []
+    assert clean_report_sections(None) is None
+    assert clean_report_sections("todo") is None
+
+
+def test_retry_delay_short_backoff() -> None:
+    assert retry_delay(1) == 30.0
+    assert retry_delay(2) == 120.0
+    assert retry_delay(3) == 600.0
+    assert retry_delay(99) == 600.0
+
+
+class _FailingPlugin:
+    async def send_text(self, targets: list[str], text: str) -> bool:
+        return False
+
+
+def test_alert_failure_uses_short_retry(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.json")
+    config = {
+        "alerts": {
+            "enabled": True,
+            "targets": ["123456"],
+            "sustain_samples": 1,
+            "cooldown_seconds": 1800,
+        }
+    }
+    engine = AlertEngine(_FailingPlugin(), state, config)
+    asyncio.run(
+        engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%")
+    )
+    rule = state.data["alerts"]["rules"]["cpu"]
+    assert rule["retry_count"] == 1
+    assert 0 < rule["next_attempt"] - time.time() <= 31

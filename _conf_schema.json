@@ -75,7 +75,7 @@
         "condition": {
           "background_source": "upload"
         },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。聊天中随命令发送的图片仍然优先。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
       }
     }
   },

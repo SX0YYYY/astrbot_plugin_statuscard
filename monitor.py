@@ -12,6 +12,7 @@ import psutil
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
+from .utils import retry_delay
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
@@ -329,6 +330,7 @@ class ServiceMonitor:
         fails = int(st.get("fails") or 0)
         alerting = bool(st.get("alerting"))
         pending = bool(st.get("pending"))
+        last_sent = float(st.get("last_sent") or 0)
         name = str(item.get("name") or item.get("__template_key") or "服务")
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
 
@@ -361,13 +363,17 @@ class ServiceMonitor:
         if not ok:
             st.pop("pending_recovery", None)
             st.pop("recovery_attempt", None)
+            st.pop("recovery_next_attempt", None)
+            st.pop("recovery_retry_count", None)
             fails += 1
             st["fails"] = fails
             st["last_error"] = detail
             st["last_checked"] = now
             if not alerting and fails >= self.fail_threshold:
-                last_attempt = float(st.get("last_attempt") or 0)
-                if now - last_attempt >= self.cooldown:
+                next_attempt = float(st.get("next_attempt") or 0)
+                if now >= next_attempt and (
+                    not last_sent or now - last_sent >= self.cooldown
+                ):
                     text = (
                         f"🔴 服务异常 · {name}\n"
                         "──────────────\n"
@@ -385,12 +391,17 @@ class ServiceMonitor:
                     st["pending"] = not sent
                     if sent:
                         st["last_sent"] = now
+                        st["retry_count"] = 0
+                        st["next_attempt"] = 0
                         self._record_event(name, target_text, detail, "alert")
                     else:
+                        retry_count = int(st.get("retry_count") or 0) + 1
+                        st["retry_count"] = retry_count
+                        st["next_attempt"] = now + retry_delay(retry_count)
                         self._record_event(name, target_text, detail, "failed")
             elif alerting and pending:
-                last_attempt = float(st.get("last_attempt") or 0)
-                if now - last_attempt >= self.cooldown:
+                next_attempt = float(st.get("next_attempt") or 0)
+                if now >= next_attempt:
                     text = (
                         f"🔴 服务异常 · {name}\n"
                         "──────────────\n"
@@ -404,9 +415,15 @@ class ServiceMonitor:
                     if sent:
                         st["pending"] = False
                         st["last_sent"] = now
+                        st["retry_count"] = 0
+                        st["next_attempt"] = 0
                         self._record_event(
                             name, target_text, detail, "alert"
                         )
+                    else:
+                        retry_count = int(st.get("retry_count") or 0) + 1
+                        st["retry_count"] = retry_count
+                        st["next_attempt"] = now + retry_delay(retry_count)
         else:
             st["fails"] = 0
             st["last_checked"] = now
@@ -414,17 +431,30 @@ class ServiceMonitor:
             st["last_error"] = ""
             pending_text = st.get("pending_recovery")
             if pending_text:
-                last_attempt = float(st.get("recovery_attempt") or 0)
-                if now - last_attempt >= self.cooldown:
+                next_recovery = float(
+                    st.get("recovery_next_attempt") or 0
+                )
+                if now >= next_recovery:
                     sent = await self._send(str(pending_text))
-                    st["recovery_attempt"] = now
                     if sent:
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
+                        st.pop("recovery_next_attempt", None)
+                        st.pop("recovery_retry_count", None)
+                    else:
+                        retry_count = int(
+                            st.get("recovery_retry_count") or 0
+                        ) + 1
+                        st["recovery_retry_count"] = retry_count
+                        st["recovery_next_attempt"] = (
+                            now + retry_delay(retry_count)
+                        )
             if alerting:
                 duration = now - float(st.get("since") or now)
                 st["alerting"] = False
                 st["since"] = 0
+                st["retry_count"] = 0
+                st["next_attempt"] = 0
                 if self.recover_notify:
                     extra = "\n（异常告警此前未能送达）" if pending else ""
                     text = (
@@ -438,7 +468,8 @@ class ServiceMonitor:
                     sent = await self._send(text)
                     if not sent:
                         st["pending_recovery"] = text
-                        st["recovery_attempt"] = now
+                        st["recovery_retry_count"] = 1
+                        st["recovery_next_attempt"] = now + retry_delay(1)
                     else:
                         self._record_event(
                             name, target_text, detail, "recovery"

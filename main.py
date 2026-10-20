@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Final
 
 import astrbot.api.message_components as Comp
-import httpx
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
@@ -35,7 +34,8 @@ from .report_store import ReportStore
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html, build_report_html
-from .utils import is_supported_platform
+from .utils import clean_report_sections, is_supported_platform
+from .version import __version__
 
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
@@ -45,7 +45,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.9.0",
+    __version__,
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -55,6 +55,7 @@ class StatusCardPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state = StateStore(self.data_dir / "state.json")
         self._migrate_media_sources()
+        self._migrate_report_sections()
         self.report_store = ReportStore(self.data_dir / "report.db")
         interval = cfg_int(self.config, "alerts.interval_seconds", 60)
         self.sampler = Sampler(
@@ -151,6 +152,36 @@ class StatusCardPlugin(Star):
                 logger.info("已将旧版上传头像/背景迁移为“自定义上传”来源")
             except Exception:
                 logger.exception("写入媒体来源迁移配置失败")
+
+    def _migrate_report_sections(self) -> None:
+        """Remove the retired ``todo`` module from a legacy report config."""
+
+        migration = self.state.setdefault("migration", {})
+        if not isinstance(migration, dict):
+            migration = {}
+            self.state.data["migration"] = migration
+        if migration.get("daily_report_sections_v1"):
+            return
+        section = (
+            self.config.get("daily_report")
+            if isinstance(self.config, dict)
+            else None
+        )
+        if isinstance(section, dict):
+            cleaned = clean_report_sections(section.get("sections"))
+            if cleaned is not None:
+                section["sections"] = cleaned
+                if hasattr(self.config, "save_config"):
+                    try:
+                        self.config.save_config()
+                        logger.info(
+                            "已从日报内容中移除旧待办模块：%s", cleaned
+                        )
+                    except Exception:
+                        logger.exception("保存日报内容迁移失败")
+                        return
+        migration["daily_report_sections_v1"] = True
+        self.state.save()
 
     async def initialize(self):
         self.sampler.start()
@@ -316,7 +347,7 @@ class StatusCardPlugin(Star):
             config=self.config,
         )
         collect_ms = (time.perf_counter() - collect_started) * 1000
-        background = await self._resolve_background(event)
+        background = await self._resolve_background()
         avatar = await fetch_avatar_bytes(
             collected["view"]["bot"], self.config, data_dir=self.data_dir
         )
@@ -430,53 +461,34 @@ class StatusCardPlugin(Star):
         )
         return result
 
-    async def _resolve_background(self, event: AstrMessageEvent | None):
+    async def _resolve_background(self):
+        source = effective_media_source(
+            self.config,
+            "background.background_source",
+            "background.bg_upload_files",
+            self.data_dir,
+        )
         bg_bytes = None
-        if event is not None:
-            try:
-                for seg in event.get_messages():
-                    if isinstance(seg, Comp.Image):
-                        file = getattr(seg, "file", None) or ""
-                        if isinstance(file, str) and file.startswith(
-                            ("http://", "https://")
-                        ):
-                            async with httpx.AsyncClient(
-                                follow_redirects=True, timeout=5
-                            ) as cli:
-                                resp = await cli.get(file)
-                                resp.raise_for_status()
-                                bg_bytes = resp.content
-                                break
-            except Exception:
-                bg_bytes = None
-
-        if bg_bytes is None:
-            source = effective_media_source(
-                self.config,
-                "background.background_source",
-                "background.bg_upload_files",
-                self.data_dir,
+        if source == "upload":
+            uploaded = uploaded_file_path(
+                self.config, "background.bg_upload_files", self.data_dir
             )
-            if source == "upload":
-                uploaded = uploaded_file_path(
-                    self.config, "background.bg_upload_files", self.data_dir
-                )
-                if uploaded is not None:
-                    try:
-                        if uploaded.stat().st_size > MAX_IMAGE_BYTES:
-                            logger.warning(
-                                "上传背景超过 10 MB，已跳过: %s", uploaded
-                            )
-                        else:
-                            bg_bytes = uploaded.read_bytes() or None
-                    except Exception as exc:
+            if uploaded is not None:
+                try:
+                    if uploaded.stat().st_size > MAX_IMAGE_BYTES:
                         logger.warning(
-                            "读取上传背景失败 %s: %s", uploaded, exc
+                            "上传背景超过 10 MB，已跳过: %s", uploaded
                         )
-                if bg_bytes is None:
+                    else:
+                        bg_bytes = uploaded.read_bytes() or None
+                except Exception as exc:
                     logger.warning(
-                        "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
+                        "读取上传背景失败 %s: %s", uploaded, exc
                     )
+            if bg_bytes is None:
+                logger.warning(
+                    "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
+                )
 
         return await resolve_background(prefer_bytes=bg_bytes)
 
@@ -614,9 +626,6 @@ class StatusCardPlugin(Star):
     @filter.command("测试通知")
     async def cmd_alert_test(self, event: AstrMessageEvent):
         event.should_call_llm(False)
-        if not cfg_bool(self.config, "alerts.enabled", False):
-            yield event.plain_result(tr(self.config, "alert_disabled"))
-            return
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
             tr(self.config, "test_sent")
@@ -669,7 +678,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.9.0")
+        lines.append(f"插件: v{__version__}")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 

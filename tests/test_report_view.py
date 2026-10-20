@@ -350,6 +350,38 @@ def test_daily_reporter_defaults_for_old_config(tmp_path: Path) -> None:
     assert reporter._time_text() == "21:00"
 
 
+def test_qq_section_respects_qq_stats_redact(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    config = {
+        "display": {"timezone": "Asia/Shanghai", "redact": ["qq_stats"]},
+    }
+    view = DailyReportBuilder(store, config).build(
+        day="2026-10-20", sections=["qq"], meta={}
+    )
+    assert view["qq"]["available"] is False
+    assert "已按脱敏配置隐藏" in view["qq"]["empty_reason"]
+    assert view["qq"]["yesterday"] == {}
+
+
+def test_daily_reporter_schedules_retry_after_failure(
+    tmp_path: Path,
+) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    plugin = _FakePlugin()
+    plugin.image_ok = False
+    plugin.text_ok = False
+    reporter = DailyReporter(plugin, store, _report_config())
+    reporter._build_view = lambda day=None: _sample_report_view()
+
+    asyncio.run(reporter._send_scheduled())
+
+    assert reporter._pending_retry is not None
+    assert reporter._pending_retry_count == 1
+    latest = store.latest_report_run("2026-10-20")
+    assert latest is not None
+    assert latest["ok"] is False
+
+
 def test_website_section_aggregates_latency(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     day = datetime(2026, 10, 20, 0, 0, tzinfo=TZ)

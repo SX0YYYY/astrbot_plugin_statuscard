@@ -1,5 +1,5 @@
-![Version](https://img.shields.io/badge/version-2.9.0-blue)
-![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
+![Version](https://img.shields.io/badge/version-2.9.1-blue)
+![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 ![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
@@ -33,7 +33,7 @@
 - **事件**：最近 1 / 7 / 30 天的告警、恢复和推送失败记录
 - **日报**：昨日日报摘要、关键数据和发送记录
 
-页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API（4.29 已验证）；旧版 AstrBot 不支持时会跳过注册，QQ 命令仍可正常使用。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
+页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API；插件要求 AstrBot 4.29 及以上。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
 
 ## 国际化与主题
 
@@ -59,14 +59,14 @@
 
 ### 环境要求
 
-- AstrBot `>=4.26.7,<5`（已在 4.29.0 验证）
+- AstrBot `>=4.29,<5`（已在 4.29.0 验证）
 - Python 3.10+
 - 一个可用的 QQ / OneBot 连接（推荐 NapCat）
 - 能访问 AstrBot 配置的 T2I 渲染服务（默认远程）
 
 ### 安装步骤
 
-1. 把 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下，或在插件市场安装。
+1. 把 `astrbot_plugin_statuscard` 目录放到 AstrBot 的 `data/plugins/` 下（当前仓库私有，暂不支持插件市场安装）。
 2. 安装依赖：`pip install -r requirements.txt`。部分 AstrBot 版本会自动处理插件依赖。
 3. 重启 AstrBot，或在 WebUI 的插件管理页重载插件。
 4. 确认 AstrBot 的 T2I 渲染服务可用（默认即可）。
@@ -117,7 +117,6 @@
   - `默认（内置背景）`：使用插件自带背景
   - `自定义上传`：显示上传按钮，上传一张图片即可
 - **上传背景图片**（仅自定义上传时显示）：支持 png / jpg / webp / gif，单张不超过 10 MB，取列表第一张
-- 聊天中随命令一起发送的图片仍然优先于这里设置的背景
 
 ### 状态卡显示
 
@@ -401,7 +400,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `51 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
+当前测试预期为 `56 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
 
 ## 更新日志
 

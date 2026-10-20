@@ -340,6 +340,8 @@ class DailyReporter:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_sent_day: str | None = None
+        self._pending_retry: tuple[str, float] | None = None
+        self._pending_retry_count = 0
 
     # ------------------------------------------------------------------
     # configuration helpers (read per call so edits apply after reload)
@@ -450,6 +452,17 @@ class DailyReporter:
         while self._running:
             try:
                 if not self._enabled():
+                    self._pending_retry = None
+                    self._pending_retry_count = 0
+                    await asyncio.sleep(60)
+                    continue
+                if self._pending_retry:
+                    _day, due = self._pending_retry
+                    if time.time() < due:
+                        await asyncio.sleep(60)
+                        continue
+                    self._pending_retry = None
+                    await self._send_scheduled()
                     await asyncio.sleep(60)
                     continue
                 time_text = self._time_text()
@@ -518,6 +531,28 @@ class DailyReporter:
     # sending
     # ------------------------------------------------------------------
 
+    def _schedule_retry(self, day: str) -> None:
+        self._pending_retry_count += 1
+        if self._pending_retry_count > 3:
+            self._pending_retry = None
+            self._pending_retry_count = 0
+            logger.warning(
+                "日报 %s 连续发送失败 3 次，停止重试", day or "--"
+            )
+            return
+        delay = 600 * self._pending_retry_count
+        self._pending_retry = (day, time.time() + delay)
+        logger.warning(
+            "日报 %s 发送失败，%d 分钟后重试（第 %d 次）",
+            day or "--",
+            delay // 60,
+            self._pending_retry_count,
+        )
+
+    def _clear_retry(self) -> None:
+        self._pending_retry = None
+        self._pending_retry_count = 0
+
     async def _send_scheduled(self) -> None:
         targets = self._targets()
         try:
@@ -525,14 +560,17 @@ class DailyReporter:
         except Exception:
             logger.exception("日报数据聚合失败")
             self._record("", False, "build failed")
+            self._schedule_retry("")
             return
         day = str(view.get("day") or "")
         if not targets:
             logger.warning("日报推送目标为空，跳过发送")
             self._record(day, False, "targets empty")
+            self._schedule_retry(day)
             return
         if self._last_sent_day == day:
             logger.info("日报 %s 已发送过，跳过重复发送", day)
+            self._clear_retry()
             return
         if self._with_image():
             image_url = None
@@ -543,15 +581,18 @@ class DailyReporter:
             if image_url and await self.plugin.send_image(targets, image_url):
                 self._last_sent_day = day
                 self._record(day, True, "image")
+                self._clear_retry()
                 logger.info("日报已发送（图片）：%s", targets)
                 return
         if await self.plugin.send_text(targets, build_report_text(view)):
             self._last_sent_day = day
             self._record(day, True, "text")
+            self._clear_retry()
             logger.info("日报已发送（文字）：%s", targets)
         else:
             self._record(day, False, "send failed")
             logger.warning("日报发送失败：%s", targets)
+            self._schedule_retry(day)
 
     async def preview(self, target_umo: str | None) -> tuple[bool, str]:
         if not target_umo:

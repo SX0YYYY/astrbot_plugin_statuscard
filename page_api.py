@@ -25,12 +25,13 @@ from .collectors import (
     swap_stat,
 )
 from .report_view import DailyReportBuilder
+from .version import __version__
 from .version_resolver import resolve_astrbot_version
 
 logger = logging.getLogger("astrbot_plugin_statuscard")
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
-PLUGIN_VERSION = "2.9.0"
+PLUGIN_VERSION = __version__
 
 RANGE_SECONDS = {
     "24h": 86400,
