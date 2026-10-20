@@ -257,6 +257,15 @@ def _report_config() -> dict:
     }
 
 
+def test_resource_empty_message_mentions_start_day(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    store.add_resource(1_700_000_000, cpu=1.0)
+    view = _builder(tmp_path, store).build(
+        day="2026-10-19", history_days=7, sections=["resource"]
+    )
+    assert "2026-10-19" in view["resources"]["empty_reason"]
+
+
 def test_report_text_contains_key_figures() -> None:
     text = build_report_text(_sample_report_view())
     assert "系统日报 2026-10-20" in text

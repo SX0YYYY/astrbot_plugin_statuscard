@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![Version](https://img.shields.io/badge/version-2.5.1-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -368,7 +368,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `39 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
+当前测试预期为 `40 passed`。GitHub Actions 工作流见 `.github/workflows/ci.yml`，在 push 和 pull request 时安装依赖并运行同一套测试。
 
 ## 更新日志
 

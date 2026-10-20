@@ -371,7 +371,16 @@ class DailyReportBuilder:
         prev_rows = by_day.get(previous.isoformat(), [])
         available = len(yesterday_rows) >= 2
         if not rows:
-            empty_reason = "暂无资源采样数据"
+            earliest = self.store.list_resources(0, limit=1)
+            if earliest:
+                first_day = datetime.fromtimestamp(
+                    int(earliest[0]["ts"]), self.tz
+                ).strftime("%Y-%m-%d")
+                empty_reason = (
+                    f"资源采样从 {first_day} 开始，暂无 {day.isoformat()} 数据"
+                )
+            else:
+                empty_reason = "暂无资源采样数据"
         elif not available:
             empty_reason = (
                 f"资源采样从 {first_day or '--'} 开始，暂无完整昨日数据"

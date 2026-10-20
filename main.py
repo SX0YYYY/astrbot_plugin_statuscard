@@ -43,7 +43,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
     PLUGIN_NAME,
     "烬辞",
     "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
-    "2.5.0",
+    "2.5.1",
 )
 class StatusCardPlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -389,10 +389,35 @@ class StatusCardPlugin(Star):
             "full_page": True,
             "device_scale_factor_level": "ultra",
         }
-        return await asyncio.wait_for(
-            self.html_render(html, {}, return_url=True, options=options),
-            timeout=timeout,
+        started = time.perf_counter()
+        try:
+            result = await asyncio.wait_for(
+                self.html_render(
+                    html, {}, return_url=True, options=options
+                ),
+                timeout=timeout,
+            )
+        except Exception:
+            self._diag.update(
+                {
+                    "last_report_render_ok": False,
+                    "last_report_render_at": time.time(),
+                    "last_report_render_ms": round(
+                        (time.perf_counter() - started) * 1000, 1
+                    ),
+                }
+            )
+            raise
+        self._diag.update(
+            {
+                "last_report_render_ok": True,
+                "last_report_render_at": time.time(),
+                "last_report_render_ms": round(
+                    (time.perf_counter() - started) * 1000, 1
+                ),
+            }
         )
+        return result
 
     async def _resolve_background(self, event: AstrMessageEvent | None):
         bg_bytes = None
@@ -624,7 +649,7 @@ class StatusCardPlugin(Star):
         except Exception:
             pass
         lines.append(f"平台: {platform or '--'}")
-        lines.append("插件: v2.5.0")
+        lines.append("插件: v2.5.1")
         if platform and platform != "aiocqhttp":
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
@@ -682,11 +707,27 @@ class StatusCardPlugin(Star):
             age = max(0, int(time.time() - float(self._diag["last_render_at"])))
             ok = "成功" if self._diag.get("last_render_ok") else "失败"
             lines.append(
-                f"最近渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
+                f"最近状态卡渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
                 f"渲染 {self._diag.get('last_render_ms', '--')}ms，{age}s 前"
             )
         else:
-            lines.append("最近渲染: 尚未渲染")
+            lines.append("最近状态卡渲染: 尚未渲染")
+        if self._diag.get("last_report_render_at"):
+            age = max(
+                0,
+                int(time.time() - float(self._diag["last_report_render_at"])),
+            )
+            ok = (
+                "成功"
+                if self._diag.get("last_report_render_ok")
+                else "失败"
+            )
+            lines.append(
+                f"最近日报渲染: {ok}；渲染 "
+                f"{self._diag.get('last_report_render_ms', '--')}ms，{age}s 前"
+            )
+        else:
+            lines.append("最近日报渲染: 尚未渲染")
         if self._diag.get("last_error"):
             lines.append(f"最近错误: {self._diag.get('last_error')}")
 
@@ -735,8 +776,8 @@ class StatusCardPlugin(Star):
     async def cmd_preview_report(self, event: AstrMessageEvent):
         """Build and send yesterday's daily report to the current chat."""
         event.should_call_llm(False)
-        ok, detail = await self.daily_report.preview(
+        _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None)
         )
-        if not ok:
-            yield event.plain_result(detail)
+        yield event.plain_result(detail)
+        event.stop_event()
