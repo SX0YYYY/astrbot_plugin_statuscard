@@ -1,15 +1,16 @@
 name: astrbot_plugin_statuscard
-display_name: 系统状态卡片
-desc: 以图片卡片显示系统运行状态，支持资源/掉线告警、每日定时状态图、日报、网站延迟/进程统计和服务可用性监测。
-short_desc: 状态图 + 告警 + 定时状态图 + 日报 + 服务监测
-version: 2.10.0
+display_name: 服务器状态卡
+desc: 把服务器的 CPU、内存、磁盘、网络和进程做成一张状态图发到 QQ；支持资源/掉线告警、每日定时状态图、日报和服务可用性监测。
+short_desc: 服务器状态图 + 告警 + 定时状态图 + 日报 + 服务监测
+version: 2.10.1
 author: 烬辞
 repo: "https://github.com/SX0YYYY/astrbot_plugin_statuscard"
 support_platforms:
   - aiocqhttp
 astrbot_version: ">=4.29,<5"
 tags:
-  - 状态
-  - 服务器
+  - 服务器状态
   - 系统监控
   - 告警
+  - 运维
+  - QQ

@@ -1,88 +1,8 @@
 {
-  "avatar": {
-    "description": "头像",
-    "type": "object",
-    "hint": "默认使用 Bot 的 QQ 头像。想换头像时，把“头像来源”改为“自定义上传”，再上传一张图片即可。",
-    "items": {
-      "avatar_source": {
-        "description": "头像来源",
-        "type": "string",
-        "default": "default",
-        "options": [
-          "default",
-          "upload"
-        ],
-        "labels": [
-          "默认（QQ 头像）",
-          "自定义上传"
-        ],
-        "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
-      },
-      "avatar_upload_files": {
-        "description": "上传头像图片",
-        "type": "file",
-        "default": [],
-        "file_types": [
-          "png",
-          "jpg",
-          "jpeg",
-          "webp",
-          "gif"
-        ],
-        "condition": {
-          "avatar_source": "upload"
-        },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
-      },
-      "avatar_text": {
-        "description": "状态图显示的 Bot 名称",
-        "type": "string",
-        "default": "",
-        "hint": "留空自动读取 QQ 昵称；只影响卡片上的文字。"
-      }
-    }
-  },
-  "background": {
-    "description": "背景",
-    "type": "object",
-    "hint": "默认使用内置背景。想换背景时，把“背景来源”改为“自定义上传”，再上传一张图片即可。",
-    "items": {
-      "background_source": {
-        "description": "背景来源",
-        "type": "string",
-        "default": "default",
-        "options": [
-          "default",
-          "upload"
-        ],
-        "labels": [
-          "默认（内置背景）",
-          "自定义上传"
-        ],
-        "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
-      },
-      "bg_upload_files": {
-        "description": "上传背景图片",
-        "type": "file",
-        "default": [],
-        "file_types": [
-          "png",
-          "jpg",
-          "jpeg",
-          "webp",
-          "gif"
-        ],
-        "condition": {
-          "background_source": "upload"
-        },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
-      }
-    }
-  },
   "display": {
     "description": "状态卡显示",
     "type": "object",
-    "hint": "默认设置即可直接使用；需要调整图片尺寸或排查问题时，再打开“显示高级选项”。",
+    "hint": "默认设置即可直接使用；需要调整图片尺寸、网站测试、时区或脱敏时，再打开“显示高级选项”。",
     "items": {
       "render_width": {
         "description": "输出图片宽度（像素）",
@@ -93,13 +13,13 @@
           "max": 2880,
           "step": 30
         },
-        "hint": "数值越大，图片越清晰、文件越大、出图越慢；高度会随内容自动扩展。默认 1170 与旧版高清效果相当。"
+        "hint": "越大越清晰，T2I 渲染也越慢；手机看 1170 足够。"
       },
       "language": {
         "description": "命令提示语言",
         "type": "string",
         "default": "zh-CN",
-        "hint": "填 zh-CN 或 en-US；页面文案跟随 AstrBot WebUI 语言，此项只影响 QQ 命令回复。"
+        "hint": "只影响 QQ 命令提示；页面跟随 AstrBot WebUI 语言。"
       },
       "process_top_n": {
         "description": "进程表显示条数",
@@ -110,19 +30,19 @@
           "max": 30,
           "step": 1
         },
-        "hint": "卡片上展示 CPU 占用最高的前几个进程。"
+        "hint": "状态卡进程表显示条数，3–20；日报的 Top 进程条数在“日报 → 高级”里单独设置。"
       },
       "compact": {
         "description": "手机紧凑模式",
         "type": "bool",
         "default": false,
-        "hint": "隐藏系统信息表，进程表最多显示 5 行，并放大资源百分比，适合手机查看。"
+        "hint": "手机上看图更方便：隐藏系统信息表、进程最多 5 行、放大资源百分比。"
       },
       "progress_notice": {
         "description": "出图前发送“生成中”提示",
         "type": "bool",
         "default": true,
-        "hint": "建议开启；远程渲染较慢时，用户不会以为 Bot 没反应。"
+        "hint": "首次出图通常需要数秒到数十秒；关闭后不再发送“生成中”提示。"
       },
       "show_advanced": {
         "description": "显示高级显示选项",
@@ -157,7 +77,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "状态卡上显示的网站延迟测试；默认只测百度，不需要可以保持默认。",
+        "hint": "状态卡和日报共用这些目标；默认只测百度，单个目标超时 3 秒。",
         "templates": {
           "site": {
             "name": "网站",
@@ -208,7 +128,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "留空自动检测；Linux 通常填 /，Windows 填 C:\\。"
+        "hint": "留空自动检测；Linux 通常填 `/`，Windows 填 `C:\\`。"
       },
       "timezone": {
         "description": "时区",
@@ -217,7 +137,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "例如 Asia/Shanghai；留空默认 Asia/Shanghai。"
+        "hint": "状态卡、告警、监测和日报统一使用；修改后每分钟自动生效。"
       },
       "redact": {
         "description": "状态卡脱敏项",
@@ -239,7 +159,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "勾选后，卡片上对应的信息会显示为“已隐藏”。"
+        "hint": "公开群建议至少勾选“主机名”和“进程信息”；勾选“QQ 统计”会同时隐藏日报里的好友/群/群员/收发。"
       },
       "privacy_notice": {
         "description": "首次触发隐私提示",
@@ -262,7 +182,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "超时后回退为文字摘要。"
+        "hint": "超时后回退为文字摘要；T2I 慢时可适当调大。"
       },
       "t2i_benchmark": {
         "description": "记录 T2I 渲染耗时",
@@ -271,42 +191,20 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "开启后每次状态卡/日报渲染完成会记录一条耗时日志，便于排查 T2I 延迟。"
-      },
-      "access": {
-        "description": "状态卡访问权限（已废弃）",
-        "type": "string",
-        "default": "admin",
-        "options": [
-          "all",
-          "admin",
-          "allowlist"
-        ],
-        "invisible": true,
-        "hint": "所有命令已强制仅 AstrBot 管理员可用；保留此字段只为兼容旧配置。"
-      },
-      "allowlist": {
-        "description": "状态卡白名单（已废弃）",
-        "type": "list",
-        "default": [],
-        "items": {
-          "type": "string"
-        },
-        "invisible": true,
-        "hint": "所有命令已强制仅管理员可用，此字段不再生效。"
+        "hint": "排查渲染慢时开启；日志会记录状态卡和日报的渲染耗时。"
       }
     }
   },
   "alerts": {
-    "description": "主动告警",
+    "description": "告警与每日定时状态图",
     "type": "object",
-    "hint": "默认关闭。打开后，CPU/内存/磁盘持续过高或 Bot 掉线时，往下面的 QQ 群发消息；每日定时状态图也可以单独开启。",
+    "hint": "默认关闭。打开后，CPU/内存/磁盘持续过高或 Bot 掉线时往 QQ 群发消息；“每日定时状态图”可在下面单独开启。",
     "items": {
       "enabled": {
         "description": "启用资源与掉线告警",
         "type": "bool",
         "default": false,
-        "hint": "只控制 CPU/内存/磁盘阈值和掉线告警；每日定时状态图由下面的独立开关控制。"
+        "hint": "资源阈值和掉线告警的总开关；不影响“每日定时状态图”和“日报”。"
       },
       "targets": {
         "description": "推送目标",
@@ -315,17 +213,18 @@
         "items": {
           "type": "string"
         },
-        "hint": "填 QQ 群号即可，例如 123456789；也支持 default:GroupMessage:123456789。每日定时状态图和服务监测默认复用这里。"
+        "hint": "填 QQ 群号或完整 UMO；资源告警、掉线告警、每日定时状态图和监测默认都发到这里。"
       },
       "daily_summary": {
         "description": "每日定时状态图",
         "type": "object",
-        "hint": "每天固定时间自动发一张状态图到上面的推送目标。默认关闭。",
+        "hint": "每天定时发送整张状态卡图片，不是趋势日报；与下面的“日报”是两件事。",
         "items": {
           "enabled": {
             "description": "启用每日定时状态图",
             "type": "bool",
-            "default": false
+            "default": false,
+            "hint": "独立于上面的“启用资源与掉线告警”，可以只开定时状态图。"
           },
           "time": {
             "description": "发送时间",
@@ -335,7 +234,7 @@
             "condition": {
               "enabled": true
             },
-            "hint": "24 小时制，格式 HH:MM，例如 09:00 或 20:00。"
+            "hint": "24 小时制 HH:MM，例如 20:00；修改后每分钟自动生效。"
           },
           "with_image": {
             "description": "发送状态图（关闭则发文字摘要）",
@@ -344,7 +243,7 @@
             "condition": {
               "enabled": true
             },
-            "hint": "关闭后只发文字摘要。"
+            "hint": "关闭后只发文字摘要；图片渲染失败也会自动回退文字。"
           }
         }
       },
@@ -445,7 +344,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "次数越多越不容易误报，但告警也更慢。"
+        "hint": "连续超过阈值几次才告警；默认 3 次，60 秒采样约 3 分钟。"
       },
       "cooldown_seconds": {
         "description": "同一规则告警冷却（秒）",
@@ -459,7 +358,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "冷却期内不会重复发送同一条告警。"
+        "hint": "同一规则成功告警后，多久内不重复提醒。"
       },
       "recover_notify": {
         "description": "恢复时发送通知",
@@ -553,10 +452,186 @@
       }
     }
   },
+  "daily_report": {
+    "description": "日报（趋势图）",
+    "type": "object",
+    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势、Token、网站延迟和 Top 进程的趋势日报；默认只记录数据不发送。",
+    "items": {
+      "enabled": {
+        "description": "启用每日日报",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按设定时间发送趋势日报；与“每日定时状态图”不同，日报是趋势图不是整张状态卡。"
+      },
+      "time": {
+        "description": "日报发送时间",
+        "type": "string",
+        "default": "21:00",
+        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+        "condition": {
+          "enabled": true
+        },
+        "hint": "24 小时制 HH:MM，例如 21:00；修改后每分钟自动生效。"
+      },
+      "targets": {
+        "description": "日报推送目标",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "condition": {
+          "enabled": true
+        },
+        "hint": "留空复用“告警与每日定时状态图”的推送目标。"
+      },
+      "sections": {
+        "description": "日报内容",
+        "type": "list",
+        "default": [
+          "resource",
+          "anomaly",
+          "qq",
+          "token"
+        ],
+        "options": [
+          "resource",
+          "anomaly",
+          "qq",
+          "token",
+          "website",
+          "process"
+        ],
+        "labels": [
+          "资源趋势",
+          "异常汇总",
+          "QQ 趋势",
+          "Token 消耗",
+          "网站延迟",
+          "Top 进程"
+        ],
+        "render_type": "checkbox",
+        "condition": {
+          "enabled": true
+        },
+        "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。"
+      },
+      "with_image": {
+        "description": "发送图片",
+        "type": "bool",
+        "default": true,
+        "condition": {
+          "enabled": true
+        },
+        "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
+      },
+      "theme": {
+        "description": "日报主题",
+        "type": "string",
+        "default": "light",
+        "condition": {
+          "enabled": true
+        },
+        "hint": "只影响日报图片，不影响状态卡。"
+      },
+      "history_days": {
+        "description": "趋势天数",
+        "type": "int",
+        "default": 7,
+        "slider": {
+          "min": 7,
+          "max": 30,
+          "step": 7
+        },
+        "condition": {
+          "enabled": true
+        },
+        "hint": "日报趋势图显示最近多少天，7–30 天。"
+      },
+      "collect": {
+        "description": "记录日报历史数据",
+        "type": "bool",
+        "default": true,
+        "hint": "只记录历史数据，不发消息；关闭后日报没有资源/网站/进程趋势。"
+      },
+      "show_advanced": {
+        "description": "显示高级日报选项",
+        "type": "bool",
+        "default": false
+      },
+      "render_timeout": {
+        "description": "日报渲染超时（秒）",
+        "type": "int",
+        "default": 180,
+        "slider": {
+          "min": 30,
+          "max": 600,
+          "step": 10
+        },
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "超时后回退文字摘要。"
+      },
+      "resource_sample_seconds": {
+        "description": "资源采样间隔（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {
+          "min": 60,
+          "max": 1800,
+          "step": 60
+        },
+        "condition": {
+          "show_advanced": true
+        }
+      },
+      "process_top_n": {
+        "description": "Top 进程数量",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 3,
+          "max": 10,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "日报里 CPU/内存 Top 进程的条数；状态卡的进程条数在“状态卡显示”里单独设置。"
+      },
+      "retention_days": {
+        "description": "资源数据保留天数",
+        "type": "int",
+        "default": 30,
+        "slider": {
+          "min": 7,
+          "max": 365,
+          "step": 1
+        },
+        "condition": {
+          "show_advanced": true
+        }
+      },
+      "event_retention_days": {
+        "description": "异常事件保留天数",
+        "type": "int",
+        "default": 90,
+        "slider": {
+          "min": 30,
+          "max": 730,
+          "step": 30
+        },
+        "condition": {
+          "show_advanced": true
+        }
+      }
+    }
+  },
   "monitors": {
     "description": "服务可用性监测",
     "type": "object",
-    "hint": "当网站、端口、Docker 容器或系统服务挂掉/恢复时，往 QQ 群发通知。默认关闭；需要时打开并添加目标即可。",
+    "hint": "当网站、端口、Docker 容器、进程或系统服务挂掉/恢复时往 QQ 群发通知；默认关闭。",
     "items": {
       "enabled": {
         "description": "启用服务监测",
@@ -576,7 +651,7 @@
         "description": "监测目标列表",
         "type": "template_list",
         "default": [],
-        "hint": "点“添加条目”，选择网站/端口/容器/系统服务/进程，填名称和目标即可。",
+        "hint": "支持 HTTP、TCP、Docker、进程、systemd 五种模板；每项可单独设置超时和期望状态。",
         "templates": {
           "http": {
             "name": "网站 / 接口",
@@ -812,7 +887,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "只有开启时，下面的维护静默截止时间才会生效。"
+        "hint": "维护窗口内只探测、不推送；需要先开启此开关，下面的截止时间才生效。"
       },
       "silence_until": {
         "description": "维护静默截止时间",
@@ -822,7 +897,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "格式 YYYY-MM-DD HH:MM；到时间前只探测、不发送异常/恢复通知。留空表示不静默。"
+        "hint": "格式 YYYY-MM-DD HH:MM；到期前只探测、不发送异常/恢复通知。"
       },
       "suppress_duplicates": {
         "description": "抑制重复层告警",
@@ -831,7 +906,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "开启后，HTTP 监测项的 suppress_when_down 才会生效；依赖的容器/服务异常时不再重复告警。"
+        "hint": "开启后，HTTP 监测项的 suppress_when_down 才生效；依赖的容器/服务异常时不再重复告警。"
       },
       "interval_seconds": {
         "description": "轮询间隔（秒）",
@@ -858,7 +933,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "次数越多越不容易误报，但告警也更慢。"
+        "hint": "连续失败几次才告警；默认 2 次，60 秒轮询约 2 分钟。"
       },
       "cooldown_seconds": {
         "description": "同一目标告警冷却（秒）",
@@ -897,191 +972,83 @@
       }
     }
   },
-  "daily_report": {
-    "description": "日报",
+  "avatar": {
+    "description": "头像",
     "type": "object",
-    "hint": "每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；默认关闭发送，只记录数据，开销很小。",
+    "hint": "默认使用 Bot 的 QQ 头像。想换头像时，把“头像来源”改为“自定义上传”，再上传一张图片即可。",
     "items": {
-      "enabled": {
-        "description": "启用每日日报",
-        "type": "bool",
-        "default": false,
-        "hint": "每天定时生成并发送日报；默认关闭，避免群消息噪音。"
-      },
-      "time": {
-        "description": "日报发送时间",
+      "avatar_source": {
+        "description": "头像来源",
         "type": "string",
-        "default": "21:00",
-        "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
-        "condition": {
-          "enabled": true
-        },
-        "hint": "24 小时制 HH:MM；建议与每日定时状态图错开。"
-      },
-      "targets": {
-        "description": "日报推送目标",
-        "type": "list",
-        "default": [],
-        "items": {
-          "type": "string"
-        },
-        "condition": {
-          "enabled": true
-        },
-        "hint": "留空复用“主动告警”的推送目标；也可以填 QQ 群号或完整 UMO。"
-      },
-      "sections": {
-        "description": "日报内容",
-        "type": "list",
-        "default": [
-          "resource",
-          "anomaly",
-          "qq",
-          "token"
-        ],
+        "default": "default",
         "options": [
-          "resource",
-          "anomaly",
-          "qq",
-          "token",
-          "website",
-          "process"
+          "default",
+          "upload"
         ],
         "labels": [
-          "资源趋势",
-          "异常汇总",
-          "QQ 趋势",
-          "Token 消耗",
-          "网站延迟",
-          "Top 进程"
+          "默认（QQ 头像）",
+          "自定义上传"
         ],
-        "render_type": "checkbox",
-        "condition": {
-          "enabled": true
-        },
-        "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。"
+        "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
       },
-      "with_image": {
-        "description": "发送图片",
-        "type": "bool",
-        "default": true,
+      "avatar_upload_files": {
+        "description": "上传头像图片",
+        "type": "file",
+        "default": [],
+        "file_types": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif"
+        ],
         "condition": {
-          "enabled": true
+          "avatar_source": "upload"
         },
-        "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
       },
-      "theme": {
-        "description": "日报主题",
+      "avatar_text": {
+        "description": "状态图显示的 Bot 名称",
         "type": "string",
-        "default": "light",
-        "condition": {
-          "enabled": true
-        },
-        "hint": "light（浅色，默认）或 dark（深色）。"
-      },
-      "history_days": {
-        "description": "趋势天数",
-        "type": "int",
-        "default": 7,
-        "slider": {
-          "min": 7,
-          "max": 30,
-          "step": 7
-        },
-        "condition": {
-          "enabled": true
-        }
-      },
-      "collect": {
-        "description": "记录日报历史数据",
-        "type": "bool",
-        "default": true,
-        "hint": "每 5 分钟记录一次资源占用、网站延迟和 Top 进程，每天记录一次 QQ 数量/接收累计，并记录告警和监测事件。"
-      },
-      "show_advanced": {
-        "description": "显示高级日报选项",
-        "type": "bool",
-        "default": false
-      },
-      "render_timeout": {
-        "description": "日报渲染超时（秒）",
-        "type": "int",
-        "default": 180,
-        "slider": {
-          "min": 30,
-          "max": 600,
-          "step": 10
-        },
-        "condition": {
-          "show_advanced": true
-        },
-        "hint": "超时后回退文字摘要。"
-      },
-      "resource_sample_seconds": {
-        "description": "资源采样间隔（秒）",
-        "type": "int",
-        "default": 300,
-        "slider": {
-          "min": 60,
-          "max": 1800,
-          "step": 60
-        },
-        "condition": {
-          "show_advanced": true
-        }
-      },
-      "process_top_n": {
-        "description": "Top 进程数量",
-        "type": "int",
-        "default": 5,
-        "slider": {
-          "min": 3,
-          "max": 10,
-          "step": 1
-        },
-        "condition": {
-          "show_advanced": true
-        },
-        "hint": "日报中分别列出 CPU 和内存峰值最高的进程数量。"
-      },
-      "retention_days": {
-        "description": "资源数据保留天数",
-        "type": "int",
-        "default": 30,
-        "slider": {
-          "min": 7,
-          "max": 365,
-          "step": 1
-        },
-        "condition": {
-          "show_advanced": true
-        }
-      },
-      "event_retention_days": {
-        "description": "异常事件保留天数",
-        "type": "int",
-        "default": 90,
-        "slider": {
-          "min": 30,
-          "max": 730,
-          "step": 30
-        },
-        "condition": {
-          "show_advanced": true
-        }
+        "default": "",
+        "hint": "留空自动读取 QQ 昵称；只影响卡片上的文字。"
       }
     }
   },
-  "telemetry": {
-    "description": "匿名指标（预留）",
+  "background": {
+    "description": "背景",
     "type": "object",
-    "hint": "预留开关；当前版本不会上报任何数据。",
+    "hint": "默认使用内置背景。想换背景时，把“背景来源”改为“自定义上传”，再上传一张图片即可。",
     "items": {
-      "enabled": {
-        "description": "启用匿名指标",
-        "type": "bool",
-        "default": false,
-        "hint": "当前版本仅保存本地开关，没有上报端点。"
+      "background_source": {
+        "description": "背景来源",
+        "type": "string",
+        "default": "default",
+        "options": [
+          "default",
+          "upload"
+        ],
+        "labels": [
+          "默认（内置背景）",
+          "自定义上传"
+        ],
+        "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
+      },
+      "bg_upload_files": {
+        "description": "上传背景图片",
+        "type": "file",
+        "default": [],
+        "file_types": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif"
+        ],
+        "condition": {
+          "background_source": "upload"
+        },
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
       }
     }
   }

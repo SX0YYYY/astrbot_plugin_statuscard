@@ -1,12 +1,12 @@
 {
   "metadata": {
-    "display_name": "系统状态卡片"
+    "display_name": "服务器状态卡"
   },
   "pages": {
     "status": {
-      "title": "系统状态看板",
+      "title": "服务器状态看板",
       "strings": {
-        "app_name": "系统状态看板",
+        "app_name": "服务器状态看板",
         "tab_overview": "概览",
         "tab_history": "历史",
         "tab_events": "事件",

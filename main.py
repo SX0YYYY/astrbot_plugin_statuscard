@@ -44,7 +44,7 @@ PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
 @register(
     PLUGIN_NAME,
     "烬辞",
-    "以图片卡片显示系统运行状态，并支持告警、日报与服务监测",
+    "把服务器状态做成图片卡片发到 QQ，支持告警、日报与服务监测",
     __version__,
 )
 class StatusCardPlugin(Star):
