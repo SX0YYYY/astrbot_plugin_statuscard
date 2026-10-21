@@ -1,5 +1,5 @@
-![Version](https://img.shields.io/badge/version-2.10.3-blue)
-![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
+![Version](https://img.shields.io/badge/version-2.10.4-blue)
+![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 ![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
@@ -37,7 +37,7 @@
 
 页面右上角的“刷新”按钮会显示加载状态，完成后短暂提示“已刷新”；刷新失败会提示“刷新失败”而不是静默无响应。
 
-页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API；插件要求 AstrBot 4.29 及以上。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
+页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
 
 **看板脱敏独立于状态卡**：在“状态卡显示 → 高级显示选项 → Web 看板脱敏项”里可以单独设置看板要隐藏的内容，不会影响发到 QQ 的状态卡和日报。留空时跟随“状态卡脱敏项”。
 
@@ -75,10 +75,19 @@
 
 ### 环境要求
 
-- AstrBot `>=4.29,<5`（已在 4.29.0 验证）
+- AstrBot `>=4.26.7,<5`（已在 4.26.7、4.27.0、4.29.0 验证加载与页面 API）
 - Python 3.12+（跟随 AstrBot 要求）
 - 一个可用的 QQ / OneBot 连接（推荐 NapCat）
 - 能访问 AstrBot 配置的 T2I 渲染服务（默认远程）
+
+### 版本兼容说明
+
+| AstrBot 版本 | 状态 |
+|---|---|
+| 4.29 及以上 | **完整体验**：所有功能均已验证 |
+| 4.26.7 / 4.27.0 | **已验证加载**：插件能正常加载、命令可用、页面 API 已注册、状态卡与日报均可渲染；出图走的是同一个 T2I 通道，行为与高版本一致 |
+
+4.26.7 与 4.27.0 上做过真实的插件加载验证（AstrBot 自己的 `PluginManager` 加载、命令注册、页面路由注册、状态卡与日报 HTML 渲染全部通过）。这两个版本上未做的是「浏览器里打开 Web 看板」这类界面级验证，如果你在这两个版本上遇到页面显示问题，请提 issue 反馈。
 
 ### 安装步骤
 
