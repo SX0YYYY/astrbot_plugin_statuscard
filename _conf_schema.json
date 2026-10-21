@@ -181,7 +181,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "只影响 AstrBot WebUI 里的看板，不影响发到 QQ 的状态卡和日报；留空时跟随上面的“状态卡脱敏项”。"
+        "hint": "只影响 AstrBot WebUI 里的看板，不影响发到 QQ 的状态卡和日报。与上面的“状态卡脱敏项”完全独立：全部不勾 = 看板不做任何脱敏（会显示主机名、进程名等原始信息）。"
       },
       "privacy_notice": {
         "description": "首次触发隐私提示",

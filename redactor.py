@@ -44,20 +44,16 @@ def normalize_rules(raw: Any) -> set[str]:
     }
 
 
-def read_rules(
-    config: Any, key: str = "display.redact", fallback: Any = None
-) -> set[str]:
+def read_rules(config: Any, key: str = "display.redact") -> set[str]:
     """Read the rules of one surface from the plugin configuration.
 
-    ``key`` is a dotted path such as ``display.redact``. ``fallback`` is
-    used when the surface has no switch of its own; a missing value then
-    follows the card rules.
+    ``key`` is a dotted path such as ``display.redact`` or
+    ``display.page_redact``. Every surface owns its switch outright: a
+    missing or empty value means "hide nothing here", never "use another
+    surface's rules".
     """
 
-    raw = cfg_get(config, key)
-    if raw is None and fallback is not None:
-        raw = fallback
-    return normalize_rules(raw)
+    return normalize_rules(cfg_get(config, key))
 
 
 class Redactor:

@@ -40,10 +40,11 @@ class _ConfigPlugin:
 
 
 def test_page_redact_uses_real_schema_defaults() -> None:
-    """The fallback must work with the defaults AstrBot writes out.
+    """The default dashboard switch hides nothing, whatever the card does.
 
-    ``display.page_redact`` defaults to an empty list, not ``None``, so a
-    check for ``None`` would never fall back to the card rules.
+    ``display.page_redact`` defaults to an empty list. That empty list is a
+    real setting - it means the dashboard is fully visible - so the two
+    surfaces never inherit each other's rules.
     """
 
     import json
@@ -67,8 +68,8 @@ def test_page_redact_uses_real_schema_defaults() -> None:
             }
         )
     )
-    assert api._redact() == {"hostname", "process", "qq_stats"}
-    assert api._host() == "已隐藏"
+    assert api._redact() == set()
+    assert api._host() != "已隐藏"
 
 
 def test_page_redact_overrides_card_redact() -> None:
@@ -85,19 +86,21 @@ def test_page_redact_overrides_card_redact() -> None:
     assert api._redact() == {"network"}
 
 
-def test_page_redact_falls_back_to_card_redact() -> None:
+def test_page_redact_missing_key_hides_nothing() -> None:
+    """Without a dashboard switch the dashboard stays fully visible."""
+
     api = PageApi(_ConfigPlugin({"display": {"redact": ["hostname", "process"]}}))
-    assert api._redact() == {"hostname", "process"}
+    assert api._redact() == set()
 
 
-def test_page_redact_empty_list_falls_back_to_card_redact() -> None:
-    """An empty dashboard list means "follow the card", as the README says."""
+def test_page_redact_empty_list_hides_nothing() -> None:
+    """An empty dashboard list means "hide nothing", not "follow the card"."""
 
     api = PageApi(
         _ConfigPlugin({"display": {"redact": ["hostname"], "page_redact": []}})
     )
-    assert api._redact() == {"hostname"}
-    assert api._host() == "已隐藏"
+    assert api._redact() == set()
+    assert api._host() != "已隐藏"
 
 
 def test_page_redact_explicit_rules_win() -> None:

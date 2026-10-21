@@ -16,7 +16,7 @@ from typing import Any
 from astrbot.api import logger
 
 # The version of this plugin. Keep it in sync with ``metadata.yaml``.
-__version__ = "2.12.1"
+__version__ = "2.12.2"
 
 
 def _normalize_version(raw: Any) -> str | None:

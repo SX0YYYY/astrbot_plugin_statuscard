@@ -41,10 +41,12 @@ def test_read_rules_follows_the_dotted_path() -> None:
     assert read_rules(config, "display.page_redact") == set()
 
 
-def test_read_rules_falls_back_when_the_surface_has_no_switch() -> None:
+def test_read_rules_never_inherits_another_surface() -> None:
+    """A missing switch means "hide nothing", not "use the card rules"."""
+
     config = {"display": {"redact": ["hostname"]}}
-    rules = read_rules(config, "display.page_redact", fallback=["network"])
-    assert rules == {"network"}
+    assert read_rules(config, "display.page_redact") == set()
+    assert read_rules(config, "display.nonexistent") == set()
 
 
 def test_redactor_flags_each_rule() -> None:

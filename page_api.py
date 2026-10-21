@@ -103,19 +103,15 @@ class PageApi:
     def _redactor(self) -> Redactor:
         """The redaction rules that apply to the Web dashboard.
 
-        The dashboard has its own switch so that an operator can hide details
-        in the WebUI without also hiding them on the QQ status card, and the
-        other way around. ``display.page_redact`` wins when it lists any
-        rule; when it is empty the card redaction rules are used as a
-        fallback, so leaving the dashboard switch alone keeps the dashboard
-        as private as the card.
+        The dashboard has its own switch, completely independent of the QQ
+        status card: an operator can hide details in the WebUI without also
+        hiding them on the card, and the other way around. An empty list
+        means the dashboard shows everything - it does not inherit the card
+        rules, because silently reusing another switch would hide data the
+        operator never asked to hide here.
         """
 
-        config = self.plugin.config
-        rules = read_rules(config, "display.page_redact")
-        if rules:
-            return Redactor(rules)
-        return Redactor(read_rules(config, "display.redact"))
+        return Redactor(read_rules(self.plugin.config, "display.page_redact"))
 
     def _redact(self) -> set[str]:
         """The rule names that apply to the Web dashboard."""
