@@ -4,6 +4,12 @@
 
 暂无。
 
+## v2.12.1 — 2026-10-21
+
+### 变更
+
+- 合并 `version.py` 与 `version_resolver.py`：插件自身版本和 AstrBot 运行版本原本分属两个文件，现在统一在一个模块里，删除了只含一个函数的 `version_resolver.py`。对外接口不变（`__version__` 与 `resolve_astrbot_version()`）。
+
 ## v2.12.0 — 2026-10-21
 
 重构版：把脱敏规则和消息投递各自收敛到单一模块，并补齐了此前缺失的说明文档。
