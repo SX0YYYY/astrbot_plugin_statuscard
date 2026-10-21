@@ -161,6 +161,28 @@
         },
         "hint": "公开群建议至少勾选“主机名”和“进程信息”；勾选“QQ 统计”会同时隐藏日报里的好友/群/群员/收发。"
       },
+      "page_redact": {
+        "description": "Web 看板脱敏项",
+        "type": "list",
+        "default": [],
+        "options": [
+          "hostname",
+          "process",
+          "network",
+          "qq_stats"
+        ],
+        "labels": [
+          "主机名",
+          "进程信息",
+          "网络数据",
+          "QQ 统计"
+        ],
+        "render_type": "checkbox",
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "只影响 AstrBot WebUI 里的看板，不影响发到 QQ 的状态卡和日报；留空时跟随上面的“状态卡脱敏项”。"
+      },
       "privacy_notice": {
         "description": "首次触发隐私提示",
         "type": "bool",

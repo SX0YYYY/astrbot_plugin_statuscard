@@ -32,3 +32,35 @@ def test_network_view_keeps_fields_when_not_redacted() -> None:
     assert view["up_rate"] == 1.5
     assert view["down_rate"] == 2.5
     assert view["month"] == "2026-10"
+
+
+class _ConfigPlugin:
+    def __init__(self, config: dict) -> None:
+        self.config = config
+
+
+def test_page_redact_overrides_card_redact() -> None:
+    api = PageApi(
+        _ConfigPlugin(
+            {
+                "display": {
+                    "redact": ["hostname", "process"],
+                    "page_redact": ["network"],
+                }
+            }
+        )
+    )
+    assert api._redact() == {"network"}
+
+
+def test_page_redact_falls_back_to_card_redact() -> None:
+    api = PageApi(_ConfigPlugin({"display": {"redact": ["hostname", "process"]}}))
+    assert api._redact() == {"hostname", "process"}
+
+
+def test_page_redact_empty_list_overrides_card_redact() -> None:
+    api = PageApi(
+        _ConfigPlugin({"display": {"redact": ["hostname"], "page_redact": []}})
+    )
+    assert api._redact() == set()
+    assert api._host() != "已隐藏"

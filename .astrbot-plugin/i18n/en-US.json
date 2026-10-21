@@ -100,7 +100,11 @@
         "table_avg": "Average",
         "table_peak": "Peak",
         "table_availability": "Availability",
-        "chart_label": "Trend chart"
+        "chart_label": "Trend chart",
+        "refreshing": "Refreshing…",
+        "refresh_done": "Data updated",
+        "refresh_done_short": "Updated",
+        "refresh_failed_short": "Failed"
       }
     }
   }

@@ -892,13 +892,54 @@
       await loadTab(name);
       state.loaded.add(name);
     } catch (error) {
+      if (force) throw error;
       toast(error.message || "加载失败");
     }
   }
 
   async function refreshCurrent() {
+    const button = $("refresh");
+    if (button && button.classList.contains("refreshing")) return;
     state.loaded.delete(state.tab);
-    await activateTab(state.tab, true);
+    setRefreshState(button, "refreshing");
+    try {
+      await activateTab(state.tab, true);
+      setRefreshState(button, "done");
+      toast(t("refresh_done", "已刷新"));
+    } catch (error) {
+      setRefreshState(button, "failed");
+      toast(error.message || t("error_load", "加载失败"));
+    }
+  }
+
+  function setRefreshState(button, status) {
+    if (!button) return;
+    const panels = $("panels");
+    button.classList.remove("refreshing", "refresh-done", "refresh-failed");
+    if (panels) panels.classList.remove("is-refreshing");
+    if (status === "refreshing") {
+      button.classList.add("refreshing");
+      button.disabled = true;
+      button.textContent = t("refreshing", "刷新中…");
+      if (panels) panels.classList.add("is-refreshing");
+      return;
+    }
+    button.disabled = false;
+    if (status === "done") {
+      button.classList.add("refresh-done");
+      button.textContent = t("refresh_done_short", "已刷新");
+    } else if (status === "failed") {
+      button.classList.add("refresh-failed");
+      button.textContent = t("refresh_failed_short", "刷新失败");
+    } else {
+      button.textContent = t("refresh", "刷新");
+    }
+    if (status !== "idle") {
+      clearTimeout(button._resetTimer);
+      button._resetTimer = setTimeout(() => {
+        setRefreshState(button, "idle");
+      }, 2000);
+    }
   }
 
   // ------------------------------------------------------------------

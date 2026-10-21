@@ -100,7 +100,11 @@
         "table_avg": "平均",
         "table_peak": "峰值",
         "table_availability": "可用率",
-        "chart_label": "趋势图"
+        "chart_label": "趋势图",
+        "refreshing": "刷新中…",
+        "refresh_done": "数据已更新",
+        "refresh_done_short": "已刷新",
+        "refresh_failed_short": "刷新失败"
       }
     }
   }

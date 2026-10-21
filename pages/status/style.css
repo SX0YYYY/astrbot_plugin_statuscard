@@ -163,6 +163,63 @@ button.ghost {
   color: var(--text);
 }
 
+/* Refresh button states: idle / loading / done / failed. */
+button.ghost.refreshing {
+  color: var(--muted);
+  cursor: progress;
+  opacity: 0.75;
+}
+
+button.ghost.refreshing::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: statuscard-spin 0.7s linear infinite;
+}
+
+button.ghost.refresh-done {
+  border-color: var(--good);
+  color: var(--good);
+}
+
+button.ghost.refresh-failed {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+@keyframes statuscard-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.ghost.refreshing::before {
+    animation-duration: 2.4s;
+  }
+}
+
+/* Dim the panels while a refresh is in flight so the click has feedback. */
+main.is-refreshing {
+  position: relative;
+  pointer-events: none;
+}
+
+main.is-refreshing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: 0.45;
+  border-radius: var(--radius);
+}
+
 .tabs {
   display: flex;
   gap: 6px;

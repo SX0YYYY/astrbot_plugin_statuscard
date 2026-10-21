@@ -78,7 +78,17 @@ class PageApi:
     # ------------------------------------------------------------------
 
     def _redact(self) -> set[str]:
-        raw = cfg_get(self.plugin.config, "display.redact", []) or []
+        """Return the redaction rules that apply to the Web dashboard.
+
+        The dashboard has its own switch so that an operator can hide details
+        in the WebUI without also hiding them on the QQ status card, and the
+        other way around. ``display.page_redact`` wins when it is set; when it
+        is empty the card redaction rules are used as a fallback.
+        """
+
+        raw = cfg_get(self.plugin.config, "display.page_redact", None)
+        if raw is None:
+            raw = cfg_get(self.plugin.config, "display.redact", []) or []
         if isinstance(raw, str):
             raw = [raw]
         return {str(item).strip().lower() for item in raw if str(item).strip()}

@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.10.1-blue)
+![Version](https://img.shields.io/badge/version-2.10.2-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -23,10 +23,10 @@
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
 - **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；图片失败回退文字；默认关闭，可用 `预览日报` 手动查看
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
-- **Web 看板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件和日报
+- **Web 可视化统计面板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件和日报，支持手动刷新
 - **双语与主题**：页面和命令提示支持中英双语，日报支持浅色/深色主题，页面跟随 AstrBot 主题
 
-## Web 看板
+## Web 可视化统计面板
 
 插件在 AstrBot WebUI 的插件详情中提供“服务器状态看板”页面，包含四个标签：
 
@@ -35,7 +35,11 @@
 - **事件**：最近 1 / 7 / 30 天的告警、恢复和推送失败记录
 - **日报**：昨日日报摘要、关键数据和发送记录
 
+页面右上角的“刷新”按钮会显示加载状态，完成后短暂提示“已刷新”；刷新失败会提示“刷新失败”而不是静默无响应。
+
 页面只读取聚合数值，不展示聊天内容、用户 ID 或 UMO。页面依赖 AstrBot 的插件页面 Web API；插件要求 AstrBot 4.29 及以上。页面文案跟随 AstrBot WebUI 语言，主题跟随 WebUI 明暗模式。
+
+**看板脱敏独立于状态卡**：在“状态卡显示 → 高级显示选项 → Web 看板脱敏项”里可以单独设置看板要隐藏的内容，不会影响发到 QQ 的状态卡和日报。留空时跟随“状态卡脱敏项”。
 
 ## 国际化与主题
 
@@ -139,6 +143,7 @@
 - **磁盘挂载点**：留空自动检测；Linux 通常填 `/`，Windows 填 `C:\`。
 - **时区**：状态卡、告警、监测和日报统一使用，默认 `Asia/Shanghai`。
 - **状态卡脱敏项**：主机名 / 进程信息 / 网络数据 / QQ 统计。公开群建议至少勾选前两项。
+- **Web 看板脱敏项**：只影响 WebUI 看板，不影响发到 QQ 的状态卡和日报；留空时跟随“状态卡脱敏项”。
 - **首次触发隐私提示**：每个会话第一次出图前提示状态图会发送到 T2I。
 - **渲染超时**：默认 180 秒，超时回退文字摘要。
 - **记录 T2I 渲染耗时**：排查出图慢时开启，日志会记录状态卡和日报的渲染耗时。
@@ -328,6 +333,7 @@
 | `display.disk_paths` | 空 | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
 | `display.timezone` | `Asia/Shanghai` | 卡片、告警、监测和日报统一使用的时区 |
 | `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
+| `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板，留空时跟随 `display.redact` |
 | `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
 | `alerts.interval_seconds` | `60` | 告警采样间隔（秒） |
 | `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警 |
