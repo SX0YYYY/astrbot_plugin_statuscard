@@ -12,13 +12,19 @@ TARGET_RE = re.compile(r"^(?P<platform>[^:]+):(?P<kind>[A-Za-z_]+):(?P<id>.+)$")
 
 @dataclass
 class OnebotReceipt:
-    """Result of a direct OneBot send, including the protocol receipt."""
+    """Result of a direct OneBot send, including the protocol receipt.
+
+    ``attempted`` tells whether the request actually reached OneBot. When it
+    is ``True`` the message may already be in the chat even though ``ok`` is
+    ``False``, so the caller must not re-send it.
+    """
 
     ok: bool = False
     retcode: int | None = None
     message_id: Any = None
     error: str = ""
     skipped: str = ""
+    attempted: bool = False
 
 
 @dataclass
@@ -53,13 +59,18 @@ def parse_target(target: str) -> tuple[str, str, str] | None:
 def extract_receipt(payload: Any) -> OnebotReceipt:
     """Turn a OneBot action response into a receipt.
 
-    A OneBot V11 response looks like ``{"status": "ok", "retcode": 0,
-    "data": {"message_id": 123}}``. Failures use ``retcode != 0`` and carry a
-    ``message``/``wording`` description.
+    ``aiocqhttp``'s ``call_action`` already unwraps the protocol envelope: it
+    returns ``result["data"]`` on success and raises ``ActionFailed`` on
+    failure. The raw envelope (``{"status", "retcode", "data"}``) is still
+    accepted for callers that talk to OneBot directly.
     """
 
+    if payload is None:
+        return OnebotReceipt(ok=True, retcode=0, attempted=True)
     if not isinstance(payload, dict):
-        return OnebotReceipt(ok=False, error=f"unexpected response: {payload!r}")
+        return OnebotReceipt(
+            ok=False, error=f"unexpected response: {payload!r}", attempted=True
+        )
     retcode = payload.get("retcode")
     try:
         retcode_int = int(retcode) if retcode is not None else None
@@ -70,7 +81,27 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
     message_id = None
     if isinstance(data, dict):
         message_id = data.get("message_id")
-    ok = retcode_int == 0 and status in ("", "ok", "async", "success")
+    elif "message_id" in payload:
+        message_id = payload.get("message_id")
+    if status == "failed" or (retcode_int is not None and retcode_int != 0):
+        error = str(
+            payload.get("message")
+            or payload.get("wording")
+            or payload.get("error")
+            or f"retcode={retcode_int}"
+        )
+        return OnebotReceipt(
+            ok=False,
+            retcode=retcode_int,
+            message_id=message_id,
+            error=error,
+            attempted=True,
+        )
+    if "status" not in payload and retcode_int is None:
+        # ``aiocqhttp`` already unwrapped the envelope: the returned dict is
+        # the ``data`` field, so reaching here means the action succeeded.
+        return OnebotReceipt(ok=True, retcode=0, message_id=message_id, attempted=True)
+    ok = retcode_int in (0, None) and status in ("", "ok", "async", "success")
     error = ""
     if not ok:
         error = str(
@@ -84,7 +115,31 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
         retcode=retcode_int,
         message_id=message_id,
         error=error,
+        attempted=True,
     )
+
+
+def receipt_from_exception(exc: BaseException) -> OnebotReceipt | None:
+    """Build a receipt from an ``aiocqhttp`` failure exception.
+
+    ``aiocqhttp`` raises ``ActionFailed`` when OneBot answers with
+    ``status: failed``. The exception carries the raw envelope, so the
+    protocol error code can still be reported. Other exceptions mean the
+    request never reached OneBot, and return ``None``.
+    """
+
+    raw = getattr(exc, "result", None)
+    if isinstance(raw, dict) and (
+        "retcode" in raw or str(raw.get("status", "")).lower() == "failed"
+    ):
+        receipt = extract_receipt(raw)
+        if not receipt.ok:
+            receipt.attempted = True
+            return receipt
+    text = str(exc)
+    if "ActionFailed" in type(exc).__name__ or "action failed" in text.lower():
+        return OnebotReceipt(ok=False, error=text or "ActionFailed", attempted=True)
+    return None
 
 
 async def send_direct(
@@ -116,6 +171,16 @@ async def send_direct(
             timeout=10,
         )
     except Exception as exc:
+        receipt = receipt_from_exception(exc)
+        if receipt is not None:
+            logger.warning(
+                "OneBot 直发被拒绝 %s -> %s：retcode=%s，%s",
+                action,
+                target,
+                receipt.retcode,
+                receipt.error,
+            )
+            return receipt
         detail = str(exc) or exc.__class__.__name__
         logger.warning("OneBot 直发失败 %s -> %s: %s", action, target, detail)
         return OnebotReceipt(ok=False, error=detail)

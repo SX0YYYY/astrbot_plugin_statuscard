@@ -656,10 +656,13 @@ class StatusCardPlugin(Star):
 
         The direct OneBot path is preferred because it returns the protocol
         receipt (``retcode`` and ``message_id``), which is the only way to
-        tell whether QQ really accepted the message. When the direct path is
-        unavailable (no OneBot client, unsupported target, or a transport
-        error) the normal AstrBot send path is used as a fallback so a message
-        is never dropped just because the receipt could not be obtained.
+        tell whether QQ really accepted the message.
+
+        The fallback to the normal AstrBot send path only happens when the
+        direct path could not even attempt the send (no OneBot client, an
+        unsupported target type, or a transport error). When OneBot answered
+        with a protocol error the message may already have been delivered, so
+        it is never re-sent - that would duplicate the message in the group.
         """
 
         ok_targets: list[str] = []
@@ -687,15 +690,19 @@ class StatusCardPlugin(Star):
             if receipt is not None and receipt.ok:
                 ok_targets.append(target)
                 continue
+            if receipt is not None and receipt.attempted:
+                # OneBot answered with an error: the message may already be
+                # in the chat, so re-sending would duplicate it.
+                logger.warning(
+                    "目标 %s 的 OneBot 直发返回错误（%s），不再重发以免重复",
+                    target,
+                    receipt.error or "未知错误",
+                )
+                failed_targets.append(target)
+                continue
             sent = await self._send_chain(target, build_chain, label)
             if sent:
                 ok_targets.append(target)
-                if receipt is not None and receipt.error:
-                    logger.info(
-                        "目标 %s 的直发回执异常（%s），已回退 AstrBot 发送路径",
-                        target,
-                        receipt.error,
-                    )
             else:
                 failed_targets.append(target)
         return (

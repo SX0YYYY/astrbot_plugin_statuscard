@@ -637,3 +637,81 @@ def test_komari_message_truncated() -> None:
     text = AlertEngine._format_komari({"title": "alert", "message": "x" * 5000})
     assert len(text) <= 2000
     assert "已截断" in text
+
+
+class _ReceiptClient:
+    """OneBot client that answers like ``aiocqhttp`` (unwrapped data)."""
+
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    async def call_action(self, action: str, **kwargs: object) -> object:
+        self.calls += 1
+        return self.payload
+
+
+class _SenderHarness:
+    """Mirror of the plugin's real send-with-receipt decision logic."""
+
+    def __init__(self, client: object) -> None:
+        self.client = client
+        self.fallback_calls = 0
+
+    async def _send_chain(self, target: str, build_chain, label: str) -> bool:
+        self.fallback_calls += 1
+        return True
+
+    async def run(self, targets: list[str]) -> tuple[bool, dict]:
+        from astrbot_plugin_statuscard.onebot_receipt import send_direct
+
+        ok_targets: list[str] = []
+        receipts: dict[str, object] = {}
+        for target in targets:
+            receipt = await send_direct(
+                self.client,
+                target,
+                [{"type": "text", "data": {"text": "x"}}],
+            )
+            receipts[target] = receipt
+            if receipt.ok:
+                ok_targets.append(target)
+                continue
+            if receipt.attempted:
+                # OneBot answered with an error: never re-send.
+                continue
+            await self._send_chain(target, None, "消息")
+            ok_targets.append(target)
+        return bool(ok_targets), receipts
+
+
+def test_direct_send_success_does_not_fall_back() -> None:
+    client = _ReceiptClient({"message_id": 777})
+    harness = _SenderHarness(client)
+    ok, receipts = asyncio.run(harness.run(["default:GroupMessage:123456"]))
+    assert ok is True
+    assert client.calls == 1
+    assert harness.fallback_calls == 0
+    assert receipts["default:GroupMessage:123456"].message_id == 777
+
+
+def test_direct_send_protocol_error_is_not_resent() -> None:
+    class _FailingClient:
+        async def call_action(self, action: str, **kwargs: object) -> object:
+            class _ActionFailed(Exception):
+                def __init__(self) -> None:
+                    super().__init__("ActionFailed")
+                    self.result = {
+                        "status": "failed",
+                        "retcode": 100,
+                        "message": "blocked",
+                    }
+
+            raise _ActionFailed()
+
+    harness = _SenderHarness(_FailingClient())
+    ok, receipts = asyncio.run(harness.run(["default:GroupMessage:123456"]))
+    assert ok is False
+    # The message may already be in the chat, so it must not be sent again.
+    assert harness.fallback_calls == 0
+    assert receipts["default:GroupMessage:123456"].retcode == 100

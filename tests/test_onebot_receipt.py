@@ -5,6 +5,7 @@ import asyncio
 from astrbot_plugin_statuscard.onebot_receipt import (
     extract_receipt,
     parse_target,
+    receipt_from_exception,
     send_direct,
 )
 
@@ -29,6 +30,22 @@ def test_extract_receipt_success() -> None:
     assert receipt.error == ""
 
 
+def test_extract_receipt_accepts_unwrapped_aiocqhttp_data() -> None:
+    """``aiocqhttp`` returns ``result['data']`` directly, not the envelope."""
+
+    receipt = extract_receipt({"message_id": 4242})
+    assert receipt.ok is True
+    assert receipt.retcode == 0
+    assert receipt.message_id == 4242
+    assert receipt.attempted is True
+
+
+def test_extract_receipt_handles_empty_data() -> None:
+    receipt = extract_receipt({})
+    assert receipt.ok is True
+    assert receipt.attempted is True
+
+
 def test_extract_receipt_failure_keeps_reason() -> None:
     receipt = extract_receipt(
         {"status": "failed", "retcode": 100, "message": "group not found"}
@@ -36,12 +53,35 @@ def test_extract_receipt_failure_keeps_reason() -> None:
     assert receipt.ok is False
     assert receipt.retcode == 100
     assert "group not found" in receipt.error
+    assert receipt.attempted is True
+
+
+def test_receipt_from_exception_reads_action_failed() -> None:
+    class _ActionFailed(Exception):
+        def __init__(self, result: dict) -> None:
+            super().__init__("ActionFailed")
+            self.result = result
+
+    exc = _ActionFailed(
+        {"status": "failed", "retcode": 100, "message": "group not found"}
+    )
+    receipt = receipt_from_exception(exc)
+    assert receipt is not None
+    assert receipt.ok is False
+    assert receipt.retcode == 100
+    assert receipt.attempted is True
+
+
+def test_receipt_from_exception_ignores_transport_error() -> None:
+    receipt = receipt_from_exception(RuntimeError("connection closed"))
+    assert receipt is None
 
 
 def test_extract_receipt_handles_garbage() -> None:
     receipt = extract_receipt("not a dict")
     assert receipt.ok is False
     assert receipt.error
+    assert receipt.attempted is True
 
 
 class _FakeClient:
@@ -67,6 +107,50 @@ def test_send_direct_uses_group_action() -> None:
     action, kwargs = client.calls[0]
     assert action == "send_group_msg"
     assert kwargs["group_id"] == 123456
+
+
+def test_send_direct_with_aiocqhttp_unwrapped_data() -> None:
+    """``aiocqhttp`` returns the ``data`` field, so no retcode is present."""
+
+    client = _FakeClient({"message_id": 555})
+    receipt = asyncio.run(
+        send_direct(
+            client,
+            "default:GroupMessage:123456",
+            [{"type": "text", "data": {"text": "hi"}}],
+        )
+    )
+    assert receipt.ok is True
+    assert receipt.retcode == 0
+    assert receipt.message_id == 555
+    assert receipt.attempted is True
+
+
+def test_send_direct_marks_attempted_on_protocol_error() -> None:
+    class _FailingClient:
+        async def call_action(self, action: str, **kwargs: object) -> object:
+            class _ActionFailed(Exception):
+                def __init__(self) -> None:
+                    super().__init__("ActionFailed")
+                    self.result = {
+                        "status": "failed",
+                        "retcode": 100,
+                        "message": "group not found",
+                    }
+
+            raise _ActionFailed()
+
+    receipt = asyncio.run(
+        send_direct(
+            _FailingClient(),
+            "default:GroupMessage:123456",
+            [{"type": "text", "data": {"text": "hi"}}],
+        )
+    )
+    assert receipt.ok is False
+    assert receipt.retcode == 100
+    assert receipt.attempted is True
+    assert "group not found" in receipt.error
 
 
 def test_send_direct_uses_private_action() -> None:
