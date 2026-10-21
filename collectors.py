@@ -28,7 +28,7 @@ from astrbot.api import logger
 
 from .redactor import Redactor, read_rules
 from .utils import CpuFreq, cfg_get, readable_python_version
-from .version_resolver import resolve_astrbot_version
+from .version import resolve_astrbot_version
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _TZ_WARNED: set[str] = set()

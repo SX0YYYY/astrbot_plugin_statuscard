@@ -29,8 +29,7 @@ from .collectors import (
 )
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder
-from .version import __version__
-from .version_resolver import resolve_astrbot_version
+from .version import __version__, resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
 PLUGIN_VERSION = __version__

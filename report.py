@@ -31,7 +31,7 @@ from .report_view import (
 )
 from .sampler import read_message_stats_total
 from .state import StateStore
-from .version_resolver import resolve_astrbot_version
+from .version import resolve_astrbot_version
 
 
 def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
