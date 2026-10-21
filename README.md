@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.10.6-blue)
+![Version](https://img.shields.io/badge/version-2.12.1-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -6,7 +6,7 @@
 
 # 服务器状态卡
 
-<img src="logo.png" width="96" height="96" alt="服务器状态卡图标" align="right">
+<img src="https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/logo.png" width="96" height="96" alt="服务器状态卡图标" align="right">
 
 把服务器的 CPU、内存、磁盘、网络、进程等信息，做成一张状态图发到 QQ 群；需要时还能在服务掉线、资源过高或每天固定时间主动通知你，并发送资源/异常/QQ/Token/网站延迟/进程日报。
 
@@ -55,17 +55,17 @@
 
 ## 效果预览
 
-![状态卡示例](docs/statuscard-example.png)
+![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.png)
 
 示例图使用脱敏配置生成，主机名、进程名和 QQ 统计已隐藏；实际卡片会显示真实数据。
 
 ## 配置页预览
 
-![状态卡显示](docs/config-page-1.png)
+![状态卡显示](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-1.png)
 
-![告警与每日定时状态图](docs/config-page-2.png)
+![告警与每日定时状态图](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-2.png)
 
-![Webhook 与日报](docs/config-page-3.png)
+![Webhook 与日报](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-3.png)
 
 截图中的推送目标和 Webhook Token 已替换为示例值；实际使用时填写自己的群号和 Token。
 
