@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.10.5-blue)
+![Version](https://img.shields.io/badge/version-2.10.6-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -437,6 +437,8 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 回执是判断“QQ 侧是否真的收到”的唯一依据：`retcode=0` 表示 QQ 侧已接受；`retcode` 非 0 或日志里没有回执，说明消息没有真正送达（可能是被风控吞掉）。
 
 > 手动发送 `查看状态` 走的是 QQ 的消息回复通道，不经过主动推送，因此没有回执记录，这是正常现象。
+
+**关于重复发送**：只有当直发请求**根本没发出去**（拿不到 OneBot 连接、目标类型不支持、连接中断）时，插件才会退回 AstrBot 的发送路径再发一次。如果 OneBot 已经返回了结果（哪怕是错误码），插件**不会重发**——因为那一刻消息可能已经在群里了，重发会造成重复。
 
 ### 掉线/恢复告警为什么没收到
 
