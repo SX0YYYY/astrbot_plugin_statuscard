@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.10.2-blue)
+![Version](https://img.shields.io/badge/version-2.10.3-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -416,6 +416,18 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 - 服务监测需要连续失败达到设定次数才会告警，短暂抖动不会报
 - 插件不监测 AstrBot 自身的 WebUI/进程；AstrBot 重启时插件也不在运行，无法自己告警自己
 - Uptime Kuma 的邮件通知和本插件的群告警是两套通道；Uptime Kuma 监控 AstrBot WebUI 的 Down/Up 不会自动变成 QQ 群消息。这类 AstrBot 自身故障请用外部 Uptime Kuma / Komari 监测
+
+### 怎么确认消息真的发到了 QQ
+
+主动推送会直接调用 OneBot 接口发送，并记录协议回执：
+
+- 成功时日志形如 `OneBot 直发成功 send_group_msg -> default:GroupMessage:xxxx（message_id=12345，retcode=0）`
+- 被 QQ 拒绝时日志形如 `OneBot 直发被拒绝 ...（retcode=100，说明原因）`
+- `状态卡诊断` 的“最近主动推送”会显示每个目标的 `retcode` 和 `message_id`
+
+回执是判断“QQ 侧是否真的收到”的唯一依据：`retcode=0` 表示 QQ 侧已接受；`retcode` 非 0 或日志里没有回执，说明消息没有真正送达（可能是被风控吞掉）。
+
+> 手动发送 `查看状态` 走的是 QQ 的消息回复通道，不经过主动推送，因此没有回执记录，这是正常现象。
 
 ### 掉线/恢复告警为什么没收到
 

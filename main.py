@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -26,7 +26,8 @@ from .collectors import (
     fetch_avatar_bytes,
     uploaded_file_path,
 )
-from .delivery import deliver_targets
+from .delivery import DeliveryResult
+from .onebot_receipt import send_direct
 from .i18n import tr
 from .monitor import ServiceMonitor
 from .page_api import PageApi
@@ -78,10 +79,40 @@ class StatusCardPlugin(Star):
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
-        self._diag: dict[str, float] = {}
+        self._diag: dict[str, Any] = self._load_diag()
         self.page_api = PageApi(self)
         self.page_api.register()
         self._check_config_permissions()
+
+    def _load_diag(self) -> dict[str, Any]:
+        """Restore the diagnostics snapshot kept in ``state.json``.
+
+        The diagnostics used to live only in memory, so a plugin reload wiped
+        them and ``状态卡诊断`` claimed nothing had been rendered yet even
+        though a card had just been sent. Persisting them keeps the command
+        useful across restarts.
+        """
+
+        raw = self.state.get("diag", {})
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for key, value in raw.items():
+            name = str(key)
+            if isinstance(value, bool):
+                out[name] = float(value)
+            elif isinstance(value, (int, float)):
+                out[name] = float(value)
+            else:
+                out[name] = str(value)
+        return out
+
+    def _save_diag(self) -> None:
+        try:
+            self.state.data["diag"] = dict(self._diag)
+            self.state.save()
+        except Exception as exc:
+            logger.warning("保存诊断信息失败: %s", exc)
 
     def _check_config_permissions(self) -> None:
         if os.name != "posix":
@@ -312,6 +343,7 @@ class StatusCardPlugin(Star):
                     "last_error_at": time.time(),
                 }
             )
+            self._save_diag()
             logger.exception("生成系统状态图片失败")
             try:
                 summary = await self.build_summary_text(event=event)
@@ -381,6 +413,7 @@ class StatusCardPlugin(Star):
                     self._diag.get("last_render_ms", 0),
                     self._diag.get("last_collect_ms", 0),
                 )
+            self._save_diag()
             raise
         self._diag.update(
             {
@@ -398,6 +431,7 @@ class StatusCardPlugin(Star):
                 self._diag.get("last_render_ms", 0),
                 self._diag.get("last_collect_ms", 0),
             )
+        self._save_diag()
         return url
 
     async def build_status_image(self) -> str | None:
@@ -448,6 +482,7 @@ class StatusCardPlugin(Star):
                     "T2I 日报渲染失败：%.1fms",
                     self._diag.get("last_report_render_ms", 0),
                 )
+            self._save_diag()
             raise
         self._diag.update(
             {
@@ -463,6 +498,7 @@ class StatusCardPlugin(Star):
                 "T2I 日报渲染完成：%.1fms",
                 self._diag.get("last_report_render_ms", 0),
             )
+        self._save_diag()
         return result
 
     async def _resolve_background(self):
@@ -547,6 +583,7 @@ class StatusCardPlugin(Star):
         source: str = "unknown",
         ok_targets: list[str] | None = None,
         failed_targets: list[str] | None = None,
+        receipts: dict[str, Any] | None = None,
     ) -> None:
         try:
             self.state.data["delivery"] = {
@@ -557,6 +594,7 @@ class StatusCardPlugin(Star):
                 "source": source,
                 "ok_targets": list(ok_targets or []),
                 "failed_targets": list(failed_targets or []),
+                "receipts": receipts or {},
             }
             self.state.save()
         except Exception as exc:
@@ -568,11 +606,9 @@ class StatusCardPlugin(Star):
         text: str,
         source: str = "unknown",
     ) -> bool:
-        result = await deliver_targets(
-            targets,
-            lambda target: self._send_chain(
-                target, lambda: MessageChain([Comp.Plain(text)]), "消息"
-            ),
+        segments = [{"type": "text", "data": {"text": text}}]
+        result, receipts = await self._send_with_receipt(
+            targets, segments, lambda: MessageChain([Comp.Plain(text)]), "消息"
         )
         self._record_delivery(
             "text",
@@ -581,6 +617,7 @@ class StatusCardPlugin(Star):
             source=source,
             ok_targets=result.ok_targets,
             failed_targets=result.failed_targets,
+            receipts=receipts,
         )
         return result.ok
 
@@ -590,13 +627,12 @@ class StatusCardPlugin(Star):
         image_url: str,
         source: str = "unknown",
     ) -> bool:
-        result = await deliver_targets(
+        segments = [{"type": "image", "data": {"file": image_url}}]
+        result, receipts = await self._send_with_receipt(
             targets,
-            lambda target: self._send_chain(
-                target,
-                lambda: MessageChain([Comp.Image.fromURL(image_url)]),
-                "图片",
-            ),
+            segments,
+            lambda: MessageChain([Comp.Image.fromURL(image_url)]),
+            "图片",
         )
         self._record_delivery(
             "image",
@@ -605,8 +641,71 @@ class StatusCardPlugin(Star):
             source=source,
             ok_targets=result.ok_targets,
             failed_targets=result.failed_targets,
+            receipts=receipts,
         )
         return result.ok
+
+    async def _send_with_receipt(
+        self,
+        targets: list[str],
+        segments: list[dict[str, Any]],
+        build_chain,
+        label: str,
+    ) -> tuple[DeliveryResult, dict[str, Any]]:
+        """Send to every target, logging the OneBot protocol receipt.
+
+        The direct OneBot path is preferred because it returns the protocol
+        receipt (``retcode`` and ``message_id``), which is the only way to
+        tell whether QQ really accepted the message. When the direct path is
+        unavailable (no OneBot client, unsupported target, or a transport
+        error) the normal AstrBot send path is used as a fallback so a message
+        is never dropped just because the receipt could not be obtained.
+        """
+
+        ok_targets: list[str] = []
+        failed_targets: list[str] = []
+        receipts: dict[str, Any] = {}
+        client = None
+        try:
+            client = _get_aiocqhttp_client(
+                self.context,
+                str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
+            )
+        except Exception:
+            client = None
+        for target in targets:
+            receipt = None
+            if client is not None:
+                receipt = await send_direct(client, target, segments)
+            if receipt is not None:
+                receipts[target] = {
+                    "ok": receipt.ok,
+                    "retcode": receipt.retcode,
+                    "message_id": receipt.message_id,
+                    "error": receipt.error,
+                }
+            if receipt is not None and receipt.ok:
+                ok_targets.append(target)
+                continue
+            sent = await self._send_chain(target, build_chain, label)
+            if sent:
+                ok_targets.append(target)
+                if receipt is not None and receipt.error:
+                    logger.info(
+                        "目标 %s 的直发回执异常（%s），已回退 AstrBot 发送路径",
+                        target,
+                        receipt.error,
+                    )
+            else:
+                failed_targets.append(target)
+        return (
+            DeliveryResult(
+                ok=bool(ok_targets),
+                ok_targets=ok_targets,
+                failed_targets=failed_targets,
+            ),
+            receipts,
+        )
 
     async def build_summary_text(self, event: AstrMessageEvent | None = None) -> str:
         collected = await collect_all(
@@ -799,6 +898,21 @@ class StatusCardPlugin(Star):
                 lines.append(
                     "失败目标: " + "、".join(str(item) for item in failed_targets[:3])
                 )
+            receipts = delivery.get("receipts") or {}
+            if isinstance(receipts, dict) and receipts:
+                parts: list[str] = []
+                for target, receipt in list(receipts.items())[:3]:
+                    if not isinstance(receipt, dict):
+                        continue
+                    retcode = receipt.get("retcode")
+                    message_id = receipt.get("message_id")
+                    state = "成功" if receipt.get("ok") else "失败"
+                    detail = f"retcode={retcode}"
+                    if message_id is not None:
+                        detail += f"，message_id={message_id}"
+                    parts.append(f"{target}（{state}，{detail}）")
+                if parts:
+                    lines.append("OneBot 回执: " + "；".join(parts))
         else:
             lines.append("最近主动推送: 暂无记录")
         report_status = self.report.status()

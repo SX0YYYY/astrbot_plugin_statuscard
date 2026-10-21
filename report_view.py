@@ -1151,19 +1151,22 @@ def build_report_text(view: dict[str, Any]) -> str:
         lines.append(f"异常/失败: {anomalies.get('count', 0)} 次")
     qq = view.get("qq") or {}
     if "qq" in sections:
-        yesterday = qq.get("yesterday") or {}
-        recv_text = yesterday.get("recv_text") or "--"
-        if recv_text == "--":
-            recv_text = "数据积累中"
-        lines.append(
-            "QQ: 好友 {0} / 群 {1} / 群员 {2}；发送 {3} / 接收 {4}".format(
-                yesterday.get("friends_text", "--"),
-                yesterday.get("groups_text", "--"),
-                yesterday.get("members_text", "--"),
-                yesterday.get("sent_text", "--"),
-                recv_text,
+        if not qq.get("available", True):
+            lines.append(f"QQ: {qq.get('empty_reason') or '暂无数据'}")
+        else:
+            yesterday = qq.get("yesterday") or {}
+            recv_text = yesterday.get("recv_text") or "--"
+            if recv_text == "--":
+                recv_text = "数据积累中"
+            lines.append(
+                "QQ: 好友 {0} / 群 {1} / 群员 {2}；发送 {3} / 接收 {4}".format(
+                    yesterday.get("friends_text", "--"),
+                    yesterday.get("groups_text", "--"),
+                    yesterday.get("members_text", "--"),
+                    yesterday.get("sent_text", "--"),
+                    recv_text,
+                )
             )
-        )
     token = view.get("token") or {}
     if "token" in sections:
         if token.get("available"):
