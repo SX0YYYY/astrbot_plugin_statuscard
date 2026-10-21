@@ -719,12 +719,20 @@ def _save_sysinfo_cache(state: Any, updates: dict[str, Any]) -> None:
     """Update the shared cache without forcing a disk write from a worker thread.
 
     ``collect_all`` runs the system-info block in ``asyncio.to_thread`` while
-    the sampler also saves state. Writing the whole state file from both places
-    can race on the temporary file, so this only updates the in-memory dict;
-    the next sampler save persists it.
+    the sampler also saves state. The cache is therefore updated through the
+    store's lock so a concurrent serialisation never walks a dictionary that
+    is being mutated; the write to disk is left to the sampler.
     """
 
     if state is None or not hasattr(state, "setdefault"):
+        return
+    section = getattr(state, "section", None)
+    if callable(section):
+        with section("sysinfo_cache") as cache:
+            if not isinstance(cache, dict):
+                cache = {}
+                state.data["sysinfo_cache"] = cache
+            cache.update(updates)
         return
     cache = state.setdefault("sysinfo_cache", {})
     if not isinstance(cache, dict):

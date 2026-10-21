@@ -39,6 +39,38 @@ class _ConfigPlugin:
         self.config = config
 
 
+def test_page_redact_uses_real_schema_defaults() -> None:
+    """The fallback must work with the defaults AstrBot writes out.
+
+    ``display.page_redact`` defaults to an empty list, not ``None``, so a
+    check for ``None`` would never fall back to the card rules.
+    """
+
+    import json
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8-sig"))
+    display_defaults = {
+        key: value.get("default") for key, value in schema["display"]["items"].items()
+    }
+    assert display_defaults["page_redact"] == []
+    assert display_defaults["redact"] == []
+
+    api = PageApi(
+        _ConfigPlugin(
+            {
+                "display": {
+                    "redact": ["hostname", "process", "qq_stats"],
+                    "page_redact": display_defaults["page_redact"],
+                }
+            }
+        )
+    )
+    assert api._redact() == {"hostname", "process", "qq_stats"}
+    assert api._host() == "已隐藏"
+
+
 def test_page_redact_overrides_card_redact() -> None:
     api = PageApi(
         _ConfigPlugin(
@@ -58,9 +90,24 @@ def test_page_redact_falls_back_to_card_redact() -> None:
     assert api._redact() == {"hostname", "process"}
 
 
-def test_page_redact_empty_list_overrides_card_redact() -> None:
+def test_page_redact_empty_list_falls_back_to_card_redact() -> None:
+    """An empty dashboard list means "follow the card", as the README says."""
+
     api = PageApi(
         _ConfigPlugin({"display": {"redact": ["hostname"], "page_redact": []}})
     )
-    assert api._redact() == set()
+    assert api._redact() == {"hostname"}
+    assert api._host() == "已隐藏"
+
+
+def test_page_redact_explicit_rules_win() -> None:
+    """A non-empty dashboard list overrides the card rules."""
+
+    api = PageApi(
+        _ConfigPlugin(
+            {"display": {"redact": ["hostname", "process"], "page_redact": ["network"]}}
+        )
+    )
+    assert api._redact() == {"network"}
+    # The card rules must not leak into the dashboard.
     assert api._host() != "已隐藏"

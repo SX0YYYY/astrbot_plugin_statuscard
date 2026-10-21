@@ -70,11 +70,12 @@ def clean_report_sections(sections: Any) -> list[str] | None:
 
 
 def redact_url(url: Any) -> str:
-    """Strip query strings and fragments before persisting a probe target.
+    """Strip credentials, query strings and fragments from a probe target.
 
-    Monitor URLs may contain credentials in ``?token=`` style parameters, so
-    only the scheme/host/path portion is kept for ``report.db`` and reports.
-    Non-URL text is returned unchanged.
+    Monitor URLs may carry credentials either in the ``user:password@host``
+    part or in ``?token=`` style parameters, so only the scheme, host, port
+    and path are kept for ``report.db`` and reports. Non-URL text is returned
+    unchanged.
     """
 
     text = str(url or "").strip()
@@ -86,7 +87,17 @@ def redact_url(url: Any) -> str:
         return text
     if not parts.netloc:
         return text
-    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        # Keep IPv6 literals readable.
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port:
+        host = f"{host}:{port}"
+    return f"{parts.scheme}://{host}{parts.path}"
 
 
 def truncate_text(text: Any, limit: int = 2000) -> str:

@@ -10,10 +10,13 @@ import psutil
 from astrbot.api import logger
 
 try:
-    from quart import jsonify, request
-except Exception:  # pragma: no cover - AstrBot normally provides Quart
-    jsonify = None  # type: ignore[assignment]
-    request = None  # type: ignore[assignment]
+    # The official helper works on every supported AstrBot version and does
+    # not depend on the web framework the dashboard happens to use.
+    from astrbot.api.web import json_response as _json_response
+    from astrbot.api.web import request as _request
+except Exception:  # pragma: no cover - very old AstrBot builds
+    _json_response = None  # type: ignore[assignment]
+    _request = None  # type: ignore[assignment]
 
 from .collectors import (
     cached_cpu_percent,
@@ -30,6 +33,26 @@ from .version_resolver import resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
 PLUGIN_VERSION = __version__
+
+
+def jsonify(payload: Any) -> Any:
+    """Return a JSON response for the current plugin Web handler."""
+
+    if _json_response is None:
+        raise RuntimeError("当前 AstrBot 不支持 astrbot.api.web，插件页面 API 不可用")
+    return _json_response(payload)
+
+
+def _query_value(name: str, default: Any = None) -> Any:
+    """Read a query parameter from the bound plugin request."""
+
+    if _request is None:
+        return default
+    try:
+        return _request.query.get(name, default)
+    except Exception:
+        return default
+
 
 RANGE_SECONDS = {
     "24h": 86400,
@@ -56,8 +79,8 @@ class PageApi:
     # ------------------------------------------------------------------
 
     def register(self) -> None:
-        if jsonify is None or request is None:
-            logger.warning("当前环境缺少 Quart，插件页面 API 不可用")
+        if _json_response is None or _request is None:
+            logger.warning("当前 AstrBot 缺少 astrbot.api.web，插件页面 API 不可用")
             return
         register = getattr(self.plugin.context, "register_web_api", None)
         if not callable(register):
@@ -82,16 +105,22 @@ class PageApi:
 
         The dashboard has its own switch so that an operator can hide details
         in the WebUI without also hiding them on the QQ status card, and the
-        other way around. ``display.page_redact`` wins when it is set; when it
-        is empty the card redaction rules are used as a fallback.
+        other way around. ``display.page_redact`` wins when it lists any
+        rule; when it is empty the card redaction rules are used as a
+        fallback, so leaving the dashboard switch alone keeps the dashboard
+        as private as the card.
         """
 
         raw = cfg_get(self.plugin.config, "display.page_redact", None)
-        if raw is None:
-            raw = cfg_get(self.plugin.config, "display.redact", []) or []
         if isinstance(raw, str):
             raw = [raw]
-        return {str(item).strip().lower() for item in raw if str(item).strip()}
+        rules = {str(item).strip().lower() for item in (raw or []) if str(item).strip()}
+        if rules:
+            return rules
+        fallback = cfg_get(self.plugin.config, "display.redact", []) or []
+        if isinstance(fallback, str):
+            fallback = [fallback]
+        return {str(item).strip().lower() for item in fallback if str(item).strip()}
 
     def _host(self) -> str:
         if "hostname" in self._redact():
@@ -279,7 +308,7 @@ class PageApi:
     # ------------------------------------------------------------------
 
     async def history(self):
-        key = str(request.args.get("range", "24h")).lower()
+        key = str(_query_value("range", "24h")).lower()
         seconds = RANGE_SECONDS.get(key, 86400)
         end = int(time.time())
         start = end - seconds
@@ -333,7 +362,7 @@ class PageApi:
 
     async def events(self):
         try:
-            days = int(request.args.get("days", 7))
+            days = int(_query_value("days", 7) or 7)
         except (TypeError, ValueError):
             days = 7
         days = max(1, min(30, days))
@@ -386,7 +415,9 @@ class PageApi:
             return jsonify(cached[1])
         view: dict[str, Any] = {}
         try:
-            builder = DailyReportBuilder(plugin.report_store, plugin.config)
+            builder = DailyReportBuilder(
+                plugin.report_store, plugin.config, redact=self._redact()
+            )
             sections = cfg_get(plugin.config, "daily_report.sections", None)
             view = builder.build(
                 day=None,

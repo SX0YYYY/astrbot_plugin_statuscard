@@ -231,6 +231,7 @@ class DailyReportBuilder:
         store: ReportStore,
         config: Any,
         db_path: Path | str | None = None,
+        redact: set[str] | list[str] | None = None,
     ):
         self.store = store
         self.config = config
@@ -239,7 +240,13 @@ class DailyReportBuilder:
         self.tz_name = str(
             cfg_get(config, "display.timezone", "Asia/Shanghai") or "Asia/Shanghai"
         )
-        raw_redact = cfg_get(config, "display.redact", []) or []
+        # The Web dashboard passes its own rules so that the dashboard can be
+        # more or less strict than the QQ status card.
+        raw_redact = (
+            redact
+            if redact is not None
+            else cfg_get(config, "display.redact", []) or []
+        )
         if isinstance(raw_redact, str):
             raw_redact = [raw_redact]
         self.redact = {

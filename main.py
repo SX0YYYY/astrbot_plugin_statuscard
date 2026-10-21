@@ -27,7 +27,7 @@ from .collectors import (
     uploaded_file_path,
 )
 from .delivery import DeliveryResult
-from .onebot_receipt import send_direct
+from .onebot_receipt import send_direct, should_retry_send
 from .i18n import tr
 from .monitor import ServiceMonitor
 from .page_api import PageApi
@@ -109,7 +109,7 @@ class StatusCardPlugin(Star):
 
     def _save_diag(self) -> None:
         try:
-            self.state.data["diag"] = dict(self._diag)
+            self.state.set("diag", dict(self._diag))
             self.state.save()
         except Exception as exc:
             logger.warning("保存诊断信息失败: %s", exc)
@@ -144,34 +144,33 @@ class StatusCardPlugin(Star):
         persist the inferred source values.
         """
 
-        migration = self.state.setdefault("migration", {})
-        if not isinstance(migration, dict):
-            migration = {}
-            self.state.data["migration"] = migration
-        if migration.get("media_source_v2"):
-            return
+        with self.state.section("migration") as migration:
+            if migration.get("media_source_v2"):
+                return
 
-        changed = False
-        for section_name, source_name, upload_key in (
-            ("avatar", "avatar_source", "avatar.avatar_upload_files"),
-            ("background", "background_source", "background.bg_upload_files"),
-        ):
-            section = (
-                self.config.get(section_name) if isinstance(self.config, dict) else None
-            )
-            if not isinstance(section, dict):
-                continue
-            desired = (
-                "upload"
-                if uploaded_file_path(self.config, upload_key, self.data_dir)
-                is not None
-                else "default"
-            )
-            if section.get(source_name) != desired:
-                section[source_name] = desired
-                changed = True
+            changed = False
+            for section_name, source_name, upload_key in (
+                ("avatar", "avatar_source", "avatar.avatar_upload_files"),
+                ("background", "background_source", "background.bg_upload_files"),
+            ):
+                section = (
+                    self.config.get(section_name)
+                    if isinstance(self.config, dict)
+                    else None
+                )
+                if not isinstance(section, dict):
+                    continue
+                desired = (
+                    "upload"
+                    if uploaded_file_path(self.config, upload_key, self.data_dir)
+                    is not None
+                    else "default"
+                )
+                if section.get(source_name) != desired:
+                    section[source_name] = desired
+                    changed = True
 
-        migration["media_source_v2"] = True
+            migration["media_source_v2"] = True
         self.state.save()
         if changed and hasattr(self.config, "save_config"):
             try:
@@ -183,27 +182,26 @@ class StatusCardPlugin(Star):
     def _migrate_report_sections(self) -> None:
         """Remove the retired ``todo`` module from a legacy report config."""
 
-        migration = self.state.setdefault("migration", {})
-        if not isinstance(migration, dict):
-            migration = {}
-            self.state.data["migration"] = migration
-        if migration.get("daily_report_sections_v1"):
-            return
-        section = (
-            self.config.get("daily_report") if isinstance(self.config, dict) else None
-        )
-        if isinstance(section, dict):
-            cleaned = clean_report_sections(section.get("sections"))
-            if cleaned is not None:
-                section["sections"] = cleaned
-                if hasattr(self.config, "save_config"):
-                    try:
-                        self.config.save_config()
-                        logger.info("已从日报内容中移除旧待办模块：%s", cleaned)
-                    except Exception:
-                        logger.exception("保存日报内容迁移失败")
-                        return
-        migration["daily_report_sections_v1"] = True
+        with self.state.section("migration") as migration:
+            if migration.get("daily_report_sections_v1"):
+                return
+            section = (
+                self.config.get("daily_report")
+                if isinstance(self.config, dict)
+                else None
+            )
+            if isinstance(section, dict):
+                cleaned = clean_report_sections(section.get("sections"))
+                if cleaned is not None:
+                    section["sections"] = cleaned
+                    if hasattr(self.config, "save_config"):
+                        try:
+                            self.config.save_config()
+                            logger.info("已从日报内容中移除旧待办模块：%s", cleaned)
+                        except Exception:
+                            logger.exception("保存日报内容迁移失败")
+                            return
+            migration["daily_report_sections_v1"] = True
         self.state.save()
 
     async def initialize(self):
@@ -233,43 +231,6 @@ class StatusCardPlugin(Star):
     # status card
     # ------------------------------------------------------------------
 
-    def _status_access_allowed(self, event: AstrMessageEvent) -> bool:
-        mode = (
-            str(cfg_get(self.config, "display.access", "all") or "all").strip().lower()
-        )
-        if mode == "all":
-            return True
-        try:
-            if event.is_admin():
-                return True
-        except Exception:
-            pass
-        if mode == "admin":
-            return False
-        if mode != "allowlist":
-            return True
-
-        raw = cfg_get(self.config, "display.allowlist", [])
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list):
-            return False
-        allowed = {str(item).strip() for item in raw if str(item).strip()}
-        values: set[str] = set()
-        try:
-            if event.unified_msg_origin:
-                values.add(str(event.unified_msg_origin))
-        except Exception:
-            pass
-        for getter in ("get_sender_id", "get_group_id"):
-            try:
-                value = getattr(event, getter)()
-                if value:
-                    values.add(str(value))
-            except Exception:
-                pass
-        return bool(allowed & values)
-
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("查看状态")
     async def cmd_status(self, event: AstrMessageEvent):
@@ -282,9 +243,6 @@ class StatusCardPlugin(Star):
             pass
         if platform_name and not is_supported_platform(platform_name):
             yield event.plain_result(tr(self.config, "platform_unsupported"))
-            return
-        if not self._status_access_allowed(event):
-            yield event.plain_result(tr(self.config, "admin_only"))
             return
         cooldown = max(
             0, min(3600, cfg_int(self.config, "display.cooldown_seconds", 10))
@@ -541,9 +499,12 @@ class StatusCardPlugin(Star):
         """Send one message chain and retry transport errors.
 
         A ``False`` result means AstrBot could not find a platform instance for
-        the target; retrying cannot fix that, so it is reported once. Exceptions
-        are usually transient (WebSocket closed, timeout), so retry twice with
-        a short backoff.
+        the target; retrying cannot fix that, so it is reported once.
+
+        Only errors that prove the message never left the plugin are retried.
+        Once the request was handed to the platform, a transport error can
+        still mean the message arrived and only the acknowledgement was lost,
+        so retrying would show the same message several times in the chat.
         """
 
         for attempt in range(3):
@@ -555,6 +516,14 @@ class StatusCardPlugin(Star):
                 return False
             except Exception as exc:
                 detail = str(exc) or exc.__class__.__name__
+                if not should_retry_send(exc):
+                    logger.warning(
+                        "主动发送%s到 %s 未确认送达（可能已发出，不重发以免重复）: %s",
+                        label,
+                        target,
+                        detail,
+                    )
+                    return False
                 if attempt >= 2:
                     logger.warning(
                         "主动发送%s到 %s 失败（已重试 %d 次）: %s",
@@ -586,16 +555,19 @@ class StatusCardPlugin(Star):
         receipts: dict[str, Any] | None = None,
     ) -> None:
         try:
-            self.state.data["delivery"] = {
-                "ts": time.time(),
-                "kind": kind,
-                "ok": ok,
-                "target_count": len(targets),
-                "source": source,
-                "ok_targets": list(ok_targets or []),
-                "failed_targets": list(failed_targets or []),
-                "receipts": receipts or {},
-            }
+            self.state.set(
+                "delivery",
+                {
+                    "ts": time.time(),
+                    "kind": kind,
+                    "ok": ok,
+                    "target_count": len(targets),
+                    "source": source,
+                    "ok_targets": list(ok_targets or []),
+                    "failed_targets": list(failed_targets or []),
+                    "receipts": receipts or {},
+                },
+            )
             self.state.save()
         except Exception as exc:
             logger.warning("记录主动推送结果失败: %s", exc)

@@ -459,16 +459,16 @@
             "condition": {
               "enabled": true
             },
-            "hint": "留空表示不校验；建议设置。"
+            "hint": "留空表示不校验；建议设置，且不要提交到公开仓库。"
           },
           "require_token": {
             "description": "强制要求 Token",
             "type": "bool",
-            "default": false,
+            "default": true,
             "condition": {
               "enabled": true
             },
-            "hint": "开启后必须配置 Token，否则 Webhook 拒绝启动；Webhook 暴露到本机以外时建议开启。"
+            "hint": "开启后必须配置 Token，否则 Webhook 拒绝启动；默认开启，关闭后请务必只监听 127.0.0.1。"
           }
         }
       }

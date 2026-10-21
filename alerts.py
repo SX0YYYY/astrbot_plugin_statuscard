@@ -337,7 +337,7 @@ class AlertEngine:
 
         if self.offline_notify:
             await self._check_offline()
-        self.state.data["alerts_last_sample"] = now
+        self.state.set("alerts_last_sample", now)
         self.state.save()
 
     async def _evaluate(
@@ -460,16 +460,23 @@ class AlertEngine:
                 online = bool(status.get("online"))
             else:
                 online = True
-        except Exception:
-            online = False
+        except Exception as exc:
+            # The status call failed. That is not the same as OneBot
+            # reporting the bot as offline: a restarting NapCat container or a
+            # half-open socket also raises here. Only an explicit
+            # ``online: false`` counts as a confirmed offline state.
+            online = None
+            logger.debug("OneBot get_status 调用失败: %s", exc)
 
         alerts = self.state.setdefault("alerts", {})
         st = alerts.setdefault("offline", {})
         now = time.time()
         count = int(st.get("count") or 0)
+        unreachable = int(st.get("unreachable") or 0)
 
         if online:
             st["count"] = 0
+            st["unreachable"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
@@ -528,6 +535,21 @@ class AlertEngine:
 
         # Keep pending_recovery for the next online transition instead of
         # dropping a recovery notice that has not been delivered yet.
+        if online is None:
+            # The status call itself failed, so the state of the connection is
+            # unknown. Count it separately and stay quiet: a restarting
+            # NapCat container must not be reported as a confirmed offline
+            # bot, which would raise a false alarm.
+            st["unreachable"] = unreachable + 1
+            st["count"] = 0
+            if unreachable + 1 >= self.sustain * 3:
+                logger.warning(
+                    "OneBot 状态查询连续 %d 次失败，暂时无法确认 Bot 在线状态",
+                    unreachable + 1,
+                )
+            return
+
+        st["unreachable"] = 0
         count += 1
         st["count"] = count
         if not st.get("alerting") and count >= self.sustain:
@@ -717,7 +739,7 @@ class AlertEngine:
             path = "/" + path
         token = str(cfg_get(self.config, "alerts.komari_webhook.token", "") or "")
         require_token = cfg_bool(
-            self.config, "alerts.komari_webhook.require_token", False
+            self.config, "alerts.komari_webhook.require_token", True
         )
         if require_token and not token:
             logger.error(
@@ -726,9 +748,14 @@ class AlertEngine:
             return
 
         if host == "0.0.0.0" and not token:
-            logger.warning(
-                "Komari Webhook 绑定 0.0.0.0 且未设置 token，存在安全风险；建议改为 127.0.0.1 或设置 token"
+            # Exposing the webhook on every interface without a token would
+            # let anyone post to it and push arbitrary messages into the
+            # operator's chat, so the listener refuses to start.
+            logger.error(
+                "Komari Webhook 绑定 0.0.0.0 但未配置 Token，已拒绝启动；"
+                "请改用 127.0.0.1，或填写 Token 后再启用"
             )
+            return
 
         app = web.Application()
         max_body_bytes = 64 * 1024

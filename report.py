@@ -325,6 +325,7 @@ class DailyReporter:
         self._last_sent_day: str | None = None
         self._pending_retry: tuple[str, float] | None = None
         self._pending_retry_count = 0
+        self._pending_retry_day: str | None = None
         self._next_run_text: str | None = None
         self._disabled_logged = False
 
@@ -469,8 +470,7 @@ class DailyReporter:
                     if not self._disabled_logged:
                         logger.warning("日报定时任务暂停：daily_report.enabled=false")
                         self._disabled_logged = True
-                    self._pending_retry = None
-                    self._pending_retry_count = 0
+                    self._clear_retry()
                     await asyncio.sleep(60)
                     continue
                 self._disabled_logged = False
@@ -530,6 +530,10 @@ class DailyReporter:
                     != tz_name
                 ):
                     continue
+                # A fresh scheduled run starts a new attempt series, so the
+                # retry counter of a previous evening must not carry over.
+                self._pending_retry_count = 0
+                self._pending_retry_day = self._today()
                 await self._send_scheduled()
                 last_logged = None
             except asyncio.CancelledError:
@@ -543,6 +547,18 @@ class DailyReporter:
     # ------------------------------------------------------------------
 
     def _schedule_retry(self, day: str) -> None:
+        """Remember a failed delivery and queue the next attempt.
+
+        The retry counter is scoped to a single day. Without that scope a
+        few unlucky evenings in a row would push the counter past the limit
+        and every later evening would be abandoned after its very first
+        failure, so the daily report would silently stop being delivered.
+        """
+
+        today = self._today()
+        if self._pending_retry_day != today:
+            self._pending_retry_day = today
+            self._pending_retry_count = 0
         self._pending_retry_count += 1
         if self._pending_retry_count > 3:
             self._pending_retry = None
@@ -561,6 +577,10 @@ class DailyReporter:
     def _clear_retry(self) -> None:
         self._pending_retry = None
         self._pending_retry_count = 0
+        self._pending_retry_day = None
+
+    def _today(self) -> str:
+        return now_in_timezone(self.config).strftime("%Y-%m-%d")
 
     async def _send_scheduled(self) -> None:
         targets = self._targets()

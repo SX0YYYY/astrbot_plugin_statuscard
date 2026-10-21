@@ -487,46 +487,60 @@ class ServiceMonitor:
             keyword = str(item.get("keyword") or "").strip()
             try:
                 started = time.perf_counter()
-                async with (
-                    httpx.AsyncClient(follow_redirects=True, timeout=timeout) as cli,
-                    cli.stream("GET", url) as resp,
-                ):
-                    status_code = resp.status_code
-                    if expected and status_code != expected:
-                        return (
-                            False,
-                            f"HTTP {status_code}（期望 {expected}）",
-                            url,
-                        )
-                    if not expected and status_code >= 400:
-                        return False, f"HTTP {status_code}", url
-                    if keyword:
-                        limit = max(
-                            1024,
-                            min(
-                                10 * 1024 * 1024,
-                                cfg_int(
-                                    self.config,
-                                    "monitors.max_response_bytes",
-                                    262144,
+
+                # The httpx timeout applies to every single read, so a slow
+                # drip can keep the probe alive far beyond the configured
+                # limit. The outer wait_for caps the whole probe.
+                async def _do_probe() -> tuple[bool, str, str]:
+                    async with (
+                        httpx.AsyncClient(
+                            follow_redirects=True, timeout=timeout
+                        ) as cli,
+                        cli.stream("GET", url) as resp,
+                    ):
+                        status_code = resp.status_code
+                        if expected and status_code != expected:
+                            return (
+                                False,
+                                f"HTTP {status_code}（期望 {expected}）",
+                                url,
+                            )
+                        if not expected and status_code >= 400:
+                            return False, f"HTTP {status_code}", url
+                        if keyword:
+                            limit = max(
+                                1024,
+                                min(
+                                    10 * 1024 * 1024,
+                                    cfg_int(
+                                        self.config,
+                                        "monitors.max_response_bytes",
+                                        262144,
+                                    ),
                                 ),
-                            ),
-                        )
-                        body = bytearray()
-                        async for chunk in resp.aiter_bytes():
-                            body.extend(chunk)
-                            if len(body) >= limit:
-                                body = body[:limit]
-                                break
-                        encoding = resp.charset_encoding or "utf-8"
-                        try:
-                            text = body.decode(encoding, errors="replace")
-                        except LookupError:
-                            text = body.decode("utf-8", errors="replace")
-                        if keyword not in text:
-                            return False, "响应中未找到关键字", url
-                    ms = (time.perf_counter() - started) * 1000
-                    return True, f"HTTP {status_code}（{ms:.0f}ms）", url
+                            )
+                            body = bytearray()
+                            async for chunk in resp.aiter_bytes():
+                                body.extend(chunk)
+                                if len(body) >= limit:
+                                    body = body[:limit]
+                                    break
+                            encoding = resp.charset_encoding or "utf-8"
+                            try:
+                                text = body.decode(encoding, errors="replace")
+                            except LookupError:
+                                text = body.decode("utf-8", errors="replace")
+                            if keyword not in text:
+                                return False, "响应中未找到关键字", url
+                        ms = (time.perf_counter() - started) * 1000
+                        return True, f"HTTP {status_code}（{ms:.0f}ms）", url
+
+                ok, detail, target_text = await asyncio.wait_for(
+                    _do_probe(), timeout=timeout + 2
+                )
+                return ok, detail, target_text
+            except asyncio.TimeoutError:
+                return False, f"探测超时（超过 {timeout + 2} 秒）", url
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", url
 

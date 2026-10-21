@@ -26,19 +26,37 @@ class ReportStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
-            try:
-                os.chmod(self.path, 0o600)
-            except Exception:
-                pass
+            self._secure_permissions()
             self.available = True
             logger.info("日报数据库已就绪: %s", self.path)
         except Exception:
             logger.exception("初始化日报数据库失败，历史数据将不可用")
 
+    def _secure_permissions(self) -> None:
+        """Restrict the database and its WAL side files to the owner.
+
+        SQLite creates ``-wal`` and ``-shm`` next to the database with the
+        process umask, so locking the main file down is not enough: the side
+        files hold the same data and would stay readable by other users.
+        """
+
+        for target in (
+            self.path,
+            self.path.with_name(self.path.name + "-wal"),
+            self.path.with_name(self.path.name + "-shm"),
+        ):
+            try:
+                if target.exists():
+                    os.chmod(target, 0o600)
+            except Exception:
+                pass
+
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=5)
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
+        # The WAL side files may have just been created by the pragma above.
+        self._secure_permissions()
         return con
 
     def _init_db(self) -> None:

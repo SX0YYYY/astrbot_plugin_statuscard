@@ -142,10 +142,41 @@ def receipt_from_exception(exc: BaseException) -> OnebotReceipt | None:
     return None
 
 
+def is_definitely_not_sent(exc: BaseException) -> bool:
+    """Tell whether the request provably never left the plugin.
+
+    ``aiocqhttp`` raises these when the OneBot endpoint could not be
+    reached at all, so the message was definitely not delivered and
+    re-sending is safe. Every other failure - including a WebSocket
+    timeout after the request frame was already written - may have been
+    delivered, so it must not be retried.
+    """
+
+    name = type(exc).__name__
+    if name in ("ApiNotAvailable", "InvalidURL"):
+        return True
+    text = str(exc)
+    return "API root url invalid" in text
+
+
+def should_retry_send(exc: BaseException) -> bool:
+    """Tell whether a failed send may be retried safely.
+
+    A send is only retried while the failure proves that the message never
+    left the plugin. Once the request was handed to the platform, a
+    transport error can still mean the message arrived and only the
+    acknowledgement was lost, so retrying would show the same message
+    several times in the chat.
+    """
+
+    return is_definitely_not_sent(exc)
+
+
 async def send_direct(
     client: Any,
     target: str,
     segments: list[dict[str, Any]],
+    timeout: float = 10.0,
 ) -> OnebotReceipt:
     """Send raw OneBot segments to one target and return the receipt.
 
@@ -168,7 +199,7 @@ async def send_direct(
     try:
         payload = await asyncio.wait_for(
             client.call_action(action, **{key: int(session_id), "message": segments}),
-            timeout=10,
+            timeout=timeout,
         )
     except Exception as exc:
         receipt = receipt_from_exception(exc)
@@ -182,8 +213,21 @@ async def send_direct(
             )
             return receipt
         detail = str(exc) or exc.__class__.__name__
-        logger.warning("OneBot 直发失败 %s -> %s: %s", action, target, detail)
-        return OnebotReceipt(ok=False, error=detail)
+        if is_definitely_not_sent(exc):
+            # The request provably never reached OneBot, so re-sending is
+            # safe: the caller may fall back to the normal AstrBot path.
+            logger.warning("OneBot 直发未送达 %s -> %s: %s", action, target, detail)
+            return OnebotReceipt(ok=False, error=detail, attempted=False)
+        # The request frame was already written to the WebSocket, so the
+        # message may be in the chat even though the receipt was lost.
+        # Re-sending would duplicate it in the group.
+        logger.warning(
+            "OneBot 直发回执丢失 %s -> %s（消息可能已送达，不重发）: %s",
+            action,
+            target,
+            detail,
+        )
+        return OnebotReceipt(ok=False, error=detail, attempted=True)
     receipt = extract_receipt(payload)
     if receipt.ok:
         logger.info(

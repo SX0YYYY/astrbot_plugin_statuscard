@@ -298,7 +298,7 @@
 3. 默认监听 `127.0.0.1:9968/webhook`
 4. 在 Komari 后台添加 Webhook，Body 用 `{"title":"{{title}}","message":"{{message}}"}`
 5. 如果设置了 Token，在请求头加 `Authorization: Bearer <token>`
-6. 如果 Webhook 需要暴露到本机以外，建议同时打开“强制要求 Token”；未配置 Token 时插件会拒绝启动 Webhook，而不是无鉴权接收
+6. **强烈建议设置 Token**：插件默认开启“强制要求 Token”，此时未配置 Token 会拒绝启动 Webhook；如果主动关闭了这一项，监听地址又设为 `0.0.0.0`（暴露到本机以外）且没有 Token，插件同样会拒绝启动——否则任何人都能通过这个接口往你的 QQ 群发消息
 
 ## 权限与隐私
 
@@ -342,7 +342,7 @@
 | `display.disk_paths` | 空 | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
 | `display.timezone` | `Asia/Shanghai` | 卡片、告警、监测和日报统一使用的时区 |
 | `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
-| `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板，留空时跟随 `display.redact` |
+| `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板。留空时跟随 `display.redact`，勾选任意一项后以本页设置为准 |
 | `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
 | `alerts.interval_seconds` | `60` | 告警采样间隔（秒） |
 | `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警 |
@@ -354,7 +354,7 @@
 | `monitors.suppress_duplicates` | `false` | 启用重复层抑制；只有开启时 `suppress_when_down` 才生效 |
 | `monitors.max_response_bytes` | `262144` | HTTP 关键字检查最大读取字节数 |
 | `monitors.items[].suppress_when_down` | 空 | HTTP 监测项依赖的另一个监测项名称；依赖项异常时抑制本项告警 |
-| `alerts.komari_webhook.require_token` | `false` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook |
+| `alerts.komari_webhook.require_token` | `true` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook。关闭时务必让 `host` 保持 `127.0.0.1` |
 | `daily_report.enabled` | `false` | 启用每日定时日报 |
 | `daily_report.time` | `21:00` | 日报发送时间，24 小时制 `HH:MM` |
 | `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |
@@ -438,7 +438,9 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 > 手动发送 `查看状态` 走的是 QQ 的消息回复通道，不经过主动推送，因此没有回执记录，这是正常现象。
 
-**关于重复发送**：只有当直发请求**根本没发出去**（拿不到 OneBot 连接、目标类型不支持、连接中断）时，插件才会退回 AstrBot 的发送路径再发一次。如果 OneBot 已经返回了结果（哪怕是错误码），插件**不会重发**——因为那一刻消息可能已经在群里了，重发会造成重复。
+**关于重复发送**：只有当请求**确定没有发出去**（拿不到 OneBot 连接、目标类型不支持、接口地址非法）时，插件才会退回 AstrBot 的发送路径再发一次。只要请求已经交给 OneBot——包括「消息已送达但回执超时」「连接在发送途中被重置」这类情况——插件都**不会重发**，因为那一刻消息可能已经在群里了，重发会造成重复。回执丢失时会记录一条 `OneBot 直发回执丢失` 的警告，可据此判断消息是否真的送达。
+
+> v2.11.0 起，`OneBot 直发失败` 拆成了两类日志：`OneBot 直发未送达`（确定没发出去，会退回重发）和 `OneBot 直发回执丢失`（可能已送达，不重发）。
 
 ### 掉线/恢复告警为什么没收到
 
