@@ -237,6 +237,11 @@ class AlertEngine:
             self.report_store.add_event(
                 int(now), day, kind, name, detail, status, target
             )
+            if status == "recovery":
+                # Close the open alert of the same rule so the report can
+                # show how long the interruption lasted, even across a
+                # plugin restart.
+                self.report_store.resolve_event(int(now), name, int(now))
         except Exception:
             logger.exception("记录告警事件失败")
 

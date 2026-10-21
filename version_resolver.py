@@ -5,6 +5,8 @@ from importlib import metadata
 from inspect import isawaitable
 from typing import Any
 
+from astrbot.api import logger
+
 
 def _normalize_version(raw: Any) -> str | None:
     if raw is None:
@@ -40,7 +42,8 @@ def _resolve_from_context(context: Any) -> str | None:
             continue
         try:
             value = getter()
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取 AstrBot 版本属性 %s 失败: %s", name, exc)
             continue
         if isawaitable(value):
             continue
@@ -51,7 +54,8 @@ def _resolve_from_context(context: Any) -> str | None:
     for name in attr_names:
         try:
             value = getattr(context, name)
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取 AstrBot 版本属性 %s 失败: %s", name, exc)
             continue
         normalized = _normalize_version(value)
         if normalized:

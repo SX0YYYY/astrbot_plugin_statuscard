@@ -23,7 +23,7 @@ def _detect_image_mime(data: bytes) -> str:
         return "image/jpeg"
     if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
         return "image/webp"
-    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+    if data.startswith((b"GIF87a", b"GIF89a")):
         return "image/gif"
     return "application/octet-stream"
 

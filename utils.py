@@ -16,6 +16,28 @@ class CpuFreq:
     max: float | None
 
 
+def cfg_get(config: Any, path: str, default: Any = None) -> Any:
+    """Read a dotted path out of a nested configuration.
+
+    AstrBot hands the plugin a nested structure, but the tests and the
+    migration code sometimes pass a plain dictionary. Both are handled the
+    same way here so every module can read the configuration the same.
+    """
+
+    current: Any = config
+    for part in path.split("."):
+        if current is None:
+            return default
+        if hasattr(current, "get") or isinstance(current, dict):
+            try:
+                current = current.get(part)
+            except Exception:
+                return default
+        else:
+            return default
+    return default if current is None else current
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path

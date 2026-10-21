@@ -15,6 +15,7 @@ from .collectors import (
     get_timezone,
     now_in_timezone,
 )
+from .redactor import Redactor, read_rules
 from .report_store import ReportStore
 
 RESOURCE_KEYS = ("cpu", "ram", "swap", "disk", "load1")
@@ -41,7 +42,7 @@ def _fmt_num(value: Any) -> str:
     if value is None:
         return "--"
     try:
-        return f"{int(round(float(value))):,}"
+        return f"{round(float(value)):,}"
     except (TypeError, ValueError):
         return "--"
 
@@ -95,7 +96,7 @@ def _parse_utc(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -242,16 +243,11 @@ class DailyReportBuilder:
         )
         # The Web dashboard passes its own rules so that the dashboard can be
         # more or less strict than the QQ status card.
-        raw_redact = (
-            redact
-            if redact is not None
-            else cfg_get(config, "display.redact", []) or []
-        )
-        if isinstance(raw_redact, str):
-            raw_redact = [raw_redact]
-        self.redact = {
-            str(item).strip().lower() for item in raw_redact if str(item).strip()
-        }
+        if redact is not None:
+            self.redactor = Redactor(redact)
+        else:
+            self.redactor = Redactor(read_rules(config, "display.redact"))
+        self.redact = self.redactor.rules
 
     # ------------------------------------------------------------------
     # public entry
@@ -275,7 +271,7 @@ class DailyReportBuilder:
         meta = meta or {}
         generated_at = now_in_timezone(self.config).strftime("%Y-%m-%d %H:%M:%S")
         host = str(meta.get("host") or socket.gethostname())
-        if "hostname" in self.redact:
+        if self.redactor.hostname:
             host = "已隐藏"
 
         view: dict[str, Any] = {
@@ -541,12 +537,16 @@ class DailyReportBuilder:
         events.sort(
             key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
         )
+        # ``resolved_ts`` is filled in when a condition clears, so the
+        # duration survives a plugin restart. Events recorded before that
+        # field was used fall back to pairing them in memory.
         open_alerts: dict[str, int] = {}
         items: list[dict[str, Any]] = []
         count = 0
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
+            resolved_ts = event.get("resolved_ts")
             if status == "alert":
                 open_alerts[name] = int(event.get("ts") or 0)
             if str(event.get("day") or "") != day.isoformat():
@@ -559,7 +559,12 @@ class DailyReportBuilder:
                 if start:
                     duration_text = format_duration(int(event.get("ts") or 0) - start)
             elif status == "alert":
-                duration_text = "进行中"
+                if resolved_ts:
+                    duration_text = format_duration(
+                        int(resolved_ts) - int(event.get("ts") or 0)
+                    )
+                else:
+                    duration_text = "进行中"
             if status in {"alert", "failed"}:
                 count += 1
             items.append(
@@ -620,7 +625,7 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _qq_section(self, day: date, history_days: int) -> dict[str, Any]:
-        if "qq_stats" in self.redact:
+        if self.redactor.qq_stats:
             return {
                 "available": False,
                 "empty_reason": "已按脱敏配置隐藏 QQ 统计",
@@ -958,7 +963,7 @@ class DailyReportBuilder:
                 :top_n
             ]
 
-        redact = "process" in self.redact
+        redact = self.redactor.process
 
         def render(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
@@ -1144,7 +1149,7 @@ def build_report_text(view: dict[str, Any]) -> str:
         if resources.get("available") and resources.get("yesterday"):
             yesterday = resources["yesterday"]
             lines.append(
-                "资源: CPU {0} / 峰值 {1}；RAM {2} / 峰值 {3}".format(
+                "资源: CPU {} / 峰值 {}；RAM {} / 峰值 {}".format(
                     yesterday["cpu"]["avg_text"],
                     yesterday["cpu"]["peak_text"],
                     yesterday["ram"]["avg_text"],
@@ -1166,7 +1171,7 @@ def build_report_text(view: dict[str, Any]) -> str:
             if recv_text == "--":
                 recv_text = "数据积累中"
             lines.append(
-                "QQ: 好友 {0} / 群 {1} / 群员 {2}；发送 {3} / 接收 {4}".format(
+                "QQ: 好友 {} / 群 {} / 群员 {}；发送 {} / 接收 {}".format(
                     yesterday.get("friends_text", "--"),
                     yesterday.get("groups_text", "--"),
                     yesterday.get("members_text", "--"),
@@ -1178,7 +1183,7 @@ def build_report_text(view: dict[str, Any]) -> str:
     if "token" in sections:
         if token.get("available"):
             lines.append(
-                "Token: {0}（{1} 次，成功率 {2}）".format(
+                "Token: {}（{} 次，成功率 {}）".format(
                     token.get("total_text", "--"),
                     token.get("calls_text", "--"),
                     token.get("success_text", "--"),
@@ -1190,7 +1195,7 @@ def build_report_text(view: dict[str, Any]) -> str:
     if "website" in sections:
         if website.get("available"):
             parts = [
-                "{0} {1}（可用率 {2}）".format(
+                "{} {}（可用率 {}）".format(
                     item.get("name"),
                     item.get("avg_text"),
                     item.get("availability_text"),
@@ -1205,11 +1210,11 @@ def build_report_text(view: dict[str, Any]) -> str:
         if process.get("available") and process.get("cpu"):
             top = process["cpu"][0]
             lines.append(
-                "Top 进程: {0} CPU {1}".format(top.get("name"), top.get("cpu_text"))
+                "Top 进程: {} CPU {}".format(top.get("name"), top.get("cpu_text"))
             )
         else:
             lines.append(f"进程: {process.get('empty_reason') or '暂无数据'}")
     lines.append(
-        "窗口: {0}（{1}）".format(view.get("window") or "", view.get("timezone") or "")
+        "窗口: {}（{}）".format(view.get("window") or "", view.get("timezone") or "")
     )
     return "\n".join(lines)[:1500]

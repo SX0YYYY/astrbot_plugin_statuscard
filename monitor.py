@@ -191,6 +191,11 @@ class ServiceMonitor:
                 status,
                 redact_url(target),
             )
+            if status == "recovery":
+                # Close the open alert of the same target so the report can
+                # show how long the interruption lasted, even across a
+                # plugin restart.
+                self.report_store.resolve_event(int(now), name, int(now))
         except Exception:
             logger.exception("记录服务监测事件失败")
 
@@ -539,7 +544,7 @@ class ServiceMonitor:
                     _do_probe(), timeout=timeout + 2
                 )
                 return ok, detail, target_text
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return False, f"探测超时（超过 {timeout + 2} 秒）", url
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", url
@@ -551,7 +556,7 @@ class ServiceMonitor:
             if not port or not (1 <= port <= 65535):
                 return False, "端口未配置或超出 1–65535", target
             try:
-                reader, writer = await asyncio.wait_for(
+                _reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port), timeout=timeout
                 )
                 writer.close()

@@ -26,7 +26,8 @@ import httpx
 import psutil
 from astrbot.api import logger
 
-from .utils import CpuFreq, readable_python_version
+from .redactor import Redactor, read_rules
+from .utils import CpuFreq, cfg_get, readable_python_version
 from .version_resolver import resolve_astrbot_version
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -99,18 +100,6 @@ def format_duration_td(dt: timedelta) -> str:
 
 def _format_td(dt: timedelta) -> str:
     return format_duration_td(dt)
-
-
-def cfg_get(config: Any, path: str, default: Any = None) -> Any:
-    cur = config
-    for part in path.split("."):
-        if cur is None:
-            return default
-        if hasattr(cur, "get") or isinstance(cur, dict):
-            cur = cur.get(part)
-        else:
-            return default
-    return default if cur is None else cur
 
 
 def cfg_bool(config: Any, path: str, default: bool) -> bool:
@@ -542,7 +531,8 @@ def prime_process_cpu() -> None:
             snapshot[key] = (now, total_cpu, cpu)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取进程 CPU 快照失败 %s: %s", key, exc)
             continue
     with _PROC_CPU_LOCK:
         _PROC_CPU_PREV.clear()
@@ -608,7 +598,8 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-        except Exception:
+        except Exception as exc:
+            logger.debug("读取进程信息失败 %s: %s", name, exc)
             continue
 
     procs.sort(key=lambda x: (x.cpu, x.mem), reverse=True)
@@ -696,6 +687,7 @@ def _run_command(args: list[str], timeout: float = 4.0) -> str | None:
             text=True,
             timeout=timeout,
             errors="ignore",
+            check=False,
         )
         if proc.returncode != 0:
             return None
@@ -1221,15 +1213,17 @@ async def fetch_avatar_bytes(
     if not url:
         return None
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=5) as cli:
-            async with cli.stream("GET", url) as resp:
-                resp.raise_for_status()
-                data = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > MAX_IMAGE_BYTES:
-                        raise ValueError("头像超过 10 MB")
-                return bytes(data)
+        async with (
+            httpx.AsyncClient(follow_redirects=True, timeout=5) as cli,
+            cli.stream("GET", url) as resp,
+        ):
+            resp.raise_for_status()
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > MAX_IMAGE_BYTES:
+                    raise ValueError("头像超过 10 MB")
+            return bytes(data)
     except Exception as exc:
         logger.warning("获取头像失败 %s: %s", url, exc)
         return None
@@ -1267,7 +1261,8 @@ def build_network_chart(history: Any, tz: Any = None) -> dict[str, Any]:
             try:
                 if isinstance(item, (list, tuple)) and len(item) >= 3:
                     points.append((float(item[0]), float(item[1]), float(item[2])))
-            except Exception:
+            except Exception as exc:
+                logger.debug("跳过无效的网络采样点: %s", exc)
                 continue
 
     if not points:
@@ -1518,47 +1513,15 @@ def _resources(cpu_pct: float, mem: MemStat, swap: MemStat) -> list[dict[str, An
 
 
 def _rule_set(config: Any) -> set[str]:
-    raw = cfg_get(config, "display.redact", [])
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return set()
-    return {str(item).strip().lower() for item in raw if str(item).strip()}
+    """The redaction rules that apply to the status card."""
+
+    return read_rules(config, "display.redact")
 
 
 def _apply_redaction(view: dict[str, Any], config: Any) -> None:
-    rules = _rule_set(config)
-    if not rules:
-        return
-    if "hostname" in rules:
-        for card in view.get("overview", []):
-            if card.get("label") == "主机名":
-                card["value"] = "已隐藏"
-        for row in view.get("system_info", []):
-            if row.get("label") == "Host":
-                row["value"] = "已隐藏"
-    if "process" in rules:
-        for proc in view.get("process", {}).get("top", []):
-            proc["name"] = "已隐藏"
-        view.setdefault("process", {})["redacted"] = True
-    if "network" in rules:
-        network = view.setdefault("network", {})
-        for key in (
-            "up",
-            "down",
-            "up_total",
-            "down_total",
-            "month_up",
-            "month_down",
-        ):
-            network[key] = "--"
-        network["interface"] = "已隐藏"
-        network["chart"] = build_network_chart([])
-    if "qq_stats" in rules:
-        bot = view.setdefault("bot", {})
-        for key in ("friends", "groups", "members", "recv", "sent"):
-            bot[key] = None
-    view["redacted"] = sorted(rules)
+    """Hide the configured details from a collected status-card view."""
+
+    Redactor(_rule_set(config)).apply_card(view)
 
 
 async def collect_all(

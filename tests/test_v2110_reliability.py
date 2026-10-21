@@ -18,8 +18,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from astrbot_plugin_statuscard.onebot_receipt import (
     is_definitely_not_sent,
     send_direct,
@@ -28,7 +26,6 @@ from astrbot_plugin_statuscard.onebot_receipt import (
 from astrbot_plugin_statuscard.report import DailyReporter
 from astrbot_plugin_statuscard.state import StateStore
 from astrbot_plugin_statuscard.utils import redact_url
-
 
 # ----------------------------------------------------------------------
 # P0-1: a lost receipt must not cause a duplicate delivery

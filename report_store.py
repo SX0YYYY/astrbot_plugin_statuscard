@@ -310,6 +310,25 @@ class ReportStore:
             ),
         )
 
+    def resolve_event(self, ts: int, name: str, resolved_ts: int) -> bool:
+        """Mark the open alerts of ``name`` as resolved.
+
+        The alert engine calls this when a condition clears, so the report
+        can show how long the interruption lasted even after a restart.
+        """
+
+        return self._write(
+            """
+            UPDATE events
+            SET resolved_ts = ?
+            WHERE resolved_ts IS NULL
+              AND status = 'alert'
+              AND name = ?
+              AND ts <= ?
+            """,
+            (int(resolved_ts), name, int(ts)),
+        )
+
     def add_website_samples(self, ts: int, samples: list[dict[str, Any]]) -> bool:
         rows = []
         for item in samples:

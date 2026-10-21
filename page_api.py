@@ -27,6 +27,7 @@ from .collectors import (
     now_in_timezone,
     swap_stat,
 )
+from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder
 from .version import __version__
 from .version_resolver import resolve_astrbot_version
@@ -100,8 +101,8 @@ class PageApi:
     # helpers
     # ------------------------------------------------------------------
 
-    def _redact(self) -> set[str]:
-        """Return the redaction rules that apply to the Web dashboard.
+    def _redactor(self) -> Redactor:
+        """The redaction rules that apply to the Web dashboard.
 
         The dashboard has its own switch so that an operator can hide details
         in the WebUI without also hiding them on the QQ status card, and the
@@ -111,21 +112,19 @@ class PageApi:
         as private as the card.
         """
 
-        raw = cfg_get(self.plugin.config, "display.page_redact", None)
-        if isinstance(raw, str):
-            raw = [raw]
-        rules = {str(item).strip().lower() for item in (raw or []) if str(item).strip()}
+        config = self.plugin.config
+        rules = read_rules(config, "display.page_redact")
         if rules:
-            return rules
-        fallback = cfg_get(self.plugin.config, "display.redact", []) or []
-        if isinstance(fallback, str):
-            fallback = [fallback]
-        return {str(item).strip().lower() for item in fallback if str(item).strip()}
+            return Redactor(rules)
+        return Redactor(read_rules(config, "display.redact"))
+
+    def _redact(self) -> set[str]:
+        """The rule names that apply to the Web dashboard."""
+
+        return self._redactor().rules
 
     def _host(self) -> str:
-        if "hostname" in self._redact():
-            return "已隐藏"
-        return socket.gethostname()
+        return self._redactor().dashboard_host(socket.gethostname())
 
     @staticmethod
     def _network_view(redacted: bool, net: dict[str, Any]) -> dict[str, Any]:
@@ -416,7 +415,7 @@ class PageApi:
         view: dict[str, Any] = {}
         try:
             builder = DailyReportBuilder(
-                plugin.report_store, plugin.config, redact=self._redact()
+                plugin.report_store, plugin.config, redact=self._redactor()
             )
             sections = cfg_get(plugin.config, "daily_report.sections", None)
             view = builder.build(

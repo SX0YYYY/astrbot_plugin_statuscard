@@ -26,8 +26,7 @@ from .collectors import (
     fetch_avatar_bytes,
     uploaded_file_path,
 )
-from .delivery import DeliveryResult
-from .onebot_receipt import send_direct, should_retry_send
+from .delivery import Delivery, DeliveryService
 from .i18n import tr
 from .monitor import ServiceMonitor
 from .page_api import PageApi
@@ -79,6 +78,7 @@ class StatusCardPlugin(Star):
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         self._privacy_notified: set[str] = set()
+        self._delivery: DeliveryService | None = None
         self._diag: dict[str, Any] = self._load_diag()
         self.page_api = PageApi(self)
         self.page_api.register()
@@ -99,9 +99,7 @@ class StatusCardPlugin(Star):
         out: dict[str, Any] = {}
         for key, value in raw.items():
             name = str(key)
-            if isinstance(value, bool):
-                out[name] = float(value)
-            elif isinstance(value, (int, float)):
+            if isinstance(value, (bool, int, float)):
                 out[name] = float(value)
             else:
                 out[name] = str(value)
@@ -275,13 +273,16 @@ class StatusCardPlugin(Star):
                     }
             self._status_inflight.add(chat_key)
         notices: list[str] = []
-        if cfg_bool(self.config, "display.privacy_notice", True):
-            if chat_key and chat_key not in self._privacy_notified:
+        if (
+            cfg_bool(self.config, "display.privacy_notice", True)
+            and chat_key
+            and chat_key not in self._privacy_notified
+        ):
+            self._privacy_notified.add(chat_key)
+            if len(self._privacy_notified) > 500:
+                self._privacy_notified.clear()
                 self._privacy_notified.add(chat_key)
-                if len(self._privacy_notified) > 500:
-                    self._privacy_notified.clear()
-                    self._privacy_notified.add(chat_key)
-                notices.append(tr(self.config, "privacy_notice"))
+            notices.append(tr(self.config, "privacy_notice"))
         if cfg_bool(self.config, "display.progress_notice", True):
             notices.append(tr(self.config, "progress_notice"))
         if notices:
@@ -490,87 +491,34 @@ class StatusCardPlugin(Star):
     # text / image helpers used by the alert engine
     # ------------------------------------------------------------------
 
-    async def _send_chain(
-        self,
-        target: str,
-        build_chain,
-        label: str,
-    ) -> bool:
-        """Send one message chain and retry transport errors.
+    def _delivery_service(self) -> DeliveryService:
+        """The service that pushes messages to a chat."""
 
-        A ``False`` result means AstrBot could not find a platform instance for
-        the target; retrying cannot fix that, so it is reported once.
-
-        Only errors that prove the message never left the plugin are retried.
-        Once the request was handed to the platform, a transport error can
-        still mean the message arrived and only the acknowledgement was lost,
-        so retrying would show the same message several times in the chat.
-        """
-
-        for attempt in range(3):
-            try:
-                sent = await self.context.send_message(target, build_chain())
-                if sent:
-                    return True
-                logger.warning("主动%s未找到匹配平台: %s", label, target)
-                return False
-            except Exception as exc:
-                detail = str(exc) or exc.__class__.__name__
-                if not should_retry_send(exc):
-                    logger.warning(
-                        "主动发送%s到 %s 未确认送达（可能已发出，不重发以免重复）: %s",
-                        label,
-                        target,
-                        detail,
-                    )
-                    return False
-                if attempt >= 2:
-                    logger.warning(
-                        "主动发送%s到 %s 失败（已重试 %d 次）: %s",
-                        label,
-                        target,
-                        attempt,
-                        detail,
-                    )
-                    return False
-                logger.warning(
-                    "主动发送%s到 %s 失败（第 %d 次），%.0f 秒后重试: %s",
-                    label,
-                    target,
-                    attempt + 1,
-                    attempt + 1,
-                    detail,
-                )
-                await asyncio.sleep(attempt + 1)
-        return False
-
-    def _record_delivery(
-        self,
-        kind: str,
-        targets: list[str],
-        ok: bool,
-        source: str = "unknown",
-        ok_targets: list[str] | None = None,
-        failed_targets: list[str] | None = None,
-        receipts: dict[str, Any] | None = None,
-    ) -> None:
-        try:
-            self.state.set(
-                "delivery",
-                {
-                    "ts": time.time(),
-                    "kind": kind,
-                    "ok": ok,
-                    "target_count": len(targets),
-                    "source": source,
-                    "ok_targets": list(ok_targets or []),
-                    "failed_targets": list(failed_targets or []),
-                    "receipts": receipts or {},
-                },
+        if self._delivery is None:
+            self._delivery = DeliveryService(
+                self.context,
+                self.state,
+                self._onebot_client,
+                self._build_message_chain,
             )
-            self.state.save()
-        except Exception as exc:
-            logger.warning("记录主动推送结果失败: %s", exc)
+        return self._delivery
+
+    def _onebot_client(self) -> Any:
+        """The OneBot client of the configured platform instance."""
+
+        return _get_aiocqhttp_client(
+            self.context,
+            str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
+        )
+
+    @staticmethod
+    def _build_message_chain(payload: dict[str, Any]) -> MessageChain:
+        """Build the AstrBot message chain for a delivery payload."""
+
+        image = payload.get("image")
+        if image:
+            return MessageChain([Comp.Image.fromURL(str(image))])
+        return MessageChain([Comp.Plain(str(payload.get("text") or ""))])
 
     async def send_text(
         self,
@@ -578,18 +526,8 @@ class StatusCardPlugin(Star):
         text: str,
         source: str = "unknown",
     ) -> bool:
-        segments = [{"type": "text", "data": {"text": text}}]
-        result, receipts = await self._send_with_receipt(
-            targets, segments, lambda: MessageChain([Comp.Plain(text)]), "消息"
-        )
-        self._record_delivery(
-            "text",
-            targets,
-            result.ok,
-            source=source,
-            ok_targets=result.ok_targets,
-            failed_targets=result.failed_targets,
-            receipts=receipts,
+        result = await self._delivery_service().send(
+            targets, {"text": text}, kind="text", source=source
         )
         return result.ok
 
@@ -599,92 +537,33 @@ class StatusCardPlugin(Star):
         image_url: str,
         source: str = "unknown",
     ) -> bool:
-        segments = [{"type": "image", "data": {"file": image_url}}]
-        result, receipts = await self._send_with_receipt(
-            targets,
-            segments,
-            lambda: MessageChain([Comp.Image.fromURL(image_url)]),
-            "图片",
-        )
-        self._record_delivery(
-            "image",
-            targets,
-            result.ok,
-            source=source,
-            ok_targets=result.ok_targets,
-            failed_targets=result.failed_targets,
-            receipts=receipts,
+        result = await self._delivery_service().send(
+            targets, {"image": image_url}, kind="image", source=source
         )
         return result.ok
 
-    async def _send_with_receipt(
+    async def queue_delivery(
         self,
         targets: list[str],
-        segments: list[dict[str, Any]],
-        build_chain,
-        label: str,
-    ) -> tuple[DeliveryResult, dict[str, Any]]:
-        """Send to every target, logging the OneBot protocol receipt.
+        payload: dict[str, Any],
+        kind: str = "text",
+        source: str = "unknown",
+    ) -> None:
+        """Remember a message that could not be delivered yet."""
 
-        The direct OneBot path is preferred because it returns the protocol
-        receipt (``retcode`` and ``message_id``), which is the only way to
-        tell whether QQ really accepted the message.
-
-        The fallback to the normal AstrBot send path only happens when the
-        direct path could not even attempt the send (no OneBot client, an
-        unsupported target type, or a transport error). When OneBot answered
-        with a protocol error the message may already have been delivered, so
-        it is never re-sent - that would duplicate the message in the group.
-        """
-
-        ok_targets: list[str] = []
-        failed_targets: list[str] = []
-        receipts: dict[str, Any] = {}
-        client = None
-        try:
-            client = _get_aiocqhttp_client(
-                self.context,
-                str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
+        self._delivery_service().enqueue(
+            Delivery(
+                kind=kind,
+                source=source,
+                targets=list(targets),
+                payload=dict(payload),
             )
-        except Exception:
-            client = None
-        for target in targets:
-            receipt = None
-            if client is not None:
-                receipt = await send_direct(client, target, segments)
-            if receipt is not None:
-                receipts[target] = {
-                    "ok": receipt.ok,
-                    "retcode": receipt.retcode,
-                    "message_id": receipt.message_id,
-                    "error": receipt.error,
-                }
-            if receipt is not None and receipt.ok:
-                ok_targets.append(target)
-                continue
-            if receipt is not None and receipt.attempted:
-                # OneBot answered with an error: the message may already be
-                # in the chat, so re-sending would duplicate it.
-                logger.warning(
-                    "目标 %s 的 OneBot 直发返回错误（%s），不再重发以免重复",
-                    target,
-                    receipt.error or "未知错误",
-                )
-                failed_targets.append(target)
-                continue
-            sent = await self._send_chain(target, build_chain, label)
-            if sent:
-                ok_targets.append(target)
-            else:
-                failed_targets.append(target)
-        return (
-            DeliveryResult(
-                ok=bool(ok_targets),
-                ok_targets=ok_targets,
-                failed_targets=failed_targets,
-            ),
-            receipts,
         )
+
+    def pending_deliveries(self, source: str | None = None) -> list[Delivery]:
+        """The messages that are still waiting to be delivered."""
+
+        return self._delivery_service().queued(source)
 
     async def build_summary_text(self, event: AstrMessageEvent | None = None) -> str:
         collected = await collect_all(
@@ -717,12 +596,17 @@ class StatusCardPlugin(Star):
                 f"网络: ↑ {network['up']} ↓ {network['down']}",
                 f"本月流量: ↑ {network['month_up']} ↓ {network['month_down']}",
                 f"进程: 全部 {process['all']} / 运行 {process['running']} / 休眠 {process['sleeping']}",
-                f"好友: {bot.get('friends') if bot.get('friends') is not None else '--'}"
-                f" / 群聊: {bot.get('groups') if bot.get('groups') is not None else '--'}"
-                f" / 群员: {bot.get('members') if bot.get('members') is not None else '--'}",
-                f"收发: {bot.get('recv') if bot.get('recv') is not None else '--'}"
-                f" ({bot.get('recv_scope')}) / {bot.get('sent') if bot.get('sent') is not None else '--'}"
-                f" ({bot.get('sent_scope')})",
+                (
+                    f"好友: {bot.get('friends') if bot.get('friends') is not None else '--'}"
+                    f" / 群聊: {bot.get('groups') if bot.get('groups') is not None else '--'}"
+                    f" / 群员: {bot.get('members') if bot.get('members') is not None else '--'}"
+                ),
+                (
+                    f"收发: {bot.get('recv') if bot.get('recv') is not None else '--'}"
+                    f" ({bot.get('recv_scope')})"
+                    f" / {bot.get('sent') if bot.get('sent') is not None else '--'}"
+                    f" ({bot.get('sent_scope')})"
+                ),
             ]
         )
         return "\n".join(lines)
@@ -894,6 +778,18 @@ class StatusCardPlugin(Star):
                     lines.append("OneBot 回执: " + "；".join(parts))
         else:
             lines.append("最近主动推送: 暂无记录")
+        pending = self.pending_deliveries()
+        if pending:
+            lines.append(
+                f"待发消息: {len(pending)} 条"
+                + (
+                    "（来源 "
+                    + "、".join(sorted({item.source for item in pending})[:3])
+                    + "）"
+                    if pending
+                    else ""
+                )
+            )
         report_status = self.report.status()
         store_stats = report_status.get("store", {})
         lines.append(

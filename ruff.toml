@@ -1,0 +1,35 @@
+# Ruff configuration for the status-card plugin.
+#
+# The plugin runs several background loops - the sampler, the service
+# monitor, the alert engine and the report collector. A single failing
+# probe must never take the whole loop down, so these modules catch broad
+# exceptions on purpose and keep going.
+#
+# `BLE001` (blind `except Exception`) and `S110` (`try`-`except`-`pass`)
+# are the two rules that flag exactly that pattern. They are therefore
+# switched off for the whole project, while the more specific rules stay
+# active so that real mistakes still surface.
+#
+# Every broad catch that hides a failure is expected to log it; the
+# remaining ones only guard optional lookups whose result is checked
+# afterwards.
+
+[lint]
+ignore = [
+    # Deliberate broad catches in the background loops: a failing probe or
+    # an unreadable file must not stop the sampler, the monitor or the
+    # alert engine. The affected paths log the failure or check the result.
+    "BLE001",
+    # `try`-`except`-`pass` for the same reason: optional lookups whose
+    # missing value is handled by the caller.
+    "S110",
+]
+
+[lint.per-file-ignores]
+# The test helpers deliberately use broad catches to assert on failures.
+"tests/*" = ["BLE001", "S110", "S112", "PLR2004"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

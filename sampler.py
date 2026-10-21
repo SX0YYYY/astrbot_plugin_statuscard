@@ -57,7 +57,8 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
         for file in base.glob("*.json"):
             try:
                 data = json.loads(file.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.debug("跳过无法解析的统计文件 %s: %s", file.name, exc)
                 continue
             if not isinstance(data, dict):
                 continue

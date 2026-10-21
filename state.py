@@ -40,7 +40,7 @@ class StateStore:
             raw = self.path.read_text(encoding="utf-8")
             parsed = json.loads(raw)
             if not isinstance(parsed, dict):
-                raise ValueError("state root is not an object")
+                raise TypeError("state root is not an object")
             with self._lock:
                 self.data = parsed
         except FileNotFoundError:
