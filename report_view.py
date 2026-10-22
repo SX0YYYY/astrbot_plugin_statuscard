@@ -7,6 +7,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from .collectors import (
     cfg_bool,
     cfg_get,
@@ -964,6 +966,7 @@ class DailyReportBuilder:
             ]
 
         redact = self.redactor.process
+        cores = psutil.cpu_count(logical=True) or 1
 
         def render(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
@@ -972,7 +975,7 @@ class DailyReportBuilder:
                     {
                         "rank": index,
                         "name": "已隐藏" if redact else item["name"],
-                        "cpu_text": f"{item['cpu']:.1f}%",
+                        "cpu_text": f"{item['cpu'] / cores:.1f}%",
                         "mem_text": f"{item['mem_mb']:.0f} MB",
                         "samples": item["samples"],
                     }

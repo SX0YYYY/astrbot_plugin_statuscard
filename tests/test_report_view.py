@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import psutil
 import pytest
 from astrbot_plugin_statuscard.report import DailyReporter
 from astrbot_plugin_statuscard.report_store import ReportStore
@@ -486,7 +487,8 @@ def test_process_section_tops_and_redact(tmp_path: Path) -> None:
     process = view["process"]
     assert process["available"] is True
     assert process["cpu"][0]["name"] == "python"
-    assert process["cpu"][0]["cpu_text"] == "80.0%"
+    cores = psutil.cpu_count(logical=True) or 1
+    assert process["cpu"][0]["cpu_text"] == f"{80.0 / cores:.1f}%"
     assert process["mem"][0]["mem_text"] == "120 MB"
 
     config = {

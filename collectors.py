@@ -603,13 +603,16 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
             continue
 
     procs.sort(key=lambda x: (x.cpu, x.mem), reverse=True)
+    cores = psutil.cpu_count(logical=True) or 1
     top = [
         {
             "name": p.name,
             "pid": p.pid,
-            "cpu": f"{p.cpu:.1f}%",
+            "cpu": f"{p.cpu / cores:.1f}%",
+            "cpu_raw": round(float(p.cpu) / cores, 1),
             "mem": format_bytes(p.mem),
             "mem_raw": p.mem,
+            "mem_mb": round(float(p.mem) / 1048576.0, 1),
         }
         for p in procs[: max(1, int(top_n))]
     ]

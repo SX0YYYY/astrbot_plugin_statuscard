@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import time
@@ -21,10 +22,12 @@ except Exception:  # pragma: no cover - very old AstrBot builds
 from .collectors import (
     cached_cpu_percent,
     cfg_get,
+    cfg_int,
     format_bytes,
     format_duration,
     memory_stat,
     now_in_timezone,
+    process_info,
     swap_stat,
 )
 from .redactor import Redactor, read_rules
@@ -172,21 +175,27 @@ class PageApi:
                 "total_text": "--",
             }
 
-    def _latest_processes(self, ts: int) -> list[dict[str, Any]]:
-        store = self.plugin.report_store
-        rows = store.list_process_samples(ts - 900, ts + 60, "cpu")
-        if not rows:
+    async def _latest_processes(self, top_n: int) -> list[dict[str, Any]]:
+        """Return the same ten-second snapshot the status card renders.
+
+        The dashboard used to read the five-minute process_samples table,
+        which is a half-second instant sample and can disagree wildly with
+        the card. Both surfaces now share the sampler's delta snapshot.
+        """
+
+        try:
+            snapshot = await asyncio.to_thread(process_info, top_n)
+        except Exception as exc:
+            logger.debug("读取实时进程快照失败: %s", exc)
             return []
-        latest = max(int(row.get("ts") or 0) for row in rows)
-        rows = [row for row in rows if int(row.get("ts") or 0) == latest]
         redact = "process" in self._redact()
         items = []
-        for row in sorted(rows, key=lambda item: int(item.get("rank") or 99)):
+        for index, row in enumerate(snapshot.get("top") or [], 1):
             items.append(
                 {
-                    "rank": int(row.get("rank") or 0),
+                    "rank": index,
                     "name": "已隐藏" if redact else str(row.get("name") or ""),
-                    "cpu": round(float(row.get("cpu") or 0.0), 1),
+                    "cpu": round(float(row.get("cpu_raw") or 0.0), 1),
                     "mem_mb": round(float(row.get("mem_mb") or 0.0), 1),
                 }
             )
@@ -210,7 +219,6 @@ class PageApi:
     async def overview(self):
         plugin = self.plugin
         now = now_in_timezone(plugin.config)
-        ts = int(now.timestamp())
         mem = memory_stat()
         swap = swap_stat()
         net = plugin.state.get("net", {}) or {}
@@ -286,7 +294,15 @@ class PageApi:
                     "unknown": unknown_count,
                     "items": monitor_items,
                 },
-                "processes": self._latest_processes(ts),
+                "processes": await self._latest_processes(
+                    max(
+                        1,
+                        min(
+                            30,
+                            cfg_int(plugin.config, "display.process_top_n", 8),
+                        ),
+                    )
+                ),
                 "daily_report": {
                     "enabled": daily_status.get("enabled"),
                     "time": daily_status.get("time"),

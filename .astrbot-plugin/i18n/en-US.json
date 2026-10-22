@@ -23,6 +23,7 @@
         "section_runs": "Delivery Log",
         "label_month_flow": "This month",
         "label_latest_sample": "Latest sample",
+        "label_process_window": "Last 10s average (% of machine)",
         "label_recent_30": "Last 30 runs",
         "range_24h": "24 hours",
         "range_7d": "7 days",

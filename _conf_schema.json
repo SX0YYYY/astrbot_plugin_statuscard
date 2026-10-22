@@ -30,7 +30,7 @@
           "max": 30,
           "step": 1
         },
-        "hint": "状态卡进程表显示条数，3–20；日报的 Top 进程条数在“日报 → 高级”里单独设置。"
+        "hint": "状态卡进程表显示条数，3–20；CPU 以占整机百分比显示（已除以 CPU 核数）。日报的 Top 进程条数在“日报 → 高级”里单独设置。"
       },
       "compact": {
         "description": "手机紧凑模式",
@@ -355,7 +355,7 @@
         }
       },
       "sustain_samples": {
-        "description": "连续超过阈值几次才告警",
+        "description": "连续超过阈值几次才告警（资源告警）",
         "type": "int",
         "default": 3,
         "slider": {
@@ -366,7 +366,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "连续超过阈值几次才告警；默认 3 次，60 秒采样约 3 分钟。"
+        "hint": "只影响 CPU / 内存 / SWAP / 磁盘 / 每核负载；服务监测的失败阈值在「服务可用性监测」分组。默认 3 次，60 秒采样约 3 分钟。"
       },
       "cooldown_seconds": {
         "description": "同一规则告警冷却（秒）",
@@ -944,7 +944,7 @@
         }
       },
       "fail_threshold": {
-        "description": "连续失败几次后告警",
+        "description": "连续失败几次后告警（服务监测）",
         "type": "int",
         "default": 2,
         "slider": {
@@ -955,7 +955,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "连续失败几次才告警；默认 2 次，60 秒轮询约 2 分钟。"
+        "hint": "只影响服务监测（HTTP / TCP / Docker / 进程 / systemd）；资源告警的连续次数在「告警与每日定时状态图」分组。默认 2 次，60 秒轮询约 2 分钟。"
       },
       "cooldown_seconds": {
         "description": "同一目标告警冷却（秒）",

@@ -114,3 +114,44 @@ def test_page_redact_explicit_rules_win() -> None:
     assert api._redact() == {"network"}
     # The card rules must not leak into the dashboard.
     assert api._host() != "已隐藏"
+
+
+def test_latest_processes_uses_live_snapshot(monkeypatch) -> None:
+    """The dashboard must show the same ten-second snapshot as the card."""
+
+    import asyncio
+
+    from astrbot_plugin_statuscard import page_api
+
+    monkeypatch.setattr(
+        page_api,
+        "process_info",
+        lambda _top_n: {
+            "top": [
+                {"name": "python", "cpu_raw": 3.9, "mem_mb": 582.4},
+                {"name": "qq", "cpu_raw": 199.1, "mem_mb": 201.0},
+            ]
+        },
+    )
+    api = PageApi(_ConfigPlugin({"display": {}}))
+    items = asyncio.run(api._latest_processes(8))
+    assert [item["name"] for item in items] == ["python", "qq"]
+    assert [item["rank"] for item in items] == [1, 2]
+    assert items[0]["cpu"] == 3.9
+    assert items[0]["mem_mb"] == 582.4
+    assert items[1]["cpu"] == 199.1
+
+
+def test_latest_processes_redacts_names(monkeypatch) -> None:
+    import asyncio
+
+    from astrbot_plugin_statuscard import page_api
+
+    monkeypatch.setattr(
+        page_api,
+        "process_info",
+        lambda _top_n: {"top": [{"name": "qq", "cpu_raw": 1.0, "mem_mb": 2.0}]},
+    )
+    api = PageApi(_ConfigPlugin({"display": {"page_redact": ["process"]}}))
+    items = asyncio.run(api._latest_processes(8))
+    assert items[0]["name"] == "已隐藏"
