@@ -29,6 +29,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "report_preview_sent": "日报预览已发送。",
         "report_preview_sent_text": "日报预览已发送（文字）。",
         "report_preview_send_failed": "日报预览发送失败，请查看后台日志。",
+        "weekly_preview_failed": "周报预览生成失败，请查看后台日志。",
+        "weekly_preview_sent": "周报预览已发送。",
+        "weekly_preview_sent_text": "周报预览已发送（文字）。",
+        "weekly_preview_send_failed": "周报预览发送失败，请查看后台日志。",
     },
     "en-US": {
         "platform_unsupported": "Unsupported platform: the status card only supports QQ/OneBot (aiocqhttp).",
@@ -51,6 +55,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "report_preview_sent": "Report preview sent.",
         "report_preview_sent_text": "Report preview sent as text.",
         "report_preview_send_failed": "Failed to send the report preview; check the backend log.",
+        "weekly_preview_failed": "Failed to build the weekly report preview; check the backend log.",
+        "weekly_preview_sent": "Weekly report preview sent.",
+        "weekly_preview_sent_text": "Weekly report preview sent as text.",
+        "weekly_preview_send_failed": "Failed to send the weekly report preview; check the backend log.",
     },
 }
 

@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.12.3-blue)
+![Version](https://img.shields.io/badge/version-2.12.4-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -22,6 +22,7 @@
 - **告警与定时状态图**：资源阈值、Bot 掉线/恢复、每日定时状态图、Komari Webhook 转发
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
 - **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；图片失败回退文字；默认关闭，可用 `预览日报` 手动查看
+- **每周周报**：每周日定时汇总最近 7 天（与日报同一套模块与模板），默认关闭，可用 `预览周报` 手动查看
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
 - **Web 可视化统计面板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件和日报，支持手动刷新
 - **双语与主题**：页面和命令提示支持中英双语，日报支持浅色/深色主题，页面跟随 AstrBot 主题
@@ -127,6 +128,7 @@
 | `立即检测` | 立即检查所有监测目标，只返回异常项和汇总（仅管理员） |
 | `状态卡诊断` | 输出平台、OneBot、告警/监测/静默状态、最近采集与渲染耗时、最近推送结果（仅管理员） |
 | `预览日报` | 生成昨日日报并发送到当前会话（仅管理员） |
+| `预览周报` | 生成最近 7 天周报并发送到当前会话（仅管理员） |
 
 ### 触发方式
 
@@ -446,6 +448,8 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `alerts.komari_webhook.require_token` | `true` | 强制要求 Webhook Token；开启但未配置 Token 时拒绝启动 Webhook。关闭时务必让 `host` 保持 `127.0.0.1` |
 | `daily_report.enabled` | `false` | 启用每日定时日报 |
 | `daily_report.time` | `21:00` | 日报发送时间，24 小时制 `HH:MM` |
+| `daily_report.weekly_enabled` | `false` | 启用每周周报（每周日发送最近 7 天汇总） |
+| `daily_report.weekly_time` | `21:30` | 周报发送时间（仅周日生效），24 小时制 `HH:MM` |
 | `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |
 | `daily_report.sections` | 资源 / 异常 / QQ / Token | 日报内容；可额外勾选网站延迟、Top 进程 |
 | `daily_report.with_image` | `true` | 发送图片；关闭或失败时发文字摘要 |

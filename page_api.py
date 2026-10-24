@@ -94,6 +94,7 @@ class PageApi:
             ("history", self.history, ["GET"], "历史趋势"),
             ("events", self.events, ["GET"], "异常事件"),
             ("reports", self.reports, ["GET"], "日报摘要"),
+            ("export", self.export, ["GET"], "导出历史数据"),
         )
         for name, handler, methods, desc in routes:
             register(f"/{PLUGIN_NAME}/{name}", handler, methods, desc)
@@ -310,6 +311,58 @@ class PageApi:
                     "last_run": daily_status.get("last_run"),
                 },
                 "store": plugin.report_store.stats(),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # GET /export
+    # ------------------------------------------------------------------
+
+    async def export(self):
+        """Return raw history rows; the page turns them into a CSV file.
+
+        The rows are aggregated numbers only (timestamps, percentages,
+        counters, process names honouring the dashboard redaction) - never
+        message text or user IDs.
+        """
+
+        kind = str(_query_value("kind", "resources")).lower()
+        range_key = str(_query_value("range", "7d")).lower()
+        seconds = RANGE_SECONDS.get(range_key, 86400 * 7)
+        end = int(time.time())
+        start = end - seconds
+        store = self.plugin.report_store
+        limit = 20000
+        if kind == "resources":
+            rows = [
+                row
+                for row in store.list_resources(start, limit=limit)
+                if int(row.get("ts") or 0) <= end
+            ]
+        elif kind == "processes":
+            rows = store.list_process_samples(start, end + 60, "cpu")
+            rows += store.list_process_samples(start, end + 60, "mem")
+            if "process" in self._redact():
+                rows = [dict(row, name="已隐藏") for row in rows]
+        elif kind == "websites":
+            rows = store.list_website_samples(start, end + 60)
+        elif kind == "events":
+            now = now_in_timezone(self.plugin.config)
+            days = int(seconds / 86400) + 2
+            rows = []
+            for offset in range(days):
+                day = (now - timedelta(days=offset)).date().isoformat()
+                rows += store.list_events(day, limit=5000)
+            rows = [row for row in rows if int(row.get("ts") or 0) >= start]
+        else:
+            return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+        return jsonify(
+            {
+                "ok": True,
+                "kind": kind,
+                "range": range_key,
+                "generated_at": end,
+                "rows": rows[:limit],
             }
         )
 

@@ -853,3 +853,14 @@ class StatusCardPlugin(Star):
         )
         yield event.plain_result(detail)
         event.stop_event()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("预览周报")
+    async def cmd_preview_weekly(self, event: AstrMessageEvent):
+        """Build and send the last-7-days weekly report to the current chat."""
+        event.should_call_llm(False)
+        _ok, detail = await self.daily_report.preview(
+            getattr(event, "unified_msg_origin", None), span_days=7
+        )
+        yield event.plain_result(detail)
+        event.stop_event()

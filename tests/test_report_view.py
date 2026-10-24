@@ -132,13 +132,22 @@ def test_qq_and_token_sections_use_astrbot_history(tmp_path: Path) -> None:
     assert qq["charts"]["traffic"]["series"]
 
     token = view["token"]
-    assert token["total"] == 666
-    assert token["total_text"] == "666"
-    assert token["calls"] == 3
-    assert token["success_text"] == "66.7%"
+    assert token["total"] == 660
+    assert token["total_text"] == "660"
+    assert token["calls"] == 2
+    assert token["success_text"] == "50.0%"
     assert token["top_models"][0]["name"] == "kimi-k3"
-    assert token["top_models"][0]["tokens"] == 606
+    assert token["top_models"][0]["tokens"] == 600
     assert token["trend"]["series"]
+
+    weekly = _builder(tmp_path, store, db_path=db).build(
+        day="2026-10-20", history_days=7, sections=["token"], span_days=7
+    )
+    weekly_token = weekly["token"]
+    assert weekly_token["total"] == 666
+    assert weekly_token["calls"] == 3
+    assert weekly_token["success_text"] == "66.7%"
+    assert weekly_token["top_models"][0]["tokens"] == 606
 
 
 def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
@@ -164,6 +173,29 @@ def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
         item for item in anomalies["items"] if item["status_key"] == "recovery"
     )
     assert recovery["duration"] == "00:10:00"
+
+
+def test_weekly_view_spans_seven_days(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    store.add_event(1_700_000_000, "2026-10-19", "service", "Nginx", "down", "alert")
+    store.add_event(
+        1_700_000_700, "2026-10-20", "resource", "CPU 使用率", "too high", "alert"
+    )
+
+    daily = _builder(tmp_path, store).build(
+        day="2026-10-20", history_days=7, sections=["anomaly"]
+    )
+    assert daily["title"] == "系统日报"
+    assert daily["anomalies"]["count"] == 1
+
+    weekly = _builder(tmp_path, store).build(
+        day="2026-10-20", history_days=7, sections=["anomaly"], span_days=7
+    )
+    assert weekly["title"] == "系统周报"
+    assert weekly["start_day"] == "2026-10-14"
+    assert weekly["window"] == "2026-10-14 00:00 – 2026-10-20 24:00"
+    assert weekly["day_label"] == "最后一天"
+    assert weekly["anomalies"]["count"] == 2
 
 
 def test_empty_report_shows_accumulating_messages(tmp_path: Path) -> None:

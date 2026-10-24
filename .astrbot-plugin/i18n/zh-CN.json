@@ -24,6 +24,7 @@
         "label_month_flow": "本月流量",
         "label_latest_sample": "最近一次采样",
         "label_process_window": "最近 10 秒平均（占整机 %）",
+        "export_csv": "导出 CSV",
         "label_recent_30": "最近 30 次",
         "range_24h": "24 小时",
         "range_7d": "7 天",

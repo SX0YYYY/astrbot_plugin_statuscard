@@ -328,6 +328,12 @@ class DailyReporter:
         self._pending_retry_day: str | None = None
         self._next_run_text: str | None = None
         self._disabled_logged = False
+        self._weekly_task: asyncio.Task | None = None
+        self._weekly_running = False
+        self._weekly_last_sent_week: str | None = None
+        self._weekly_pending: float | None = None
+        self._weekly_retry_count = 0
+        self._weekly_next_run_text: str | None = None
 
     # ------------------------------------------------------------------
     # configuration helpers (read per call so edits apply after reload)
@@ -346,6 +352,14 @@ class DailyReporter:
 
     def _history_days(self) -> int:
         return max(7, min(30, cfg_int(self.config, "daily_report.history_days", 7)))
+
+    def _weekly_enabled(self) -> bool:
+        return cfg_bool(self.config, "daily_report.weekly_enabled", False)
+
+    def _weekly_time_text(self) -> str:
+        return str(
+            cfg_get(self.config, "daily_report.weekly_time", "21:30") or "21:30"
+        ).strip()
 
     def _sections(self) -> list[str] | None:
         """Return selected sections, or None when the key is unset.
@@ -388,7 +402,7 @@ class DailyReporter:
                 out.append(target)
         return out
 
-    def _build_view(self, day=None) -> dict[str, Any]:
+    def _build_view(self, day=None, span_days: int = 1) -> dict[str, Any]:
         meta = {
             "host": socket.gethostname(),
             "astrbot_version": resolve_astrbot_version(
@@ -400,6 +414,7 @@ class DailyReporter:
             history_days=self._history_days(),
             sections=self._sections(),
             meta=meta,
+            span_days=span_days,
         )
 
     # ------------------------------------------------------------------
@@ -449,17 +464,57 @@ class DailyReporter:
             self._sections() or [],
             self._history_days(),
         )
+        self._start_weekly()
+
+    def _start_weekly(self) -> None:
+        if not self._weekly_enabled():
+            logger.info("周报未启用（daily_report.weekly_enabled=false）")
+            return
+        if self._weekly_running:
+            return
+        self._weekly_running = True
+        self._weekly_task = asyncio.create_task(self._weekly_loop())
+        self._weekly_task.add_done_callback(self._on_weekly_task_done)
+        self._weekly_next_run_text = self._compute_next_weekly_run()
+        if self._weekly_next_run_text:
+            logger.info("周报将在 %s 发送", self._weekly_next_run_text)
+
+    def _compute_next_weekly_run(self) -> str | None:
+        """Next Sunday at ``daily_report.weekly_time`` in display timezone."""
+
+        try:
+            time_text = self._weekly_time_text()
+            hour, minute = [int(part) for part in time_text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+        except Exception:
+            return None
+        now = now_in_timezone(self.config)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        target += timedelta(days=(6 - target.weekday()) % 7)
+        if target <= now:
+            target += timedelta(days=7)
+        return target.strftime("%Y-%m-%d %H:%M")
+
+    def _on_weekly_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("周报定时任务异常退出: %r", exc, exc_info=exc)
 
     async def stop(self) -> None:
         self._running = False
-        task = self._task
-        self._task = None
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        self._weekly_running = False
+        for attr in ("_task", "_weekly_task"):
+            task = getattr(self, attr)
+            setattr(self, attr, None)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _loop(self) -> None:
         last_logged = None
@@ -545,6 +600,125 @@ class DailyReporter:
     # ------------------------------------------------------------------
     # sending
     # ------------------------------------------------------------------
+
+    async def _weekly_loop(self) -> None:
+        last_logged = None
+        while self._weekly_running:
+            try:
+                if not self._weekly_enabled():
+                    self._weekly_next_run_text = None
+                    await asyncio.sleep(60)
+                    continue
+                if self._weekly_pending is not None:
+                    if time.time() < self._weekly_pending:
+                        await asyncio.sleep(60)
+                        continue
+                    self._weekly_pending = None
+                    await self._send_weekly_scheduled()
+                    await asyncio.sleep(60)
+                    continue
+                try:
+                    hour, minute = [
+                        int(part) for part in self._weekly_time_text().split(":", 1)
+                    ]
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        raise ValueError("out of range")
+                except Exception:
+                    logger.warning(
+                        "周报发送时间格式非法：%s（应为 HH:MM）",
+                        self._weekly_time_text(),
+                    )
+                    await asyncio.sleep(60)
+                    continue
+                now = now_in_timezone(self.config)
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                target += timedelta(days=(6 - target.weekday()) % 7)
+                if target <= now:
+                    target += timedelta(days=7)
+                if last_logged != target:
+                    self._weekly_next_run_text = target.strftime("%Y-%m-%d %H:%M")
+                    logger.info(
+                        "周报将在 %s 发送（%.0f 秒后）",
+                        self._weekly_next_run_text,
+                        max(1.0, (target - now).total_seconds()),
+                    )
+                    last_logged = target
+                wait = max(1.0, (target - now).total_seconds())
+                if wait > 60:
+                    await asyncio.sleep(60)
+                    continue
+                await asyncio.sleep(wait)
+                await self._send_weekly_scheduled()
+                last_logged = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("周报定时任务失败")
+                await asyncio.sleep(60)
+
+    def _schedule_weekly_retry(self) -> None:
+        self._weekly_retry_count += 1
+        if self._weekly_retry_count > 3:
+            self._weekly_pending = None
+            self._weekly_retry_count = 0
+            logger.warning("周报连续发送失败 3 次，停止重试")
+            return
+        delay = 600 * self._weekly_retry_count
+        self._weekly_pending = time.time() + delay
+        logger.warning(
+            "周报发送失败，%d 分钟后重试（第 %d 次）",
+            delay // 60,
+            self._weekly_retry_count,
+        )
+
+    async def _send_weekly_scheduled(self) -> None:
+        if self._sections() is not None and not self._sections():
+            logger.warning("周报内容为空（daily_report.sections=[]），跳过发送")
+            return
+        try:
+            view = self._build_view(span_days=7)
+        except Exception:
+            logger.exception("周报数据聚合失败")
+            self._schedule_weekly_retry()
+            return
+        iso = now_in_timezone(self.config).date().isocalendar()
+        week_key = f"{iso.year}-W{iso.week:02d}"
+        if self._weekly_last_sent_week == week_key:
+            logger.info("周报 %s 已发送过，跳过重复发送", week_key)
+            return
+        targets = self._targets()
+        if not targets:
+            logger.warning("周报推送目标为空，跳过发送")
+            self._schedule_weekly_retry()
+            return
+        day = str(view.get("day") or "")
+        if self._with_image():
+            image_url = None
+            try:
+                image_url = await self.plugin.render_report_image(view)
+            except Exception:
+                logger.exception("周报渲染失败，回退文字摘要")
+            if image_url and await self.plugin.send_image(
+                targets, image_url, source="weekly_report"
+            ):
+                self._weekly_last_sent_week = week_key
+                self._record(day, True, "weekly-image")
+                self._weekly_pending = None
+                self._weekly_retry_count = 0
+                logger.info("周报已发送（图片）：%s", targets)
+                return
+        if await self.plugin.send_text(
+            targets, build_report_text(view), source="weekly_report"
+        ):
+            self._weekly_last_sent_week = week_key
+            self._record(day, True, "weekly-text")
+            self._weekly_pending = None
+            self._weekly_retry_count = 0
+            logger.info("周报已发送（文字）：%s", targets)
+        else:
+            self._record(day, False, "weekly send failed")
+            logger.warning("周报发送失败：%s", targets)
+            self._schedule_weekly_retry()
 
     def _schedule_retry(self, day: str) -> None:
         """Remember a failed delivery and queue the next attempt.
@@ -632,14 +806,19 @@ class DailyReporter:
             logger.warning("日报发送失败：%s", targets)
             self._schedule_retry(day)
 
-    async def preview(self, target_umo: str | None) -> tuple[bool, str]:
+    async def preview(
+        self, target_umo: str | None, span_days: int = 1
+    ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
+        span = max(1, min(30, int(span_days or 1)))
+        prefix = "report" if span == 1 else "weekly"
+        source = "report_preview" if span == 1 else "weekly_preview"
         try:
-            view = self._build_view()
+            view = self._build_view(span_days=span)
         except Exception:
             logger.exception("日报预览数据聚合失败")
-            return False, tr(self.config, "report_preview_failed")
+            return False, tr(self.config, f"{prefix}_preview_failed")
         if self._with_image():
             image_url = None
             try:
@@ -647,14 +826,14 @@ class DailyReporter:
             except Exception:
                 logger.exception("日报预览渲染失败，回退文字摘要")
             if image_url and await self.plugin.send_image(
-                [target_umo], image_url, source="report_preview"
+                [target_umo], image_url, source=source
             ):
-                return True, tr(self.config, "report_preview_sent")
+                return True, tr(self.config, f"{prefix}_preview_sent")
         if await self.plugin.send_text(
-            [target_umo], build_report_text(view), source="report_preview"
+            [target_umo], build_report_text(view), source=source
         ):
-            return True, tr(self.config, "report_preview_sent_text")
-        return False, tr(self.config, "report_preview_send_failed")
+            return True, tr(self.config, f"{prefix}_preview_sent_text")
+        return False, tr(self.config, f"{prefix}_preview_send_failed")
 
     def _record(self, day: str, ok: bool, detail: str) -> None:
         try:
@@ -677,4 +856,7 @@ class DailyReporter:
             "history_days": self._history_days(),
             "next_run": self._next_run_text,
             "last_run": last_run,
+            "weekly_enabled": self._weekly_enabled(),
+            "weekly_time": self._weekly_time_text(),
+            "weekly_next_run": self._weekly_next_run_text,
         }

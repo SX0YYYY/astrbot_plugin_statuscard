@@ -512,6 +512,47 @@
   // history
   // ------------------------------------------------------------------
 
+  async function exportCsv() {
+    const bridge = getBridge();
+    if (!bridge || typeof bridge.apiGet !== "function") {
+      throw new Error(
+        t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
+      );
+    }
+    const range = state.historyRange || "7d";
+    const kinds = ["resources", "processes", "websites", "events"];
+    for (const kind of kinds) {
+      const data = await bridge.apiGet("export", { kind, range });
+      if (!data || !data.ok) {
+        throw new Error((data && data.error) || t("error_load", "加载失败"));
+      }
+      downloadCsv(kind, range, data.rows || []);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  function downloadCsv(kind, range, rows) {
+    if (!rows.length) return;
+    const headers = Object.keys(rows[0]);
+    const esc = (value) => {
+      const text = value === null || value === undefined ? "" : String(value);
+      return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    };
+    const lines = [headers.join(",")];
+    for (const row of rows) lines.push(headers.map((h) => esc(row[h])).join(","));
+    const blob = new Blob(["\ufeff" + lines.join("\n")], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "statuscard-" + kind + "-" + range + ".csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function loadHistory() {
     const data = await apiGet("history", { range: state.historyRange });
     const points = data.points || [];
@@ -962,6 +1003,11 @@
       });
     });
     $("refresh").addEventListener("click", refreshCurrent);
+    $("export-csv").addEventListener("click", () => {
+      exportCsv().catch((error) =>
+        toast(error.message || t("error_load", "加载失败")),
+      );
+    });
 
     document.querySelectorAll("#range-switch button").forEach((button) => {
       button.addEventListener("click", () => {

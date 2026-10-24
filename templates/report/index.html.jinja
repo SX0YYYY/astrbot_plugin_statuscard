@@ -67,7 +67,7 @@
     <section class="section">
       <div class="section-head">
         <h2>资源趋势</h2>
-        <span>昨日 24 小时 · 最近 {{ d.history_days }} 天</span>
+        <span>{{ d.day_label }} 24 小时 · 最近 {{ d.history_days }} 天</span>
       </div>
       {% if not d.resources.available %}
       <div class="empty">{{ d.resources.empty_reason }}</div>
@@ -83,7 +83,7 @@
         {% endfor %}
       </div>
       <div class="chart-block">
-        <div class="chart-title">昨日 24 小时 <span>按小时均值</span></div>
+        <div class="chart-title">{{ d.day_label }} 24 小时 <span>按小时均值</span></div>
         {{ legend(d.resources.charts.hourly) }}
         {{ chart_svg(d.resources.charts.hourly) }}
       </div>
@@ -199,7 +199,7 @@
     <section class="section">
       <div class="section-head">
         <h2>Token 消耗</h2>
-        <span>最近 {{ d.history_days }} 天</span>
+        <span>{{ d.token_label }}</span>
       </div>
       {% if not d.token.available %}
       <div class="empty">{{ d.token.empty_reason }}</div>
@@ -246,13 +246,13 @@
     <section class="section">
       <div class="section-head">
         <h2>网站延迟</h2>
-        <span>昨日 · 最近 {{ d.history_days }} 天</span>
+        <span>{{ d.day_label }} · 最近 {{ d.history_days }} 天</span>
       </div>
       {% if not d.website.available %}
       <div class="empty">{{ d.website.empty_reason }}</div>
       {% else %}
       <table class="model-table">
-        <thead><tr><th>目标</th><th>昨日平均</th><th>峰值</th><th>可用率</th></tr></thead>
+        <thead><tr><th>目标</th><th>{{ d.day_label }}平均</th><th>峰值</th><th>可用率</th></tr></thead>
         <tbody>
           {% for item in d.website.targets %}
           <tr>
@@ -279,7 +279,7 @@
     <section class="section">
       <div class="section-head">
         <h2>Top 异常进程</h2>
-        <span>昨日采样峰值（占整机 %）</span>
+        <span>{{ d.day_label }}采样峰值（占整机 %）</span>
       </div>
       {% if not d.process.available %}
       <div class="empty">{{ d.process.empty_reason }}</div>

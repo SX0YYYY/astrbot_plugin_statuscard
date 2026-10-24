@@ -261,9 +261,12 @@ class DailyReportBuilder:
         history_days: int = 7,
         sections: list[str] | None = None,
         meta: dict[str, Any] | None = None,
+        span_days: int = 1,
     ) -> dict[str, Any]:
         target = self._resolve_day(day)
-        previous = target - timedelta(days=1)
+        span = max(1, min(30, int(span_days or 1)))
+        start_day = target - timedelta(days=span - 1)
+        previous = target - timedelta(days=span)
         history_days = max(7, min(30, int(history_days or 7)))
         requested = list(DEFAULT_SECTIONS) if sections is None else sections
         if isinstance(requested, str):
@@ -276,11 +279,26 @@ class DailyReportBuilder:
         if self.redactor.hostname:
             host = "已隐藏"
 
+        if span == 1:
+            title = "系统日报"
+            window = f"{target.isoformat()} 00:00–24:00"
+            day_label = "昨日"
+            token_label = f"昨日 · 趋势最近 {history_days} 天"
+        else:
+            title = "系统周报"
+            window = f"{start_day.isoformat()} 00:00 – {target.isoformat()} 24:00"
+            day_label = "最后一天"
+            token_label = f"近 {span} 天合计 · 趋势最近 {history_days} 天"
+
         view: dict[str, Any] = {
-            "title": "系统日报",
+            "title": title,
             "day": target.isoformat(),
+            "start_day": start_day.isoformat(),
+            "span_days": span,
+            "day_label": day_label,
+            "token_label": token_label,
             "previous_day": previous.isoformat(),
-            "window": f"{target.isoformat()} 00:00–24:00",
+            "window": window,
             "timezone": self.tz_name,
             "generated_at": generated_at,
             "host": host,
@@ -295,15 +313,19 @@ class DailyReportBuilder:
         if "resource" in selected:
             view["resources"] = self._resource_section(target, previous, history_days)
         if "anomaly" in selected:
-            view["anomalies"] = self._anomaly_section(target, previous)
+            view["anomalies"] = self._anomaly_section(target, previous, span)
         if "qq" in selected:
             view["qq"] = self._qq_section(target, history_days)
         if "token" in selected:
-            view["token"] = self._token_section(target, history_days)
+            view["token"] = self._token_section(target, history_days, span)
         if "website" in selected:
-            view["website"] = self._website_section(target, previous, history_days)
+            view["website"] = self._website_section(
+                target, previous, history_days, span
+            )
         if "process" in selected:
-            view["process"] = self._process_section(target, previous, history_days)
+            view["process"] = self._process_section(
+                target, previous, history_days, span
+            )
         view["summary"] = self._summary(view)
         return view
 
@@ -533,9 +555,16 @@ class DailyReportBuilder:
     # anomalies
     # ------------------------------------------------------------------
 
-    def _anomaly_section(self, day: date, previous: date) -> dict[str, Any]:
+    def _anomaly_section(
+        self, day: date, previous: date, span: int = 1
+    ) -> dict[str, Any]:
+        window_days = {
+            (day - timedelta(days=offset)).isoformat() for offset in range(span)
+        }
         events = self.store.list_events(previous.isoformat(), limit=1000)
-        events += self.store.list_events(day.isoformat(), limit=1000)
+        for offset in range(span):
+            boundary = day - timedelta(days=offset)
+            events += self.store.list_events(boundary.isoformat(), limit=1000)
         events.sort(
             key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
         )
@@ -551,7 +580,7 @@ class DailyReportBuilder:
             resolved_ts = event.get("resolved_ts")
             if status == "alert":
                 open_alerts[name] = int(event.get("ts") or 0)
-            if str(event.get("day") or "") != day.isoformat():
+            if str(event.get("day") or "") not in window_days:
                 continue
             if status not in {"alert", "recovery", "failed"}:
                 continue
@@ -820,7 +849,11 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _website_section(
-        self, day: date, previous: date, history_days: int
+        self,
+        day: date,
+        previous: date,
+        history_days: int,
+        span: int = 1,
     ) -> dict[str, Any]:
         days = [
             day - timedelta(days=history_days - 1 - index)
@@ -839,6 +872,7 @@ class DailyReportBuilder:
             local = datetime.fromtimestamp(int(row["ts"]), self.tz)
             key = (local.strftime("%Y-%m-%d"), str(row.get("name") or ""))
             by_key.setdefault(key, []).append(row)
+        window_keys = [(day - timedelta(days=i)).isoformat() for i in range(span)]
 
         def latency_values(items: list[dict[str, Any]]) -> list[float]:
             return [
@@ -849,22 +883,24 @@ class DailyReportBuilder:
 
         targets: list[dict[str, Any]] = []
         for name in names:
-            yesterday_rows = by_key.get((day.isoformat(), name), [])
-            if not yesterday_rows:
+            window_rows = [
+                row for key in window_keys for row in by_key.get((key, name), [])
+            ]
+            if not window_rows:
                 continue
-            ok_count = sum(1 for row in yesterday_rows if row.get("ok"))
-            latencies = latency_values(yesterday_rows)
+            ok_count = sum(1 for row in window_rows if row.get("ok"))
+            latencies = latency_values(window_rows)
             average = sum(latencies) / len(latencies) if latencies else None
             peak = max(latencies) if latencies else None
             targets.append(
                 {
                     "name": name,
                     "ok_count": ok_count,
-                    "fail_count": len(yesterday_rows) - ok_count,
-                    "total": len(yesterday_rows),
+                    "fail_count": len(window_rows) - ok_count,
+                    "total": len(window_rows),
                     "availability_text": (
-                        f"{ok_count / len(yesterday_rows) * 100:.0f}%"
-                        if yesterday_rows
+                        f"{ok_count / len(window_rows) * 100:.0f}%"
+                        if window_rows
                         else "--"
                     ),
                     "avg_text": (f"{average:.0f} ms" if average is not None else "--"),
@@ -928,9 +964,16 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _process_section(
-        self, day: date, previous: date, history_days: int
+        self,
+        day: date,
+        previous: date,
+        history_days: int,
+        span: int = 1,
     ) -> dict[str, Any]:
-        start_ts = int(datetime.combine(day, time.min, tzinfo=self.tz).timestamp())
+        window_start = day - timedelta(days=span - 1)
+        start_ts = int(
+            datetime.combine(window_start, time.min, tzinfo=self.tz).timestamp()
+        )
         end_ts = int(
             datetime.combine(
                 day + timedelta(days=1), time.min, tzinfo=self.tz
@@ -1013,10 +1056,16 @@ class DailyReportBuilder:
     # token
     # ------------------------------------------------------------------
 
-    def _token_section(self, day: date, history_days: int) -> dict[str, Any]:
-        days = [day - timedelta(days=i) for i in range(history_days - 1, -1, -1)]
-        labels = [item.strftime("%m-%d") for item in days]
-        rows, min_created, available = self._provider_rows(days[0], days[-1])
+    def _token_section(
+        self, day: date, history_days: int, span: int = 1
+    ) -> dict[str, Any]:
+        chart_days = [day - timedelta(days=i) for i in range(history_days - 1, -1, -1)]
+        window_days = [day - timedelta(days=i) for i in range(span - 1, -1, -1)]
+        window_set = {item.isoformat() for item in window_days}
+        labels = [item.strftime("%m-%d") for item in chart_days]
+        rows, min_created, available = self._provider_rows(
+            chart_days[0], chart_days[-1]
+        )
         if not available or not rows:
             return {
                 "available": False,
@@ -1037,7 +1086,8 @@ class DailyReportBuilder:
             min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
 
         by_day = {
-            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0} for item in days
+            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0}
+            for item in chart_days
         }
         by_model: dict[str, int] = {}
         for row in rows:
@@ -1053,12 +1103,20 @@ class DailyReportBuilder:
             bucket["calls"] += 1
             if str(row[1] or "") == "completed":
                 bucket["completed"] += 1
+            if local_day not in window_set:
+                continue
             model = str(row[2] or "未知模型")
             by_model[model] = by_model.get(model, 0) + tokens
 
-        total = sum(bucket["tokens"] for bucket in by_day.values())
-        calls = sum(bucket["calls"] for bucket in by_day.values())
-        completed = sum(bucket["completed"] for bucket in by_day.values())
+        total = sum(
+            bucket["tokens"] for key, bucket in by_day.items() if key in window_set
+        )
+        calls = sum(
+            bucket["calls"] for key, bucket in by_day.items() if key in window_set
+        )
+        completed = sum(
+            bucket["completed"] for key, bucket in by_day.items() if key in window_set
+        )
         success_rate = (completed / calls * 100.0) if calls else None
         top_models = []
         for model, tokens in sorted(
@@ -1076,7 +1134,7 @@ class DailyReportBuilder:
             )
 
         trend_values: list[int | None] = []
-        for item in days:
+        for item in chart_days:
             day_text = item.isoformat()
             if min_day and day_text < min_day:
                 trend_values.append(None)
