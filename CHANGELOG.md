@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- SECURITY.md：漏洞报告渠道明确为 GitHub 私有漏洞报告（Security 页 → Report a vulnerability，本仓库已开启）；一般问题提交 issue、代码贡献提交 PR。
+- SECURITY.md：报告渠道精简为直接提交 issue（问题）与 PR（贡献），移除冗余的漏洞披露流程描述。
 
 ## v2.12.5 — 2026-10-24
 
