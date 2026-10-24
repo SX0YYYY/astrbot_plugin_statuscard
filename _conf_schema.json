@@ -30,7 +30,7 @@
           "max": 30,
           "step": 1
         },
-        "hint": "状态卡进程表显示条数，3–20；CPU 以占整机百分比显示（已除以 CPU 核数）。日报的 Top 进程条数在“日报 → 高级”里单独设置。"
+        "hint": "状态卡进程表显示条数，1–30；CPU 以占整机百分比显示（已除以 CPU 核数）。日报的 Top 进程条数在“日报 → 高级”里单独设置。"
       },
       "compact": {
         "description": "手机紧凑模式",
@@ -459,7 +459,7 @@
             "condition": {
               "enabled": true
             },
-            "hint": "留空表示不校验；建议设置，且不要提交到公开仓库。"
+            "hint": "Webhook 的鉴权 Token；是否强制校验取决于下方“强制要求 Token”。不要提交到公开仓库。"
           },
           "require_token": {
             "description": "强制要求 Token",
@@ -499,7 +499,7 @@
         "description": "启用每周周报",
         "type": "bool",
         "default": false,
-        "hint": "每周日汇总最近 7 天：资源趋势、异常、QQ、Token、网站与进程；目标与内容复用日报设置。"
+        "hint": "每周日汇总最近 7 天：资源趋势、异常、QQ、Token、网站与进程；推送目标、日报内容、发送图片、主题与趋势天数与每日日报共用（就是上面/下面那几项）。"
       },
       "weekly_time": {
         "description": "周报发送时间（周日）",
@@ -518,10 +518,7 @@
         "items": {
           "type": "string"
         },
-        "condition": {
-          "enabled": true
-        },
-        "hint": "留空复用“告警与每日定时状态图”的推送目标。"
+        "hint": "留空复用“告警与每日定时状态图”的推送目标；每日日报与每周周报共用。"
       },
       "sections": {
         "description": "日报内容",
@@ -549,28 +546,19 @@
           "Top 进程"
         ],
         "render_type": "checkbox",
-        "condition": {
-          "enabled": true
-        },
-        "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。"
+        "hint": "只渲染勾选的模块；没有数据的模块会显示“数据积累中”。每日日报与每周周报共用。"
       },
       "with_image": {
         "description": "发送图片",
         "type": "bool",
         "default": true,
-        "condition": {
-          "enabled": true
-        },
-        "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。"
+        "hint": "关闭后只发文字摘要；图片渲染失败时也会自动回退文字。每日日报与每周周报共用。"
       },
       "theme": {
         "description": "日报主题",
         "type": "string",
         "default": "light",
-        "condition": {
-          "enabled": true
-        },
-        "hint": "只影响日报图片，不影响状态卡。"
+        "hint": "只影响日报/周报图片，不影响状态卡。"
       },
       "history_days": {
         "description": "趋势天数",
@@ -579,12 +567,9 @@
         "slider": {
           "min": 7,
           "max": 30,
-          "step": 7
+          "step": 1
         },
-        "condition": {
-          "enabled": true
-        },
-        "hint": "日报趋势图显示最近多少天，7–30 天。"
+        "hint": "日报与周报的趋势图显示最近多少天，7–30 天。"
       },
       "collect": {
         "description": "记录日报历史数据",

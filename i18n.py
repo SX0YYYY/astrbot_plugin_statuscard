@@ -10,11 +10,10 @@ LANGUAGES = ("zh-CN", "en-US")
 MESSAGES: dict[str, dict[str, str]] = {
     "zh-CN": {
         "platform_unsupported": "当前平台不受支持：状态卡仅支持 QQ/OneBot（aiocqhttp）。",
-        "admin_only": "查看状态仅管理员可用。",
         "generating": "状态卡正在生成，请稍候。",
         "cooldown": "状态卡冷却中，请 {seconds} 秒后再试。",
         "privacy_notice": "提示：状态图包含主机名/进程等信息，并会发送到 T2I 服务渲染。",
-        "progress_notice": "状态卡生成中，通常需要 1–3 分钟，请稍候…",
+        "progress_notice": "状态卡生成中，通常十几秒到一分钟，请稍候…",
         "image_failed": "生成状态图失败，以下为文本摘要：\n{summary}",
         "summary_failed": "获取系统状态失败，请检查 AstrBot 后台日志。",
         "test_sent": "测试通知已发送到当前会话。",
@@ -36,11 +35,10 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "en-US": {
         "platform_unsupported": "Unsupported platform: the status card only supports QQ/OneBot (aiocqhttp).",
-        "admin_only": "Only AstrBot administrators can use this command.",
         "generating": "The status card is being generated, please wait.",
         "cooldown": "Status card cooldown, try again in {seconds} seconds.",
         "privacy_notice": "Note: the status image includes the hostname/processes and is sent to the configured T2I service for rendering.",
-        "progress_notice": "Generating the status card; this usually takes 1–3 minutes…",
+        "progress_notice": "Generating the status card; this usually takes seconds to a minute…",
         "image_failed": "Failed to generate the status image. Text summary:\n{summary}",
         "summary_failed": "Failed to collect system status; check the AstrBot backend log.",
         "test_sent": "Test notification sent to this chat.",

@@ -39,6 +39,7 @@
         "metric_used_total": "{used} / {total}",
         "label_astrbot": "AstrBot {version}",
         "network_up": "Upload",
+        "network_redacted": "Network data hidden by redaction settings",
         "network_down": "Download",
         "network_month_up": "Month upload",
         "network_month_down": "Month download",

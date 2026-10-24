@@ -39,6 +39,7 @@
         "metric_used_total": "{used} / {total}",
         "label_astrbot": "AstrBot {version}",
         "network_up": "上行",
+        "network_redacted": "网络数据已按脱敏配置隐藏",
         "network_down": "下行",
         "network_month_up": "本月上行",
         "network_month_down": "本月下行",
