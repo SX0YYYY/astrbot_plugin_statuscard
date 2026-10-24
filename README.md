@@ -1,6 +1,6 @@
-![Version](https://img.shields.io/badge/version-2.12.4-blue)
+![Version](https://img.shields.io/badge/version-2.12.5-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
-![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 ![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
 
@@ -22,7 +22,8 @@
 - **告警与定时状态图**：资源阈值、Bot 掉线/恢复、每日定时状态图、Komari Webhook 转发
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
 - **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；图片失败回退文字；默认关闭，可用 `预览日报` 手动查看
-- **每周周报**：每周日定时汇总最近 7 天（与日报同一套模块与模板），默认关闭，可用 `预览周报` 手动查看
+- **每周周报**：每周日定时汇总最近 7 天（与日报同一套模块与模板），默认关闭，可用 `预览周报` 手动查看；其中资源「24 小时」详情取自窗口最后一天，QQ 摘要同样是最后一天数值，7 天趋势图才是全窗口合计
+- **看板导出 CSV**：服务器状态看板的「历史趋势」卡片可一键导出资源采样、进程采样、网站延迟、异常事件四份 CSV，跟随 24h/7d/30d 范围，进程名遵守看板脱敏开关
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
 - **Web 可视化统计面板**：在 AstrBot WebUI 插件页面中查看概览、历史趋势、事件和日报，支持手动刷新
 - **双语与主题**：页面和命令提示支持中英双语，日报支持浅色/深色主题，页面跟随 AstrBot 主题
@@ -81,7 +82,7 @@
 ### 环境要求
 
 - AstrBot `>=4.26.7,<5`（已在 4.26.7、4.27.0、4.29.0 验证加载与页面 API）
-- Python 3.12+（跟随 AstrBot 要求）
+- Python 3.11+（跟随 AstrBot 要求）
 - 一个可用的 QQ / OneBot 连接（推荐 NapCat）
 - 能访问 AstrBot 配置的 T2I 渲染服务（默认远程）
 
@@ -373,6 +374,8 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | 边界 | 每次打开页面都会移动 | 每天固定，日报统计的是「昨天整天」 |
 | 典型差异 | 现在是 15:30，窗口是昨天 15:30 → 今天 15:30 | 窗口是昨天 00:00 → 今天 00:00 |
 
+**周报是第三种口径**：以周日 21:30 为终点、往前覆盖 7 个完整自然日（周一 00:00 → 周日 24:00），不会与看板的滚动窗口对齐。
+
 所以看板的「24h」和日报的「昨日」在同一天里**数值不会完全一致**：看板窗口比日报多覆盖了今天已经过去的几个小时，也少了昨天午夜到 15:30 的一小段。
 
 需要对齐比较时：
@@ -436,10 +439,10 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板。与 `display.redact` 完全独立，全部不勾即看板不脱敏 |
 | `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
 | `alerts.interval_seconds` | `60` | 告警采样间隔（秒） |
-| `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警 |
+| `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警（资源告警）；服务监测的失败阈值在「服务可用性监测」分组 |
 | `alerts.cooldown_seconds` | `1800` | 同一规则告警冷却（秒） |
 | `monitors.interval_seconds` | `60` | 服务监测轮询间隔（秒） |
-| `monitors.fail_threshold` | `2` | 连续失败几次后告警 |
+| `monitors.fail_threshold` | `2` | 连续失败几次后告警（服务监测）；资源告警的连续次数在「告警与每日定时状态图」分组 |
 | `monitors.silence_enabled` | `false` | 启用维护静默；只有开启时 `silence_until` 才生效 |
 | `monitors.silence_until` | 空 | 维护静默截止时间，`YYYY-MM-DD HH:MM`；到期前只探测不推送 |
 | `monitors.suppress_duplicates` | `false` | 启用重复层抑制；只有开启时 `suppress_when_down` 才生效 |
