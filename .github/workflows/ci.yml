@@ -20,7 +20,7 @@ jobs:
         run: |
           python - <<'PY'
           import re, pathlib
-          root = pathlib.Path("astrbot_plugin_statuscard")
+          root = pathlib.Path(".")
           version_py = re.search(r'__version__\s*=\s*"([^"]+)"', (root / "version.py").read_text(encoding="utf-8")).group(1)
           metadata = re.search(r"^version:\s*(\S+)\s*$", (root / "metadata.yaml").read_text(encoding="utf-8"), re.M).group(1)
           badge = re.search(r"version-([\d.]+)-blue", (root / "README.md").read_text(encoding="utf-8")).group(1)
