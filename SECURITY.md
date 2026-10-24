@@ -10,10 +10,12 @@
 
 ## 报告漏洞
 
-请不要在公开 issue 中披露可被利用的细节。可以通过以下方式私下联系：
+请不要在公开 issue 或 PR 中披露可被利用的细节——公开的讨论和补丁 diff 等于直接公布利用方式。请统一走 GitHub 的**私有漏洞报告**：
 
-- GitHub 私信 [@SX0YYYY](https://github.com/SX0YYYY)
-- 或在仓库 Security 页面使用 “Report a vulnerability”
+- 在仓库 **Security** 标签页使用 **“Report a vulnerability”**（本仓库已开启私有漏洞报告），内容只有维护者可见
+- 修复版本发布后，会通过 GitHub Security Advisory 公开详情与致谢
+
+> 一般性问题、使用疑问和功能建议不属于漏洞，请直接开 issue，不用走上面的流程。
 
 报告中请说明：
 

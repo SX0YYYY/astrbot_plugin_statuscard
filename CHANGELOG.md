@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-暂无。
+- SECURITY.md：移除并不存在的「GitHub 私信」渠道，漏洞报告统一走已开启的 GitHub 私有漏洞报告（Security 页 → Report a vulnerability）；明确「公开 issue / PR 不适合漏洞首发」与「一般问题请直接开 issue」的分工。
 
 ## v2.12.5 — 2026-10-24
 
