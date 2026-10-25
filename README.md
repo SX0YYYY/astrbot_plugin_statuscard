@@ -69,6 +69,12 @@
 
 示例图使用脱敏配置生成，主机名、进程名和 QQ 统计已隐藏；实际卡片会显示真实数据。
 
+## 看板预览
+
+![Web 看板概览](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/dashboard-overview.png)
+
+AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览、历史趋势、异常事件、日报摘要四个标签，历史趋势可一键导出 CSV；页面文案跟随 WebUI 语言，主题跟随明暗模式。
+
 ## 配置页预览
 
 ![状态卡显示](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-1.png)
@@ -77,7 +83,7 @@
 
 ![Webhook 与日报](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-3.png)
 
-截图中的推送目标和 Webhook Token 已替换为示例值；实际使用时填写自己的群号和 Token。
+截图中的推送目标已替换为示例值，Webhook Token 以掩码显示；实际使用时填写自己的群号和 Token。
 
 ## 平台支持
 
@@ -369,7 +375,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 - **发**：读取 AstrBot 数据库 `platform_stats` 的累计值。AstrBot 只在发送路径累加该表，因此是真实的“发”
 - **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON，只覆盖该插件跟踪的群，图上会标注口径
 - **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数
-- **月流量/网络折线**：插件每 60 秒采样 `psutil.net_io_counters`，从插件首次运行开始累计，状态保存在 `state.json`，重启不丢
+- **月流量/网络折线**：插件定期采样 `psutil.net_io_counters`，月流量**按自然月累计、每月 1 日重置**（不是从装机起累计），采样历史保存在 `state.json`，重启不丢
 - **网络折线**：图上绘制最近 60 个采样点（默认约 1 小时），采样历史最多保留 180 个点；纯 SVG 绘制，不依赖 JS
 - **网站延迟**：每 5 分钟探测一次“网站测试目标”，记录请求耗时和状态；可用率按“没有网络错误”统计，平均/峰值只统计成功请求
 - **Top 进程**：每 5 分钟记录 CPU 和内存各自的 Top 进程；日报按进程名聚合昨日采样峰值，同一程序的多进程会合并显示
@@ -448,7 +454,8 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
 | `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板。与 `display.redact` 完全独立，全部不勾即看板不脱敏 |
 | `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
-| `alerts.interval_seconds` | `60` | 告警采样间隔（秒） |
+| `display.sample_seconds` | `60` | 网络/磁盘 IO/月流量采样间隔（秒），决定状态卡折线时间粒度；告警采样在 `alerts.interval_seconds` 单独设置 |
+| `alerts.interval_seconds` | `60` | 资源告警采样间隔（秒）；不影响状态卡折线采样 |
 | `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警（资源告警）；服务监测的失败阈值在「服务可用性监测」分组 |
 | `alerts.cooldown_seconds` | `1800` | 同一规则告警冷却（秒） |
 | `monitors.interval_seconds` | `60` | 服务监测轮询间隔（秒） |
