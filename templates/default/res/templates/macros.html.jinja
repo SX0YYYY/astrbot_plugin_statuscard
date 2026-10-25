@@ -82,7 +82,7 @@
   </div>
   {% endfor %}
   <div class="disk-io-row">
-    <span class="disk-io-label">⚡ Disk IO</span>
+    <span class="disk-io-label">⚡ 磁盘 IO</span>
     <span class="io-up">R {{ v.disk_io.read }}</span>
     <span class="io-sep">·</span>
     <span class="io-down">W {{ v.disk_io.write }}</span>
@@ -152,7 +152,7 @@
     </div>
   </div>
   <div class="traffic-line">
-    <span class="traffic-label">Traffic</span>
+    <span class="traffic-label">本月流量</span>
     <span class="traffic-month">{{ v.network.month }}</span>
     <span class="traffic-up">↑ {{ v.network.month_up }}</span>
     <span class="traffic-down">↓ {{ v.network.month_down }}</span>
@@ -171,9 +171,16 @@
       {% for s in v.websites %}
       <tr>
         <td>{{ s.name }}</td>
-        <td class="align-right {{ 'ok' if s.ok else 'err' }}">{{ s.status }}</td>
-        <td class="align-right {{ 'ok' if s.ok else 'err' }}">{{ s.delay }}</td>
+        {% if s.ok %}
+        <td class="align-right ok">{{ s.status }}</td>
+        <td class="align-right ok">{{ s.delay }}</td>
+        {% else %}
+        <td class="align-right err" title="{{ s.error or s.status }}">{{ (s.error or s.status)[:24] }}</td>
+        <td class="align-right err">{{ s.delay }}</td>
+        {% endif %}
       </tr>
+      {% else %}
+      <tr><td colspan="3" class="align-right empty-cell">暂无网站测试数据</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -193,7 +200,7 @@
   </div>
   <table class="process-table">
     <thead>
-      <tr><th>Name</th><th>Pid</th><th class="align-right">CPU</th><th class="align-right">MEM</th></tr>
+      <tr><th>进程</th><th>PID</th><th class="align-right">CPU</th><th class="align-right">MEM</th></tr>
     </thead>
     <tbody>
       {% for p in v.process.top %}
@@ -203,6 +210,8 @@
         <td class="align-right">{{ p.cpu }}</td>
         <td class="align-right">{{ p.mem }}</td>
       </tr>
+      {% else %}
+      <tr><td colspan="4" class="empty-cell">暂无进程数据</td></tr>
       {% endfor %}
     </tbody>
   </table>

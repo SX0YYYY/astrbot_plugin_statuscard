@@ -310,24 +310,38 @@ class ReportStore:
             ),
         )
 
-    def resolve_event(self, ts: int, name: str, resolved_ts: int) -> bool:
+    def resolve_event(
+        self,
+        ts: int,
+        name: str,
+        resolved_ts: int,
+        kind: str | None = None,
+        target: str | None = None,
+    ) -> bool:
         """Mark the open alerts of ``name`` as resolved.
 
         The alert engine calls this when a condition clears, so the report
         can show how long the interruption lasted even after a restart.
+        ``kind``/``target`` narrow the match when two monitor items share a
+        name, so one item's recovery cannot close the other's open alert.
         """
 
-        return self._write(
-            """
+        sql = """
             UPDATE events
             SET resolved_ts = ?
             WHERE resolved_ts IS NULL
               AND status = 'alert'
               AND name = ?
               AND ts <= ?
-            """,
-            (int(resolved_ts), name, int(ts)),
-        )
+        """
+        params: list[Any] = [int(resolved_ts), name, int(ts)]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if target is not None:
+            sql += " AND target = ?"
+            params.append(target)
+        return self._write(sql, tuple(params))
 
     def add_website_samples(self, ts: int, samples: list[dict[str, Any]]) -> bool:
         rows = []
@@ -589,6 +603,38 @@ class ReportStore:
             """,
             (day, max(1, min(1000, limit))),
         )
+        keys = (
+            "id",
+            "ts",
+            "day",
+            "kind",
+            "name",
+            "target",
+            "detail",
+            "status",
+            "resolved_ts",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def list_events_range(
+        self, start_ts: int, end_ts: int, limit: int = 20000
+    ) -> list[dict[str, Any]]:
+        """Events between two Unix timestamps, oldest first.
+
+        One range query replaces the per-day loop the export used to run,
+        which opened a fresh SQLite connection (with its pragma + chmod
+        work) for every day of the window.
+        """
+
+        rows = self._query(
+            """
+            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT ?
+            """,
+            (int(start_ts), int(end_ts), max(1, min(200000, limit))),
+        )
+        if rows is None:
+            return []
         keys = (
             "id",
             "ts",

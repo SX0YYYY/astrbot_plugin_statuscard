@@ -78,8 +78,8 @@ class StateStore:
         The mapping is copied under the lock and the copy is serialised
         afterwards, so a worker thread that mutates the live mapping
         directly cannot make the serialisation fail. The temporary file name
-        carries the process id so two concurrent saves never fight over the
-        same file.
+        carries the process and thread id so two concurrent saves from the
+        same process never fight over the same file.
         """
 
         try:
@@ -88,7 +88,9 @@ class StateStore:
                 snapshot = copy.deepcopy(self.data)
             payload = json.dumps(snapshot, ensure_ascii=False, indent=1)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+            tmp = self.path.with_name(
+                f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
             tmp.write_text(payload, encoding="utf-8")
             os.replace(tmp, self.path)
             try:

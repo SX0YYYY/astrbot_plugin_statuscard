@@ -279,14 +279,26 @@ class DiskIO:
 
 
 _last_disk_io = (time.time(), psutil.disk_io_counters(perdisk=True))
+_disk_io_primed = False
 
 
 def disk_io() -> list[DiskIO]:
-    global _last_disk_io
+    """Per-disk read/write rates since the previous call.
+
+    The first call after import only refreshes the baseline: the module-level
+    baseline timestamp is import time, so using it would average the counters
+    over the whole process lifetime and show absurdly low rates.
+    """
+
+    global _last_disk_io, _disk_io_primed
     try:
         now = time.time()
         past_t, past = _last_disk_io
         now_c = psutil.disk_io_counters(perdisk=True) or {}
+        if not _disk_io_primed:
+            _disk_io_primed = True
+            _last_disk_io = (now, now_c)
+            return []
         dt = max(1e-6, now - past_t)
         ret: list[DiskIO] = []
         for name, now_one in now_c.items():
@@ -298,41 +310,6 @@ def disk_io() -> list[DiskIO]:
             ret.append(DiskIO(name=name, read=read, write=write))
         _last_disk_io = (now, now_c)
         ret.sort(key=lambda x: x.read + x.write, reverse=True)
-        return ret[:6]
-    except Exception:
-        return []
-
-
-@dataclass
-class NetIO:
-    name: str
-    sent: float
-    recv: float
-
-
-_last_net_io = (time.time(), psutil.net_io_counters(pernic=True))
-
-
-def network_io(ignore_names: list[str] | None = None) -> list[NetIO]:
-    global _last_net_io
-    ignore_names = ignore_names or ["lo", "Loopback*"]
-    try:
-        now = time.time()
-        past_t, past = _last_net_io
-        now_c = psutil.net_io_counters(pernic=True) or {}
-        dt = max(1e-6, now - past_t)
-        ret: list[NetIO] = []
-        for name, now_one in now_c.items():
-            if any(Path(name).match(pat) for pat in ignore_names):
-                continue
-            if name not in past:
-                continue
-            past_one = past[name]
-            sent = max(0.0, (now_one.bytes_sent - past_one.bytes_sent) / dt)
-            recv = max(0.0, (now_one.bytes_recv - past_one.bytes_recv) / dt)
-            ret.append(NetIO(name=name, sent=sent, recv=recv))
-        _last_net_io = (now, now_c)
-        ret.sort(key=lambda x: x.sent + x.recv, reverse=True)
         return ret[:6]
     except Exception:
         return []
@@ -1581,18 +1558,18 @@ async def collect_all(
     up_rate = float(net_state.get("up_rate") or 0.0)
     down_rate = float(net_state.get("down_rate") or 0.0)
     month_names = {
-        1: "Jan",
-        2: "Feb",
-        3: "Mar",
-        4: "Apr",
-        5: "May",
-        6: "Jun",
-        7: "Jul",
-        8: "Aug",
-        9: "Sep",
-        10: "Oct",
-        11: "Nov",
-        12: "Dec",
+        1: "1月",
+        2: "2月",
+        3: "3月",
+        4: "4月",
+        5: "5月",
+        6: "6月",
+        7: "7月",
+        8: "8月",
+        9: "9月",
+        10: "10月",
+        11: "11月",
+        12: "12月",
     }
     month = str(net_state.get("month") or now.strftime("%Y-%m"))
     try:

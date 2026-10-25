@@ -747,3 +747,63 @@ def test_report_text_contains_new_sections() -> None:
     text = build_report_text(view)
     assert "网站(昨日): Baidu 120 ms（可用率 100%）" in text
     assert "Top 进程(昨日): python CPU 50.0%" in text
+
+
+def test_hour_axis_ticks_land_on_nice_slots() -> None:
+    """A 24-point hour axis must label 00/06/12/18/23, not 17."""
+
+    from astrbot_plugin_statuscard.report_view import _line_chart
+
+    labels = [f"{hour:02d}" for hour in range(24)]
+    chart = _line_chart(labels, [{"name": "x", "values": list(range(24))}])
+    assert [item["text"] for item in chart["x_labels"]] == [
+        "00",
+        "06",
+        "12",
+        "18",
+        "23",
+    ]
+
+
+def test_token_section_notes_truncated_window(tmp_path: Path) -> None:
+    builder = _builder(tmp_path, ReportStore(tmp_path / "report.db"))
+    builder._provider_rows = lambda *_args, **_kwargs: (
+        [
+            (
+                datetime(2026, 10, 20, 1, 0, tzinfo=TZ).isoformat(),
+                "completed",
+                "m",
+                1,
+                0,
+                1,
+            )
+        ],
+        "2026-10-19T00:00:00",
+        True,
+        True,
+    )
+    section = builder._token_section(datetime(2026, 10, 20, tzinfo=TZ).date(), 7)
+    assert section["available"] is True
+    assert "2 万条" in section["note"]
+
+
+def test_qq_section_notes_skewed_snapshot_capture(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    day = datetime(2026, 10, 20, 0, 0, tzinfo=TZ)
+    prev = day - timedelta(days=1)
+    store.record_snapshot(
+        prev.date().isoformat(), 20, 5, 100, 1000, True, int(prev.timestamp())
+    )
+    # Second snapshot captured 30 hours later instead of ~24.
+    store.record_snapshot(
+        day.date().isoformat(),
+        21,
+        5,
+        101,
+        1500,
+        True,
+        int(day.timestamp()) + 6 * 3600,
+    )
+    builder = _builder(tmp_path, store)
+    section = builder._qq_section(day.date(), 7)
+    assert section["recv_note"] == "昨日快照的记录时刻有偏移，接收差值仅供参考。"

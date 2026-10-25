@@ -755,3 +755,26 @@ def test_direct_send_protocol_error_is_not_resent() -> None:
     # The message may already be in the chat, so it must not be sent again.
     assert harness.fallback_calls == 0
     assert receipts["default:GroupMessage:123456"].retcode == 100
+
+
+def test_format_komari_without_message_keeps_known_fields_only() -> None:
+    """An empty message must not dump the raw JSON payload into the group."""
+
+    text = AlertEngine._format_komari(
+        {"title": "alert", "node_name": "server-1", "ip": "10.0.0.8"}
+    )
+    assert "节点: server-1" in text
+    assert "10.0.0.8" not in text
+    assert "{" not in text
+
+
+def test_disk_io_first_call_only_primes_baseline(monkeypatch) -> None:
+    """The first disk_io() call must not average over the process lifetime."""
+
+    from astrbot_plugin_statuscard import collectors
+
+    monkeypatch.setattr(collectors, "_disk_io_primed", False)
+    monkeypatch.setattr(collectors, "_last_disk_io", (time.time() - 3600, {}))
+    assert collectors.disk_io() == []
+    # Second call has a real baseline and returns whatever psutil reports.
+    assert isinstance(collectors.disk_io(), list)

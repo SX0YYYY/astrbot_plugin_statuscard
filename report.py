@@ -673,16 +673,19 @@ class DailyReporter:
                     await self._send_weekly_scheduled()
                     await asyncio.sleep(60)
                     continue
+                time_text = self._weekly_time_text()
+                tz_name = str(
+                    cfg_get(self.config, "display.timezone", "Asia/Shanghai")
+                    or "Asia/Shanghai"
+                )
                 try:
-                    hour, minute = [
-                        int(part) for part in self._weekly_time_text().split(":", 1)
-                    ]
+                    hour, minute = [int(part) for part in time_text.split(":", 1)]
                     if not (0 <= hour <= 23 and 0 <= minute <= 59):
                         raise ValueError("out of range")
                 except Exception:
                     logger.warning(
                         "周报发送时间格式非法：%s（应为 HH:MM）",
-                        self._weekly_time_text(),
+                        time_text,
                     )
                     await asyncio.sleep(60)
                     continue
@@ -704,6 +707,17 @@ class DailyReporter:
                     await asyncio.sleep(60)
                     continue
                 await asyncio.sleep(wait)
+                # A change in the last minute must not fire at the old time;
+                # the daily loop rechecks the same way.
+                if (
+                    self._weekly_time_text() != time_text
+                    or str(
+                        cfg_get(self.config, "display.timezone", "Asia/Shanghai")
+                        or "Asia/Shanghai"
+                    )
+                    != tz_name
+                ):
+                    continue
                 await self._send_weekly_scheduled()
                 last_logged = None
             except asyncio.CancelledError:
@@ -735,7 +749,7 @@ class DailyReporter:
             logger.warning("周报内容为空（daily_report.sections=[]），跳过发送")
             return
         try:
-            view = self._build_view(span_days=7)
+            view = await asyncio.to_thread(self._build_view, span_days=7)
         except Exception:
             logger.exception("周报数据聚合失败")
             if not self._schedule_weekly_retry():
@@ -852,7 +866,7 @@ class DailyReporter:
             self._clear_retry()
             return
         try:
-            view = self._build_view()
+            view = await asyncio.to_thread(self._build_view)
         except Exception:
             logger.exception("日报数据聚合失败")
             self._record("", False, "build failed")
@@ -907,7 +921,7 @@ class DailyReporter:
         prefix = "report" if span == 1 else "weekly"
         source = "report_preview" if span == 1 else "weekly_preview"
         try:
-            view = self._build_view(span_days=span)
+            view = await asyncio.to_thread(self._build_view, span_days=span)
         except Exception:
             logger.exception("日报预览数据聚合失败")
             return False, tr(self.config, f"{prefix}_preview_failed")

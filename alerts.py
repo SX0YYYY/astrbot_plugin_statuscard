@@ -221,7 +221,7 @@ class AlertEngine:
                 # Close the open alert of the same rule so the report can
                 # show how long the interruption lasted, even across a
                 # plugin restart.
-                self.report_store.resolve_event(int(now), name, int(now))
+                self.report_store.resolve_event(int(now), name, int(now), kind=kind)
         except Exception:
             logger.exception("记录告警事件失败")
 
@@ -432,7 +432,12 @@ class AlertEngine:
                         )
 
     async def _check_offline(self) -> None:
-        client = _get_aiocqhttp_client(self.plugin.context, self.platform_id)
+        # Without a self_id filter a multi-bot instance could probe another
+        # bot's connection and report the wrong one as offline.
+        self_id = str(cfg_get(self.config, "alerts.self_id", "") or "").strip()
+        client = _get_aiocqhttp_client(
+            self.plugin.context, self.platform_id, self_id or None
+        )
         if client is None:
             return
 
@@ -852,7 +857,19 @@ class AlertEngine:
                 cleaned.append(text)
             lines.extend(cleaned or [message])
         else:
-            lines.append(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
+            # Dumping the whole payload would publish whatever Komari sends
+            # (node IPs, UUIDs) into the group chat; keep it to known fields.
+            known = [
+                f"{label}: {data[key]}"
+                for label, key in (
+                    ("事件", "event"),
+                    ("级别", "level"),
+                    ("节点", "node_name"),
+                    ("时间", "time"),
+                )
+                if data.get(key)
+            ]
+            lines.extend(known or ["（Komari 未附带可读内容，详情见 Komari 面板）"])
         return truncate_text("\n".join(lines), 2000)
 
     # ------------------------------------------------------------------

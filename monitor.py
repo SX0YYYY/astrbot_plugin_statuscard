@@ -186,8 +186,11 @@ class ServiceMonitor:
             if status == "recovery":
                 # Close the open alert of the same target so the report can
                 # show how long the interruption lasted, even across a
-                # plugin restart.
-                self.report_store.resolve_event(int(now), name, int(now))
+                # plugin restart. Matching on kind+target keeps two monitor
+                # items that share a name from closing each other's alerts.
+                self.report_store.resolve_event(
+                    int(now), name, int(now), kind="service", target=redact_url(target)
+                )
         except Exception:
             logger.exception("记录服务监测事件失败")
 

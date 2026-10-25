@@ -347,20 +347,18 @@ class PageApi:
                 if int(row.get("ts") or 0) <= end
             ]
         elif kind == "processes":
-            rows = store.list_process_samples(start, end + 60, "cpu")
-            rows += store.list_process_samples(start, end + 60, "mem")
+            # cpu and mem are two independent tables; truncating after the
+            # merge used to drop the whole mem half once cpu filled the cap.
+            half = limit // 2
+            rows = store.list_process_samples(start, end + 60, "cpu")[:half]
+            rows += store.list_process_samples(start, end + 60, "mem")[:half]
             if "process" in self._redact():
                 rows = [dict(row, name="已隐藏") for row in rows]
         elif kind == "websites":
             rows = store.list_website_samples(start, end + 60)
         elif kind == "events":
-            now = now_in_timezone(self.plugin.config)
-            days = int(seconds / 86400) + 2
-            rows = []
-            for offset in range(days):
-                day = (now - timedelta(days=offset)).date().isoformat()
-                rows += store.list_events(day, limit=5000)
-            rows = [row for row in rows if int(row.get("ts") or 0) >= start]
+            # One range query instead of one connection per day.
+            rows = store.list_events_range(start, end, limit=limit)
         else:
             return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
         return jsonify(
@@ -489,7 +487,8 @@ class PageApi:
                 plugin.report_store, plugin.config, redact=self._redactor().rules
             )
             sections = cfg_get(plugin.config, "daily_report.sections", None)
-            view = builder.build(
+            view = await asyncio.to_thread(
+                builder.build,
                 day=None,
                 history_days=7,
                 sections=sections,

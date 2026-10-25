@@ -199,7 +199,9 @@ def _line_chart(
         y = top + plot_h * (1 - i / 4)
         y_labels.append({"y": round(y, 1), "text": y_formatter(value)})
 
-    indices = sorted({round((n - 1) * i / 4) for i in range(5)}) if n else []
+    # Ceiling keeps tick marks on the "nice" slots: for a 24-point hour axis
+    # this yields 0/6/12/18/23 instead of 0/6/12/17/23.
+    indices = sorted({math.ceil((n - 1) * i / 4) for i in range(5)}) if n else []
     x_labels = []
     for index in indices:
         x = left + plot_w * (index / denom)
@@ -756,6 +758,18 @@ class DailyReportBuilder:
         yesterday_sent = sent_values[-1] if sent_values else None
         previous_sent = sent_values[-2] if len(sent_values) >= 2 else None
 
+        # The recv delta assumes both snapshots were captured around 00:05.
+        # If OneBot was down at capture time the day's snapshot can be hours
+        # late, in which case the delta silently covers extra hours.
+        recv_skewed = False
+        try:
+            cur_ts = float(yesterday.get("captured_at") or 0)
+            prev_ts = float(previous.get("captured_at") or 0)
+            gap_hours = abs(cur_ts - prev_ts) / 3600.0 if cur_ts and prev_ts else 24.0
+            recv_skewed = not (23.0 <= gap_hours <= 25.0)
+        except (TypeError, ValueError):
+            recv_skewed = False
+
         available = any(
             value is not None
             for value in friends + groups + members + recv_values + sent_values
@@ -826,7 +840,11 @@ class DailyReportBuilder:
             "recv_note": (
                 "接收趋势需要至少两份每日快照，当前仍在积累。"
                 if yesterday_recv is None
-                else None
+                else (
+                    "昨日快照的记录时刻有偏移，接收差值仅供参考。"
+                    if recv_skewed
+                    else None
+                )
             ),
             "charts": {
                 "friends_groups": friends_groups,
@@ -1094,7 +1112,7 @@ class DailyReportBuilder:
         window_days = [day - timedelta(days=i) for i in range(span - 1, -1, -1)]
         window_set = {item.isoformat() for item in window_days}
         labels = [item.strftime("%m-%d") for item in chart_days]
-        rows, min_created, available = self._provider_rows(
+        rows, min_created, available, truncated = self._provider_rows(
             chart_days[0], chart_days[-1]
         )
         if not available or not rows:
@@ -1191,15 +1209,28 @@ class DailyReportBuilder:
             ),
             "top_models": top_models,
             "trend": trend,
-            "note": "Token 口径：token_input_other + token_input_cached + token_output；按 AstrBot provider_stats 记录统计。",
+            "note": (
+                "Token 口径：token_input_other + token_input_cached + token_output；按 AstrBot provider_stats 记录统计。"
+                + (
+                    "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+                    if truncated
+                    else ""
+                )
+            ),
         }
 
     def _provider_rows(
         self, start_day: date, end_day: date
-    ) -> tuple[list[tuple[Any, ...]], str | None, bool]:
+    ) -> tuple[list[tuple[Any, ...]], str | None, bool, bool]:
+        """Provider rows in [start_day, end_day], oldest-first capped by the SQL.
+
+        The fourth value flags that the 20000-row cap was hit, in which case
+        the oldest part of the window is missing from every aggregate.
+        """
+
         connection = self._readonly_db()
         if connection is None:
-            return [], None, False
+            return [], None, False, False
         try:
             rows = connection.execute(
                 """
@@ -1219,11 +1250,12 @@ class DailyReportBuilder:
                 "SELECT MIN(created_at) FROM provider_stats"
             ).fetchone()
         except Exception:
-            return [], None, False
+            return [], None, False, False
         finally:
             connection.close()
         min_created = str(min_row[0]) if min_row and min_row[0] else None
-        return rows, min_created, True
+        truncated = len(rows) >= 20000
+        return rows, min_created, True, truncated
 
 
 def build_report_text(view: dict[str, Any]) -> str:

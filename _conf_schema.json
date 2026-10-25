@@ -114,7 +114,12 @@
                 "description": "超时（秒）",
                 "type": "int",
                 "default": 3,
-                "invisible": true
+                "slider": {
+                  "min": 1,
+                  "max": 15,
+                  "step": 1
+                },
+                "hint": "默认 3 秒；访问慢的站点可以调大，避免总是超时。"
               }
             }
           }
@@ -426,6 +431,15 @@
           "show_advanced": true
         },
         "hint": "通常保持 default；只有多机器人需要指定时再改。"
+      },
+      "self_id": {
+        "description": "掉线检测的机器人 QQ 号",
+        "type": "string",
+        "default": "",
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "留空检测该平台实例下任意一个连接；同一实例跑多个机器人时填指定 QQ 号，避免探测到另一个号。"
       },
       "komari_webhook": {
         "description": "Komari Webhook",

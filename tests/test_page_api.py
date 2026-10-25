@@ -189,3 +189,21 @@ def test_reports_passes_rules_not_redactor(monkeypatch) -> None:
     api = PageApi(plugin)
     asyncio.run(api.reports())
     assert captured["redact"] == {"hostname", "process"}
+
+
+def test_website_timeout_is_configurable() -> None:
+    """The per-site timeout used to be invisible and fixed at 3 seconds."""
+
+    import json
+    from pathlib import Path
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(
+            encoding="utf-8-sig"
+        )
+    )
+    item = schema["display"]["items"]["website_targets"]["templates"]["site"]["items"][
+        "timeout_seconds"
+    ]
+    assert item.get("invisible") is not True
+    assert item["slider"] == {"min": 1, "max": 15, "step": 1}

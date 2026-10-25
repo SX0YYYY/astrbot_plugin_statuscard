@@ -467,3 +467,45 @@ body {
 }
 
 
+
+/* Dark theme surfaces: the light theme paints these blocks white/slate-100;
+   without these overrides a dark report shows bright cards on a navy page. */
+[data-theme="dark"] .summary-item {
+  background: #0f172a;
+  box-shadow: none;
+  border: 1px solid #1e293b;
+}
+
+[data-theme="dark"] .summary-item strong,
+[data-theme="dark"] .stat-value,
+[data-theme="dark"] .event-main strong {
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .stat,
+[data-theme="dark"] .chart-block,
+[data-theme="dark"] .event-row,
+[data-theme="dark"] .empty {
+  background: #0f172a;
+  border-color: #1e293b;
+}
+
+[data-theme="dark"] .empty {
+  color: #94a3b8;
+  border-style: dashed;
+}
+
+[data-theme="dark"] .badge.alert {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .badge.recovery {
+  background: #052e16;
+  color: #86efac;
+}
+
+[data-theme="dark"] .badge.failed {
+  background: #451a03;
+  color: #fcd34d;
+}

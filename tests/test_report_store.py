@@ -152,3 +152,31 @@ def test_report_store_prunes_extended_tables(tmp_path: Path) -> None:
 
     assert store.list_website_samples(0, now + 1) == []
     assert store.list_process_samples(0, now + 1, "cpu") == []
+
+
+def test_list_events_range_returns_sorted_window(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    store.add_event(1_700_000_000, "2026-10-19", "service", "A", "d", "alert")
+    store.add_event(1_700_100_000, "2026-10-20", "service", "B", "d", "recovery")
+    store.add_event(1_700_200_000, "2026-10-21", "service", "C", "d", "alert")
+
+    rows = store.list_events_range(1_700_050_000, 1_700_150_000, limit=100)
+    assert [row["name"] for row in rows] == ["B"]
+
+
+def test_resolve_event_matches_kind_and_target(tmp_path: Path) -> None:
+    """Two monitor items sharing a name must not close each other's alert."""
+
+    store = ReportStore(tmp_path / "report.db")
+    store.add_event(1000, "2026-10-19", "service", "同名", "a", "alert", "t1")
+    store.add_event(2000, "2026-10-19", "service", "同名", "b", "alert", "t2")
+
+    assert store.resolve_event(3000, "同名", 3000, kind="service", target="t1")
+    rows = store.list_events("2026-10-19", limit=10)
+    resolved = {row["target"]: row["resolved_ts"] for row in rows}
+    assert resolved["t1"] == 3000
+    assert resolved["t2"] is None
+
+    assert store.resolve_event(4000, "同名", 4000, kind="service", target="t2")
+    rows = store.list_events("2026-10-19", limit=10)
+    assert {row["target"]: row["resolved_ts"] for row in rows}["t2"] == 4000

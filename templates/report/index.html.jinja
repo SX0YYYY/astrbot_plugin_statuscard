@@ -124,12 +124,12 @@
         {% endfor %}
       </div>
       {% if d.anomalies.total > d.anomalies["items"]|length %}
-      <p class="note">另有 {{ d.anomalies.total - d.anomalies["items"]|length }} 条事件，详见后台日志。</p>
+      <p class="note">另有 {{ d.anomalies.total - d.anomalies["items"]|length }} 条事件未列出。</p>
       {% endif %}
       {% else %}
       <div class="empty">{{ d.anomalies.empty_reason }}</div>
       {% endif %}
-      <p class="note">服务监测 {{ d.anomalies.normal.monitors }} 项；资源规则 {{ d.anomalies.normal.resource_rules }} 条。正常项只给数量，不逐条列出。</p>
+      <p class="note">服务监测 {{ d.anomalies.normal.monitors }} 项正常；资源规则 {{ d.anomalies.normal.resource_rules }} 条。</p>
     </section>
     {% endif %}
 
@@ -315,7 +315,7 @@
 
     <footer class="footer">
       {{ d.footer_note }}<br />
-      {{ d.title }} · {{ d.day }} · 生成于 {{ d.generated_at }}
+      {{ d.title }} · {{ d.day }}
     </footer>
   </div>
 </body>
