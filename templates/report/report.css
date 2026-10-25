@@ -250,6 +250,12 @@ body {
   border: 1px solid #eef2f7;
 }
 
+/* Weekly reports timestamp events with "MM-DD HH:MM", which needs a wider
+   first column than the daily "HH:MM". */
+.event-row-wide {
+  grid-template-columns: 92px 1fr 56px;
+}
+
 .event-time {
   color: #64748b;
   font-size: 11px;

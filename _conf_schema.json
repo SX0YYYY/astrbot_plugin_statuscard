@@ -19,6 +19,8 @@
         "description": "命令提示语言",
         "type": "string",
         "default": "zh-CN",
+        "options": ["zh-CN", "en-US"],
+        "labels": ["中文", "English"],
         "hint": "只影响 QQ 命令提示；页面跟随 AstrBot WebUI 语言。"
       },
       "process_top_n": {
@@ -37,6 +39,20 @@
         "type": "bool",
         "default": false,
         "hint": "手机上看图更方便：隐藏系统信息表、进程最多 5 行、放大资源百分比。"
+      },
+      "sample_seconds": {
+        "description": "采样间隔（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {
+          "min": 15,
+          "max": 600,
+          "step": 5
+        },
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "网络速率/月流量/磁盘 IO 的采样间隔，同时决定状态卡折线图的时间粒度；资源告警的采样间隔在「告警与每日定时状态图」分组单独设置。"
       },
       "progress_notice": {
         "description": "出图前发送“生成中”提示",
@@ -342,7 +358,7 @@
         "hint": "例如 2.0 表示每个 CPU 核心平均负载超过 2.0 时告警。"
       },
       "interval_seconds": {
-        "description": "采样间隔（秒）",
+        "description": "告警采样间隔（秒）",
         "type": "int",
         "default": 60,
         "slider": {
@@ -352,7 +368,8 @@
         },
         "condition": {
           "show_advanced": true
-        }
+        },
+        "hint": "只影响资源告警的采样节奏；状态卡网络折线/月流量的采样间隔在「状态卡显示 → 高级」的“采样间隔（秒）”单独设置。"
       },
       "sustain_samples": {
         "description": "连续超过阈值几次才告警（资源告警）",
@@ -387,6 +404,7 @@
         "type": "bool",
         "default": true,
         "condition": {
+          "enabled": true,
           "show_advanced": true
         }
       },
@@ -395,6 +413,7 @@
         "type": "bool",
         "default": true,
         "condition": {
+          "enabled": true,
           "show_advanced": true
         },
         "hint": "依赖 OneBot 通道；整体断线时会排队，恢复后补发。"
@@ -558,6 +577,8 @@
         "description": "日报主题",
         "type": "string",
         "default": "light",
+        "options": ["light", "dark"],
+        "labels": ["浅色", "深色"],
         "hint": "只影响日报/周报图片，不影响状态卡。"
       },
       "history_days": {

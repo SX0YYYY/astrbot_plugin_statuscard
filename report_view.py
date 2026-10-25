@@ -244,7 +244,12 @@ class DailyReportBuilder:
             cfg_get(config, "display.timezone", "Asia/Shanghai") or "Asia/Shanghai"
         )
         # The Web dashboard passes its own rules so that the dashboard can be
-        # more or less strict than the QQ status card.
+        # more or less strict than the QQ status card. Accept a Redactor
+        # instance defensively: wrapping it into a second Redactor would
+        # normalize its rules down to an empty set and silently disable
+        # redaction for this surface.
+        if isinstance(redact, Redactor):
+            redact = redact.rules
         if redact is not None:
             self.redactor = Redactor(redact)
         else:
@@ -283,11 +288,13 @@ class DailyReportBuilder:
             title = "系统日报"
             window = f"{target.isoformat()} 00:00–24:00"
             day_label = "昨日"
+            window_label = "昨日"
             token_label = f"昨日 · 趋势最近 {history_days} 天"
         else:
             title = "系统周报"
             window = f"{start_day.isoformat()} 00:00 – {target.isoformat()} 24:00"
             day_label = "最后一天"
+            window_label = f"近 {span} 天"
             token_label = f"近 {span} 天合计 · 趋势最近 {history_days} 天"
 
         view: dict[str, Any] = {
@@ -296,6 +303,7 @@ class DailyReportBuilder:
             "start_day": start_day.isoformat(),
             "span_days": span,
             "day_label": day_label,
+            "window_label": window_label,
             "token_label": token_label,
             "previous_day": previous.isoformat(),
             "window": window,
@@ -343,15 +351,26 @@ class DailyReportBuilder:
         return date.fromisoformat(str(value))
 
     def _summary(self, view: dict[str, Any]) -> dict[str, Any]:
-        anomalies = view.get("anomalies", {})
-        token = view.get("token", {})
-        qq = view.get("qq", {})
-        yesterday = qq.get("yesterday", {})
+        sections = view.get("sections") or []
+        anomalies = view.get("anomalies") or {}
+        token = view.get("token") or {}
+        qq = view.get("qq") or {}
+        yesterday = qq.get("yesterday") or {}
+        # A figure for a section the operator did not select would read as a
+        # real "0" or "no data"; label it as not enabled instead.
         return {
-            "anomaly_count": anomalies.get("count", 0),
-            "token_total_text": token.get("total_text", "暂无数据"),
-            "sent_text": yesterday.get("sent_text", "--"),
-            "recv_text": yesterday.get("recv_text", "--"),
+            "anomaly_count": (
+                anomalies.get("count", 0) if "anomaly" in sections else "未开启"
+            ),
+            "token_total_text": (
+                token.get("total_text", "暂无数据") if "token" in sections else "未开启"
+            ),
+            "sent_text": (
+                yesterday.get("sent_text", "--") if "qq" in sections else "未开启"
+            ),
+            "recv_text": (
+                yesterday.get("recv_text", "--") if "qq" in sections else "未开启"
+            ),
         }
 
     def _astrbot_db_path(self) -> Path | None:
@@ -598,11 +617,14 @@ class DailyReportBuilder:
                     duration_text = "进行中"
             if status in {"alert", "failed"}:
                 count += 1
+            # A weekly window spans several days, so a bare "HH:MM" cannot
+            # locate the event inside it.
+            time_format = "%H:%M" if span == 1 else "%m-%d %H:%M"
             items.append(
                 {
                     "time": datetime.fromtimestamp(
                         int(event.get("ts") or 0), self.tz
-                    ).strftime("%H:%M"),
+                    ).strftime(time_format),
                     "kind": self._kind_text(str(event.get("kind") or "")),
                     "name": name or "--",
                     "status": self._status_text(status),
@@ -613,7 +635,11 @@ class DailyReportBuilder:
             )
         return {
             "available": bool(items),
-            "empty_reason": "昨日无异常事件" if not items else None,
+            "empty_reason": (
+                "昨日无异常事件" if span == 1 else f"近 {span} 天无异常事件"
+            )
+            if not items
+            else None,
             "count": count,
             "total": len(items),
             "items": items[:20],
@@ -1042,6 +1068,11 @@ class DailyReportBuilder:
             )
         else:
             empty_reason = "暂无进程采样数据"
+        note = (
+            "按进程名聚合昨日采样峰值；同一程序的多进程会合并显示。"
+            if span == 1
+            else f"按进程名聚合近 {span} 天采样峰值；同一程序的多进程会合并显示。"
+        )
         return {
             "available": available,
             "empty_reason": empty_reason,
@@ -1049,7 +1080,7 @@ class DailyReportBuilder:
             "top_n": top_n,
             "cpu": cpu_top,
             "mem": mem_top,
-            "note": "按进程名聚合昨日采样峰值；同一程序的多进程会合并显示。",
+            "note": note,
         }
 
     # ------------------------------------------------------------------
@@ -1205,12 +1236,18 @@ def build_report_text(view: dict[str, Any]) -> str:
     ]
     if not sections:
         lines.append("未选择日报内容（daily_report.sections 为空）。")
+    # Weekly reports mix single-day figures (resource/QQ snapshot) with
+    # window aggregates (Token/website/process), so each line carries the
+    # scope it is actually computed over.
+    day_label = str(view.get("day_label") or "昨日")
+    window_label = str(view.get("window_label") or day_label)
     resources = view.get("resources") or {}
     if "resource" in sections:
         if resources.get("available") and resources.get("yesterday"):
             yesterday = resources["yesterday"]
             lines.append(
-                "资源: CPU {} / 峰值 {}；RAM {} / 峰值 {}".format(
+                "资源({}): CPU {} / 峰值 {}；RAM {} / 峰值 {}".format(
+                    day_label,
                     yesterday["cpu"]["avg_text"],
                     yesterday["cpu"]["peak_text"],
                     yesterday["ram"]["avg_text"],
@@ -1232,7 +1269,8 @@ def build_report_text(view: dict[str, Any]) -> str:
             if recv_text == "--":
                 recv_text = "数据积累中"
             lines.append(
-                "QQ: 好友 {} / 群 {} / 群员 {}；发送 {} / 接收 {}".format(
+                "QQ({}): 好友 {} / 群 {} / 群员 {}；发送 {} / 接收 {}".format(
+                    day_label,
                     yesterday.get("friends_text", "--"),
                     yesterday.get("groups_text", "--"),
                     yesterday.get("members_text", "--"),
@@ -1244,7 +1282,8 @@ def build_report_text(view: dict[str, Any]) -> str:
     if "token" in sections:
         if token.get("available"):
             lines.append(
-                "Token: {}（{} 次，成功率 {}）".format(
+                "Token({}): {}（{} 次，成功率 {}）".format(
+                    window_label,
                     token.get("total_text", "--"),
                     token.get("calls_text", "--"),
                     token.get("success_text", "--"),
@@ -1263,7 +1302,7 @@ def build_report_text(view: dict[str, Any]) -> str:
                 )
                 for item in website.get("targets", [])[:3]
             ]
-            lines.append("网站: " + "；".join(parts))
+            lines.append(f"网站({window_label}): " + "；".join(parts))
         else:
             lines.append(f"网站: {website.get('empty_reason') or '暂无数据'}")
     process = view.get("process") or {}
@@ -1271,7 +1310,9 @@ def build_report_text(view: dict[str, Any]) -> str:
         if process.get("available") and process.get("cpu"):
             top = process["cpu"][0]
             lines.append(
-                "Top 进程: {} CPU {}".format(top.get("name"), top.get("cpu_text"))
+                "Top 进程({}): {} CPU {}".format(
+                    window_label, top.get("name"), top.get("cpu_text")
+                )
             )
         else:
             lines.append(f"进程: {process.get('empty_reason') or '暂无数据'}")

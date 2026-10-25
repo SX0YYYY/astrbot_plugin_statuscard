@@ -13,6 +13,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .alerts import AlertEngine
+from .audit import AuditIssue, run_audit
 from .bg_provider import MAX_IMAGE_BYTES, resolve_background
 from .collectors import (
     _call_action,
@@ -28,6 +29,7 @@ from .collectors import (
 )
 from .delivery import Delivery, DeliveryService
 from .i18n import tr
+from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
 from .page_api import PageApi
 from .report import DailyReporter, ReportCollector
@@ -57,7 +59,7 @@ class StatusCardPlugin(Star):
         self._migrate_media_sources()
         self._migrate_report_sections()
         self.report_store = ReportStore(self.data_dir / "report.db")
-        interval = cfg_int(self.config, "alerts.interval_seconds", 60)
+        interval = cfg_int(self.config, "display.sample_seconds", 60)
         self.sampler = Sampler(
             self.state, interval_seconds=interval, config=self.config
         )
@@ -82,7 +84,15 @@ class StatusCardPlugin(Star):
         self._diag: dict[str, Any] = self._load_diag()
         self.page_api = PageApi(self)
         self.page_api.register()
+        self._audit_issues: list[AuditIssue] = run_audit(
+            self.config, monitor=self.monitor
+        )
         self._check_config_permissions()
+
+    def audit_issues(self) -> list[AuditIssue]:
+        """Configuration findings collected once at plugin start-up."""
+
+        return list(self._audit_issues)
 
     def _load_diag(self) -> dict[str, Any]:
         """Restore the diagnostics snapshot kept in ``state.json``.
@@ -208,6 +218,12 @@ class StatusCardPlugin(Star):
         self.daily_report.start()
         self.alerts.start()
         self.monitor.start()
+        if self._audit_issues:
+            for issue in self._audit_issues:
+                log = logger.error if issue.level == "error" else logger.warning
+                log("配置体检[%s] %s", issue.level, issue.message)
+        else:
+            logger.info("配置体检：未发现问题")
         logger.info(
             "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, "
             "monitors_enabled=%s, daily_report_enabled=%s)",
@@ -304,6 +320,23 @@ class StatusCardPlugin(Star):
             )
             self._save_diag()
             logger.exception("生成系统状态图片失败")
+            # Prefer the local Pillow card over a plain text summary: the
+            # T2I outage should degrade to a plain-looking image, not to no
+            # image at all.
+            try:
+                collected = await collect_all(
+                    context=self.context,
+                    event=event,
+                    state=self.state,
+                    config=self.config,
+                )
+                png = await asyncio.to_thread(render_fallback_card, collected["view"])
+                path = self.data_dir / "statuscard_fallback.png"
+                await asyncio.to_thread(path.write_bytes, png)
+                yield event.image_result(str(path))
+                return
+            except Exception:
+                logger.exception("本地简化卡渲染失败，回退文字摘要")
             try:
                 summary = await self.build_summary_text(event=event)
             except Exception:
@@ -395,7 +428,29 @@ class StatusCardPlugin(Star):
 
     async def build_status_image(self) -> str | None:
         """Render a status image without an incoming event (scheduled daily status image)."""
-        return await self._render_status_image(event=None)
+        try:
+            return await self._render_status_image(event=None)
+        except Exception:
+            logger.exception("状态卡 T2I 渲染失败，改用本地简化卡")
+            return await self._render_local_card_file()
+
+    async def _render_local_card_file(self) -> str | None:
+        """Draw the local Pillow fallback card and return its file path."""
+
+        try:
+            collected = await collect_all(
+                context=self.context,
+                event=None,
+                state=self.state,
+                config=self.config,
+            )
+            png = await asyncio.to_thread(render_fallback_card, collected["view"])
+            path = self.data_dir / "statuscard_fallback.png"
+            await asyncio.to_thread(path.write_bytes, png)
+            return str(path)
+        except Exception:
+            logger.exception("本地简化卡渲染失败")
+            return None
 
     async def render_report_image(self, view: dict) -> str:
         """Render a daily-report view through the same T2I options as the card."""
@@ -404,11 +459,16 @@ class StatusCardPlugin(Star):
             1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
         )
         logical_width = max(650, min(1600, round(render_width / 1.8)))
-        theme = (
-            str(cfg_get(self.config, "daily_report.theme", "light") or "light")
-            .strip()
-            .lower()
-        )
+        theme_raw = str(
+            cfg_get(self.config, "daily_report.theme", "light") or "light"
+        ).strip()
+        theme = theme_raw.lower()
+        if theme not in ("light", "dark"):
+            if theme_raw:
+                logger.warning(
+                    "daily_report.theme 值 %r 不是 light/dark，已回退 light", theme_raw
+                )
+            theme = "light"
         html = build_report_html(view, render_width=logical_width, theme=theme)
         timeout = max(
             30,
@@ -517,7 +577,13 @@ class StatusCardPlugin(Star):
 
         image = payload.get("image")
         if image:
-            return MessageChain([Comp.Image.fromURL(str(image))])
+            url = str(image)
+            # Local fallback-card paths ride the same payload field as T2I
+            # URLs; http(s) goes through the URL component, the rest is a
+            # file on disk.
+            if url.startswith(("http://", "https://")):
+                return MessageChain([Comp.Image.fromURL(url)])
+            return MessageChain([Comp.Image.fromFileSystem(url)])
         return MessageChain([Comp.Plain(str(payload.get("text") or ""))])
 
     async def send_text(
@@ -582,27 +648,28 @@ class StatusCardPlugin(Star):
         network = view["network"]
         process = view["process"]["counts"]
         lines = [
-            f"主机: {view['overview'][1]['value']}",
+            f"{tr(self.config, 'summary_host')}: {view['overview'][1]['value']}",
             f"{cpu['title']}: {cpu['percent']:.1f}%",
             f"RAM: {ram['percent']:.1f}% ({ram['desc'].splitlines()[0]})",
             f"SWAP: {swap['percent']:.1f}%",
         ]
         if disk:
             lines.append(
-                f"磁盘 {disk['path']}: {disk['percent_text']} ({disk['used']} / {disk['total']})"
+                f"{tr(self.config, 'summary_disk')} {disk['path']}: "
+                f"{disk['percent_text']} ({disk['used']} / {disk['total']})"
             )
         lines.extend(
             [
-                f"网络: ↑ {network['up']} ↓ {network['down']}",
-                f"本月流量: ↑ {network['month_up']} ↓ {network['month_down']}",
-                f"进程: 全部 {process['all']} / 运行 {process['running']} / 休眠 {process['sleeping']}",
+                f"{tr(self.config, 'summary_network')}: ↑ {network['up']} ↓ {network['down']}",
+                f"{tr(self.config, 'summary_month')}: ↑ {network['month_up']} ↓ {network['month_down']}",
+                f"{tr(self.config, 'summary_process')}: 全部 {process['all']} / 运行 {process['running']} / 休眠 {process['sleeping']}",
                 (
-                    f"好友: {bot.get('friends') if bot.get('friends') is not None else '--'}"
-                    f" / 群聊: {bot.get('groups') if bot.get('groups') is not None else '--'}"
-                    f" / 群员: {bot.get('members') if bot.get('members') is not None else '--'}"
+                    f"{tr(self.config, 'summary_friends')}: {bot.get('friends') if bot.get('friends') is not None else '--'}"
+                    f" / {tr(self.config, 'summary_groups')}: {bot.get('groups') if bot.get('groups') is not None else '--'}"
+                    f" / {tr(self.config, 'summary_members')}: {bot.get('members') if bot.get('members') is not None else '--'}"
                 ),
                 (
-                    f"收发: {bot.get('recv') if bot.get('recv') is not None else '--'}"
+                    f"{tr(self.config, 'summary_recv')}: {bot.get('recv') if bot.get('recv') is not None else '--'}"
                     f" ({bot.get('recv_scope')})"
                     f" / {bot.get('sent') if bot.get('sent') is not None else '--'}"
                     f" ({bot.get('sent_scope')})"
@@ -722,6 +789,15 @@ class StatusCardPlugin(Star):
         )
         if monitor_status.get("silenced"):
             lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
+
+        audit = self.audit_issues()
+        if audit:
+            lines.append(f"配置体检: {len(audit)} 项待处理")
+            for issue in audit[:4]:
+                tag = "错误" if issue.level == "error" else "提醒"
+                lines.append(f"  [{tag}] {issue.message}")
+        else:
+            lines.append("配置体检: 未发现问题")
 
         if self._diag.get("last_render_at"):
             age = max(0, int(time.time() - float(self._diag["last_render_at"])))
@@ -848,6 +924,8 @@ class StatusCardPlugin(Star):
     async def cmd_preview_report(self, event: AstrMessageEvent):
         """Build and send yesterday's daily report to the current chat."""
         event.should_call_llm(False)
+        # Rendering takes seconds; acknowledge immediately like 查看状态 does.
+        yield event.plain_result(tr(self.config, "report_generating"))
         _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None)
         )
@@ -859,6 +937,7 @@ class StatusCardPlugin(Star):
     async def cmd_preview_weekly(self, event: AstrMessageEvent):
         """Build and send the last-7-days weekly report to the current chat."""
         event.should_call_llm(False)
+        yield event.plain_result(tr(self.config, "weekly_generating"))
         _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None), span_days=7
         )

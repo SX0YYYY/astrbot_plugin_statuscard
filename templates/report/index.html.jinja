@@ -45,7 +45,7 @@
   <div class="report-shell">
     <header class="hero">
       <div>
-        <div class="kicker">DAILY REPORT</div>
+        <div class="kicker">{% if d.span_days > 1 %}WEEKLY REPORT{% else %}DAILY REPORT{% endif %}</div>
         <h1>{{ d.title }}</h1>
         <div class="hero-meta">{{ d.day }} · {{ d.window }} · {{ d.timezone }}</div>
       </div>
@@ -111,7 +111,7 @@
       {% if d.anomalies["items"] %}
       <div class="event-list">
         {% for item in d.anomalies["items"] %}
-        <div class="event-row">
+        <div class="event-row{% if d.span_days > 1 %} event-row-wide{% endif %}">
           <div class="event-time">{{ item.time }}</div>
           <div class="event-main">
             <span class="badge {{ item.status_key }}">{{ item.status }}</span>
@@ -137,7 +137,7 @@
     <section class="section">
       <div class="section-head">
         <h2>QQ 趋势</h2>
-        <span>最近 {{ d.history_days }} 天</span>
+        <span>{{ d.window_label }} · 最近 {{ d.history_days }} 天</span>
       </div>
       {% if not d.qq.available %}
       <div class="empty">{{ d.qq.empty_reason }}</div>
@@ -246,13 +246,13 @@
     <section class="section">
       <div class="section-head">
         <h2>网站延迟</h2>
-        <span>{{ d.day_label }} · 最近 {{ d.history_days }} 天</span>
+        <span>{{ d.window_label }} · 最近 {{ d.history_days }} 天</span>
       </div>
       {% if not d.website.available %}
       <div class="empty">{{ d.website.empty_reason }}</div>
       {% else %}
       <table class="model-table">
-        <thead><tr><th>目标</th><th>{{ d.day_label }}平均</th><th>峰值</th><th>可用率</th></tr></thead>
+        <thead><tr><th>目标</th><th>{{ d.window_label }}平均</th><th>峰值</th><th>可用率</th></tr></thead>
         <tbody>
           {% for item in d.website.targets %}
           <tr>
@@ -279,7 +279,7 @@
     <section class="section">
       <div class="section-head">
         <h2>Top 异常进程</h2>
-        <span>{{ d.day_label }}采样峰值（占整机 %）</span>
+        <span>{{ d.window_label }}采样峰值（占整机 %）</span>
       </div>
       {% if not d.process.available %}
       <div class="empty">{{ d.process.empty_reason }}</div>

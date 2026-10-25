@@ -734,3 +734,42 @@ main.is-refreshing::after {
     scroll-behavior: auto !important;
   }
 }
+
+/* Configuration audit banner (overview) */
+.audit-banner {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.audit-item {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.audit-item strong {
+  flex: none;
+}
+
+.audit-item.error {
+  background: var(--bad-soft);
+  border: 1px solid var(--bad);
+}
+
+.audit-item.warning {
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+}
+
+.dot.config_error {
+  background: var(--warn);
+}
+
+.card-note {
+  color: var(--muted);
+  font-size: 12px;
+}

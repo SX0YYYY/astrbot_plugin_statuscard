@@ -27,8 +27,9 @@ from .collectors import (
     now_in_timezone,
     swap_stat,
 )
+from .redactor import HIDDEN, read_rules
 from .state import StateStore
-from .utils import retry_delay, truncate_text
+from .utils import normalize_targets, retry_delay, truncate_text
 
 
 def _now_text(config: Any = None) -> str:
@@ -85,7 +86,7 @@ class AlertEngine:
         self.platform_id = str(
             cfg_get(config, "alerts.platform_id", "default") or "default"
         )
-        self.targets = self._normalize_targets(
+        self.targets = normalize_targets(
             cfg_get(config, "alerts.targets", []), self.platform_id
         )
         self._monitor_task: asyncio.Task | None = None
@@ -190,27 +191,6 @@ class AlertEngine:
     # ------------------------------------------------------------------
     # targets / sending
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _normalize_targets(raw: Any, platform_id: str) -> list[str]:
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list):
-            return []
-        out: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                continue
-            value = item.strip()
-            if not value:
-                continue
-            if ":" in value:
-                target = value
-            else:
-                target = f"{platform_id}:GroupMessage:{value}"
-            if target not in out:
-                out.append(target)
-        return out
 
     async def _send(self, text: str, source: str = "alert") -> bool:
         if not self.targets:
@@ -581,8 +561,14 @@ class AlertEngine:
                     "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
 
-    @staticmethod
-    def _hostname() -> str:
+    def _hostname(self) -> str:
+        # The push text must obey the same hostname rule as the card, the
+        # report and the dashboard; all four read the same rule definition.
+        try:
+            if "hostname" in read_rules(self.config, "display.redact"):
+                return HIDDEN
+        except Exception:
+            pass
         try:
             return os.uname().nodename
         except Exception:

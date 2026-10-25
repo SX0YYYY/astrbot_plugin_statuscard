@@ -23,3 +23,13 @@ except ModuleNotFoundError:
     astrbot_module.api = api_module  # type: ignore[attr-defined]
     sys.modules["astrbot"] = astrbot_module
     sys.modules["astrbot.api"] = api_module
+
+# page_api uses the official astrbot.api.web helpers; stub them when the
+# astrbot package in this environment does not provide the submodule.
+try:
+    import astrbot.api.web  # noqa: F401
+except Exception:
+    web_module = types.ModuleType("astrbot.api.web")
+    web_module.json_response = lambda payload: payload  # type: ignore[attr-defined]
+    web_module.request = types.SimpleNamespace(query={})  # type: ignore[attr-defined]
+    sys.modules["astrbot.api.web"] = web_module

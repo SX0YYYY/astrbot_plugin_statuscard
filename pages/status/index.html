@@ -32,6 +32,7 @@
 
     <main id="panels">
       <section class="panel active" id="panel-overview" role="tabpanel">
+        <div id="audit-banner" class="audit-banner" hidden></div>
         <div class="metric-grid" id="metrics"></div>
         <div class="card">
           <div class="card-head">
@@ -83,7 +84,7 @@
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_network_rate">网络速率</h2>
-            <span data-i18n="label_latest_sample">最近一次采样</span>
+            <span id="network-note" class="card-note"></span>
           </div>
           <div class="legend" id="network-legend"></div>
           <div class="chart" id="network-chart"></div>

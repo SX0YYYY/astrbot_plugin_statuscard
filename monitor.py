@@ -12,7 +12,7 @@ from astrbot.api import logger
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
-from .utils import redact_url, retry_delay
+from .utils import normalize_targets, redact_url, retry_delay
 
 KIND_LABELS = {
     "http": "HTTP",
@@ -35,24 +35,6 @@ def _now_text(config: Any = None) -> str:
     if config is None:
         return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _normalize_targets(raw: Any, platform_id: str) -> list[str]:
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return []
-    out: list[str] = []
-    for item in raw:
-        if not isinstance(item, str):
-            continue
-        value = item.strip()
-        if not value:
-            continue
-        target = value if ":" in value else f"{platform_id}:GroupMessage:{value}"
-        if target not in out:
-            out.append(target)
-    return out
 
 
 class ServiceMonitor:
@@ -89,13 +71,14 @@ class ServiceMonitor:
         targets = cfg_get(config, "monitors.targets", [])
         if not targets:
             targets = cfg_get(config, "alerts.targets", [])
-        self.targets = _normalize_targets(targets, self.platform_id)
+        self.targets = normalize_targets(targets, self.platform_id)
         self.items = self._normalize_items(cfg_get(config, "monitors.items", []))
         self._task: asyncio.Task | None = None
         self._running = False
         self._silence_warned = False
         self._silence_active = False
         self._suppress_warned: set[str] = set()
+        self._targets_warned = False
 
     def _normalize_items(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
@@ -116,24 +99,28 @@ class ServiceMonitor:
             if not cfg_bool(item, "enabled", True):
                 continue
             required = REQUIRED_FIELDS[kind]
+            config_error: str | None = None
             if not item.get(required):
-                logger.warning(
-                    "监测项 %r（%s）缺少 %s 配置，检查时会始终判定为异常",
-                    str(item.get("name") or kind),
-                    kind,
-                    required,
-                )
-            if kind == "tcp":
+                config_error = f"缺少 {required} 配置"
+            elif kind == "tcp":
                 port = cfg_int(item, "port", 0)
                 if port and not (1 <= port <= 65535):
-                    logger.warning(
-                        "监测项 %r（tcp）端口 %s 超出 1–65535，检查时会始终判定为异常",
-                        str(item.get("name") or kind),
-                        port,
-                    )
+                    config_error = f"端口 {port} 超出 1–65535"
+            if config_error:
+                # A misconfigured probe would fail on every round and hit the
+                # alert cooldown as a fake "service down"; keep it visible as
+                # a config problem instead of an outage.
+                logger.warning(
+                    "监测项 %r（%s）配置不完整：%s，已跳过探测（修正后会自动恢复）",
+                    str(item.get("name") or kind),
+                    kind,
+                    config_error,
+                )
             normalized = dict(item)
             normalized["__template_key"] = kind
             normalized["name"] = str(item.get("name") or kind)
+            if config_error:
+                normalized["config_error"] = config_error
             out.append(normalized)
         return out
 
@@ -143,6 +130,11 @@ class ServiceMonitor:
             return
         if not self.items:
             logger.warning("服务监测已启用，但没有配置任何监测目标")
+        elif not self.targets:
+            logger.error(
+                "服务监测已启用但没有推送目标（monitors.targets 与 alerts.targets 均为空），"
+                "监测项不会探测也不会告警；请在配置页的“告警与每日定时状态图 → 推送目标”里填写"
+            )
         self._prune_state()
         self._running = True
         self._is_silenced()
@@ -236,10 +228,21 @@ class ServiceMonitor:
 
     async def check_all(self) -> None:
         if not self.targets:
-            logger.warning("服务监测目标为空，跳过本轮检查")
+            # A missing push target means alerts could never reach anyone;
+            # warn once at start-up (see audit) instead of every round.
+            if not self._targets_warned:
+                logger.error(
+                    "服务监测已启用但没有推送目标（monitors.targets 与 alerts.targets 均为空），"
+                    "不会探测也不会告警；请在配置页填写推送目标"
+                )
+                self._targets_warned = True
             return
         results = await asyncio.gather(
-            *(self._check_item(item) for item in self.items),
+            *(
+                self._check_item(item)
+                for item in self.items
+                if not item.get("config_error")
+            ),
             return_exceptions=True,
         )
         for result in results:
@@ -662,6 +665,15 @@ class ServiceMonitor:
 
     async def test_all(self) -> list[dict[str, Any]]:
         async def one(item: dict[str, Any]) -> dict[str, Any]:
+            error = str(item.get("config_error") or "")
+            if error:
+                return {
+                    "name": str(item.get("name") or ""),
+                    "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
+                    "target": "",
+                    "ok": False,
+                    "detail": f"配置不完整（{error}），未执行探测",
+                }
             ok, detail, target = await self._probe(item)
             return {
                 "name": str(item.get("name") or ""),
@@ -691,6 +703,7 @@ class ServiceMonitor:
                     "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
                     "target": self._item_key(item),
                     "state": monitors.get("items", {}).get(self._item_key(item), {}),
+                    "config_error": item.get("config_error"),
                 }
                 for item in self.items
             ],

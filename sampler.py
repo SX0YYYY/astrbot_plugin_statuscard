@@ -209,10 +209,12 @@ class Sampler:
             down_rate = recv_delta / dt
 
             month = now_in_timezone(self.config).strftime("%Y-%m")
+            net["interval"] = self.interval_seconds
             if net.get("month") != month:
                 net["month"] = month
                 net["month_up"] = 0
                 net["month_down"] = 0
+                logger.info("已进入 %s，本月流量统计已重置", month)
             net["month_up"] = int(net.get("month_up") or 0) + sent_delta
             net["month_down"] = int(net.get("month_down") or 0) + recv_delta
 

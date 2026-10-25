@@ -1248,7 +1248,9 @@ def _nice_ceil(value: float) -> float:
     return 10 ** (exp + 1)
 
 
-def build_network_chart(history: Any, tz: Any = None) -> dict[str, Any]:
+def build_network_chart(
+    history: Any, tz: Any = None, interval: int = 60
+) -> dict[str, Any]:
     width = 560
     height = 150
     left = 54
@@ -1290,11 +1292,15 @@ def build_network_chart(history: Any, tz: Any = None) -> dict[str, Any]:
         }
 
     # Pad the left side with zero samples so a freshly started plugin still
-    # renders a full one-hour chart instead of a two-point diagonal.
+    # renders a full one-hour chart instead of a two-point diagonal. The
+    # interval follows the sampler's configured cadence, not a fixed minute.
+    interval = max(5, int(interval or 60))
     if len(points) < 60:
         first_ts = points[0][0]
         pad = 60 - len(points)
-        points = [(first_ts - (pad - i) * 60, 0.0, 0.0) for i in range(pad)] + points
+        points = [
+            (first_ts - (pad - i) * interval, 0.0, 0.0) for i in range(pad)
+        ] + points
 
     max_value = max(max(p[1], p[2]) for p in points)
     max_value = _nice_ceil(max_value * 1.12)
@@ -1570,7 +1576,8 @@ async def collect_all(
 
     net_counters = psutil.net_io_counters()
     history = net_state.get("history") if isinstance(net_state, dict) else []
-    chart = build_network_chart(history, tz)
+    chart_interval = net_state.get("interval") if isinstance(net_state, dict) else None
+    chart = build_network_chart(history, tz, interval=int(chart_interval or 60))
     up_rate = float(net_state.get("up_rate") or 0.0)
     down_rate = float(net_state.get("down_rate") or 0.0)
     month_names = {

@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import time
+import types
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from astrbot_plugin_statuscard import collectors
@@ -29,12 +31,15 @@ from astrbot_plugin_statuscard.t2i_renderer import (
 from astrbot_plugin_statuscard.utils import (
     clean_report_sections,
     is_supported_platform,
+    normalize_targets,
     retry_delay,
 )
 
 # ---------------------------------------------------------------------------
 # state store
 # ---------------------------------------------------------------------------
+
+TZINFO = ZoneInfo("Asia/Shanghai")
 
 
 def test_state_store_roundtrip_and_schema_version(tmp_path: Path) -> None:
@@ -102,6 +107,41 @@ def test_build_network_chart_trims_to_last_sixty_points() -> None:
     assert len(chart["up_points"].split()) == 60
     # The last sample has the highest value in this fixture.
     assert chart["peak_up"]["text"].startswith("179")
+
+
+def test_sampler_resets_month_traffic_on_rollover(tmp_path: Path, monkeypatch) -> None:
+    """Monthly traffic is a natural-month counter, not a since-install one."""
+
+    from datetime import datetime
+
+    from astrbot_plugin_statuscard import sampler as sampler_module
+    from astrbot_plugin_statuscard.sampler import Sampler
+
+    store = StateStore(tmp_path / "state.json")
+    now = time.time()
+    store.data["net"] = {
+        "month": "2026-09",
+        "month_up": 12345,
+        "month_down": 54321,
+        "last_ts": now - 60,
+        "last_sent": 1_000_000,
+        "last_recv": 2_000_000,
+    }
+    sampler = Sampler(store, interval_seconds=60, config={"display": {}})
+    monkeypatch.setattr(
+        sampler_module,
+        "now_in_timezone",
+        lambda _config: datetime(2026, 10, 1, 0, 0, 30, tzinfo=TZINFO),
+    )
+    counters = types.SimpleNamespace(bytes_sent=1_050_000, bytes_recv=2_100_000)
+    monkeypatch.setattr(sampler_module.psutil, "net_io_counters", lambda: counters)
+
+    sampler._sample_network(now)
+
+    net = store.get("net")
+    assert net["month"] == "2026-10"
+    assert net["month_up"] == 50_000
+    assert net["month_down"] == 100_000
 
 
 def test_normalize_website_targets_defaults_and_clamping() -> None:
@@ -215,7 +255,7 @@ def test_collect_bot_info_runs_onebot_calls_concurrently(
 
 
 def test_normalize_targets_accepts_group_ids_and_umo() -> None:
-    targets = AlertEngine._normalize_targets(
+    targets = normalize_targets(
         ["123456", "default:GroupMessage:123456", " ", 42], "default"
     )
     assert targets == ["default:GroupMessage:123456"]

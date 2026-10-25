@@ -234,12 +234,16 @@ class PageApi:
 
         monitor_status = plugin.monitor.status()
         monitor_items: list[dict[str, Any]] = []
-        ok_count = fail_count = unknown_count = 0
+        ok_count = fail_count = unknown_count = config_error_count = 0
         for item in monitor_status.get("items", []):
             state = item.get("state") or {}
             checked = state.get("last_checked")
             alerting = bool(state.get("alerting"))
-            if not checked:
+            config_error = item.get("config_error")
+            if config_error:
+                status = "config_error"
+                config_error_count += 1
+            elif not checked:
                 status = "unknown"
                 unknown_count += 1
             elif alerting:
@@ -256,6 +260,7 @@ class PageApi:
                     "last_checked": checked,
                     "last_ok": state.get("last_ok"),
                     "last_error": str(state.get("last_error") or "")[:160],
+                    "config_error": config_error,
                 }
             )
 
@@ -293,6 +298,7 @@ class PageApi:
                     "ok": ok_count,
                     "fail": fail_count,
                     "unknown": unknown_count,
+                    "config_error": config_error_count,
                     "items": monitor_items,
                 },
                 "processes": await self._latest_processes(
@@ -310,6 +316,7 @@ class PageApi:
                     "sections": daily_status.get("sections"),
                     "last_run": daily_status.get("last_run"),
                 },
+                "audit": [issue.as_dict() for issue in plugin.audit_issues()],
                 "store": plugin.report_store.stats(),
             }
         )
@@ -479,7 +486,7 @@ class PageApi:
         view: dict[str, Any] = {}
         try:
             builder = DailyReportBuilder(
-                plugin.report_store, plugin.config, redact=self._redactor()
+                plugin.report_store, plugin.config, redact=self._redactor().rules
             )
             sections = cfg_get(plugin.config, "daily_report.sections", None)
             view = builder.build(

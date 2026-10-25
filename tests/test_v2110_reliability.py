@@ -24,6 +24,7 @@ from astrbot_plugin_statuscard.onebot_receipt import (
     should_retry_send,
 )
 from astrbot_plugin_statuscard.report import DailyReporter
+from astrbot_plugin_statuscard.report_store import ReportStore
 from astrbot_plugin_statuscard.state import StateStore
 from astrbot_plugin_statuscard.utils import redact_url
 
@@ -298,6 +299,30 @@ def test_report_retry_stops_after_three_failures_in_one_day(monkeypatch) -> None
     reporter._schedule_retry("2026-10-21")
     assert reporter._pending_retry is None
     assert reporter._pending_retry_count == 0
+
+
+def test_report_retry_state_survives_reload(tmp_path: Path) -> None:
+    """Retry plans live in state.json so a plugin reload cannot drop them.
+
+    Saving any config triggers a plugin reload; before this was persisted a
+    queued retry disappeared on reload and a failed weekly report silently
+    vanished for the whole week.
+    """
+
+    from types import SimpleNamespace
+
+    store = ReportStore(tmp_path / "report.db")
+    state = StateStore(tmp_path / "state.json")
+    config = _FakeConfig({"display": {"timezone": "Asia/Shanghai"}})
+    plugin = SimpleNamespace(state=state)
+    reporter = DailyReporter(plugin, store, config)
+    reporter._pending_retry_day = "2026-10-21"
+    reporter._schedule_retry("2026-10-20")
+
+    reloaded = DailyReporter(plugin, store, config)
+    assert reloaded._pending_retry is not None
+    assert reloaded._pending_retry[0] == "2026-10-20"
+    assert reloaded._pending_retry_count == 1
 
 
 # ----------------------------------------------------------------------

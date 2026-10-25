@@ -451,14 +451,40 @@
         .join("");
     }
 
+    const audit = data.audit || [];
+    const banner = $("audit-banner");
+    if (audit.length) {
+      banner.hidden = false;
+      banner.innerHTML = audit
+        .map(
+          (issue) =>
+            '<div class="audit-item ' +
+            esc(issue.level) +
+            '"><strong>' +
+            esc(
+              issue.level === "error"
+                ? t("audit_error_tag", "配置错误")
+                : t("audit_warning_tag", "配置提醒"),
+            ) +
+            "</strong><span>" +
+            esc(issue.message) +
+            "</span></div>",
+        )
+        .join("");
+    } else {
+      banner.hidden = true;
+      banner.innerHTML = "";
+    }
+
     const monitors = data.monitors || {};
     $("monitor-summary").textContent = t(
       "monitor_summary",
-      "正常 {ok} · 异常 {fail} · 未知 {unknown}",
+      "正常 {ok} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
       {
         ok: monitors.ok || 0,
         fail: monitors.fail || 0,
         unknown: monitors.unknown || 0,
+        config_error: monitors.config_error || 0,
       },
     );
     const items = monitors.items || [];
@@ -466,13 +492,17 @@
       ? items
           .map((item) => {
             const meta =
-              item.status === "fail" && item.last_error
-                ? item.last_error
-                : item.last_checked
-                  ? t("monitor_last_check", "最近检查 {time}", {
-                      time: formatTime(item.last_checked),
-                    })
-                  : t("monitor_not_checked", "尚未检查");
+              item.config_error
+                ? t("monitor_config_error", "配置不完整（{error}），未探测", {
+                    error: item.config_error,
+                  })
+                : item.status === "fail" && item.last_error
+                  ? item.last_error
+                  : item.last_checked
+                    ? t("monitor_last_check", "最近检查 {time}", {
+                        time: formatTime(item.last_checked),
+                      })
+                    : t("monitor_not_checked", "尚未检查");
             return (
               '<div class="monitor"><i class="dot ' +
               esc(item.status) +
@@ -555,6 +585,7 @@
 
   async function loadHistory() {
     const data = await apiGet("history", { range: state.historyRange });
+    $("network-note").textContent = data.network_note || "";
     const points = data.points || [];
     const labels = points.map((point) =>
       labelForTs(point.ts, state.historyRange),

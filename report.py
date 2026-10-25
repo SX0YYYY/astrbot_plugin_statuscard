@@ -31,6 +31,7 @@ from .report_view import (
 )
 from .sampler import read_message_stats_total
 from .state import StateStore
+from .utils import normalize_targets
 from .version import resolve_astrbot_version
 
 
@@ -322,7 +323,6 @@ class DailyReporter:
         self.builder = DailyReportBuilder(store, config)
         self._task: asyncio.Task | None = None
         self._running = False
-        self._last_sent_day: str | None = None
         self._pending_retry: tuple[str, float] | None = None
         self._pending_retry_count = 0
         self._pending_retry_day: str | None = None
@@ -330,10 +330,79 @@ class DailyReporter:
         self._disabled_logged = False
         self._weekly_task: asyncio.Task | None = None
         self._weekly_running = False
-        self._weekly_last_sent_week: str | None = None
         self._weekly_pending: float | None = None
         self._weekly_retry_count = 0
         self._weekly_next_run_text: str | None = None
+        self._last_sent_day: str | None = None
+        self._weekly_last_sent_week: str | None = None
+        # Retry plans and de-dup markers used to live only in memory, so a
+        # plugin reload (which every config save triggers) dropped a queued
+        # retry — the weekly report could silently vanish for the whole week.
+        # They are persisted through state.json and restored here.
+        self._restore_delivery_state()
+
+    # ------------------------------------------------------------------
+    # persisted delivery state
+    # ------------------------------------------------------------------
+
+    def _restore_delivery_state(self) -> None:
+        state = getattr(getattr(self, "plugin", None), "state", None)
+        saved: Any = {}
+        try:
+            if state is not None:
+                saved = state.get("report_delivery", {}) or {}
+        except Exception:
+            saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
+        self._last_sent_day = saved.get("last_sent_day") or None
+        self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
+        self._pending_retry_count = int(saved.get("pending_retry_count") or 0)
+        self._pending_retry_day = saved.get("pending_retry_day") or None
+        self._weekly_retry_count = int(saved.get("weekly_retry_count") or 0)
+        pending = saved.get("pending_retry")
+        if isinstance(pending, dict) and pending.get("day") is not None:
+            try:
+                self._pending_retry = (
+                    str(pending["day"]),
+                    float(pending.get("due") or 0),
+                )
+            except (TypeError, ValueError):
+                self._pending_retry = None
+        else:
+            self._pending_retry = None
+        weekly_pending = saved.get("weekly_pending")
+        try:
+            self._weekly_pending = float(weekly_pending) if weekly_pending else None
+        except (TypeError, ValueError):
+            self._weekly_pending = None
+
+    def _save_delivery_state(self) -> None:
+        state = getattr(getattr(self, "plugin", None), "state", None)
+        if state is None or not hasattr(state, "set"):
+            return
+        pending = None
+        if self._pending_retry is not None:
+            pending = {
+                "day": self._pending_retry[0],
+                "due": self._pending_retry[1],
+            }
+        try:
+            state.set(
+                "report_delivery",
+                {
+                    "last_sent_day": self._last_sent_day,
+                    "pending_retry": pending,
+                    "pending_retry_count": self._pending_retry_count,
+                    "pending_retry_day": self._pending_retry_day,
+                    "weekly_last_sent_week": self._weekly_last_sent_week,
+                    "weekly_pending": self._weekly_pending,
+                    "weekly_retry_count": self._weekly_retry_count,
+                },
+            )
+            state.save()
+        except Exception:
+            logger.debug("持久化日报投递状态失败", exc_info=True)
 
     # ------------------------------------------------------------------
     # configuration helpers (read per call so edits apply after reload)
@@ -383,24 +452,10 @@ class DailyReporter:
         raw = cfg_get(self.config, "daily_report.targets", [])
         if not raw:
             raw = cfg_get(self.config, "alerts.targets", [])
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list):
-            return []
         platform_id = str(
             cfg_get(self.config, "alerts.platform_id", "default") or "default"
         )
-        out: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                continue
-            value = item.strip()
-            if not value:
-                continue
-            target = value if ":" in value else f"{platform_id}:GroupMessage:{value}"
-            if target not in out:
-                out.append(target)
-        return out
+        return normalize_targets(raw, platform_id)
 
     def _build_view(self, day=None, span_days: int = 1) -> dict[str, Any]:
         meta = {
@@ -589,6 +644,7 @@ class DailyReporter:
                 # retry counter of a previous evening must not carry over.
                 self._pending_retry_count = 0
                 self._pending_retry_day = self._today()
+                self._save_delivery_state()
                 await self._send_scheduled()
                 last_logged = None
             except asyncio.CancelledError:
@@ -656,20 +712,23 @@ class DailyReporter:
                 logger.exception("周报定时任务失败")
                 await asyncio.sleep(60)
 
-    def _schedule_weekly_retry(self) -> None:
+    def _schedule_weekly_retry(self) -> bool:
         self._weekly_retry_count += 1
         if self._weekly_retry_count > 3:
             self._weekly_pending = None
             self._weekly_retry_count = 0
+            self._save_delivery_state()
             logger.warning("周报连续发送失败 3 次，停止重试")
-            return
+            return False
         delay = 600 * self._weekly_retry_count
         self._weekly_pending = time.time() + delay
+        self._save_delivery_state()
         logger.warning(
             "周报发送失败，%d 分钟后重试（第 %d 次）",
             delay // 60,
             self._weekly_retry_count,
         )
+        return True
 
     async def _send_weekly_scheduled(self) -> None:
         if self._sections() is not None and not self._sections():
@@ -679,7 +738,8 @@ class DailyReporter:
             view = self._build_view(span_days=7)
         except Exception:
             logger.exception("周报数据聚合失败")
-            self._schedule_weekly_retry()
+            if not self._schedule_weekly_retry():
+                await self._notify_give_up(self._targets(), "--", weekly=True)
             return
         iso = now_in_timezone(self.config).date().isocalendar()
         week_key = f"{iso.year}-W{iso.week:02d}"
@@ -705,6 +765,7 @@ class DailyReporter:
                 self._record(day, True, "weekly-image")
                 self._weekly_pending = None
                 self._weekly_retry_count = 0
+                self._save_delivery_state()
                 logger.info("周报已发送（图片）：%s", targets)
                 return
         if await self.plugin.send_text(
@@ -714,19 +775,42 @@ class DailyReporter:
             self._record(day, True, "weekly-text")
             self._weekly_pending = None
             self._weekly_retry_count = 0
+            self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         else:
             self._record(day, False, "weekly send failed")
             logger.warning("周报发送失败：%s", targets)
-            self._schedule_weekly_retry()
+            if not self._schedule_weekly_retry():
+                await self._notify_give_up(targets, day, weekly=True)
 
-    def _schedule_retry(self, day: str) -> None:
+    async def _notify_give_up(
+        self, targets: list[str], day: str, weekly: bool = False
+    ) -> None:
+        """Best-effort notice when all retries are exhausted.
+
+        The push channel itself just failed, so this may also fail; it is
+        still worth one attempt before the report silently waits for the
+        next scheduled slot.
+        """
+
+        if not targets:
+            return
+        key = "weekly_retry_give_up" if weekly else "report_retry_give_up"
+        try:
+            await self.plugin.send_text(
+                targets, tr(self.config, key, day=day or "--"), source="report_give_up"
+            )
+        except Exception:
+            logger.debug("发送放弃重试提示失败", exc_info=True)
+
+    def _schedule_retry(self, day: str) -> bool:
         """Remember a failed delivery and queue the next attempt.
 
-        The retry counter is scoped to a single day. Without that scope a
-        few unlucky evenings in a row would push the counter past the limit
-        and every later evening would be abandoned after its very first
-        failure, so the daily report would silently stop being delivered.
+        Returns ``True`` when another attempt was scheduled and ``False``
+        when the retry budget for today is exhausted. The counter is scoped
+        to a single day; without that scope a few unlucky evenings in a row
+        would push the counter past the limit and every later evening would
+        be abandoned after its very first failure.
         """
 
         today = self._today()
@@ -737,21 +821,25 @@ class DailyReporter:
         if self._pending_retry_count > 3:
             self._pending_retry = None
             self._pending_retry_count = 0
+            self._save_delivery_state()
             logger.warning("日报 %s 连续发送失败 3 次，停止重试", day or "--")
-            return
+            return False
         delay = 600 * self._pending_retry_count
         self._pending_retry = (day, time.time() + delay)
+        self._save_delivery_state()
         logger.warning(
             "日报 %s 发送失败，%d 分钟后重试（第 %d 次）",
             day or "--",
             delay // 60,
             self._pending_retry_count,
         )
+        return True
 
     def _clear_retry(self) -> None:
         self._pending_retry = None
         self._pending_retry_count = 0
         self._pending_retry_day = None
+        self._save_delivery_state()
 
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
@@ -768,7 +856,8 @@ class DailyReporter:
         except Exception:
             logger.exception("日报数据聚合失败")
             self._record("", False, "build failed")
-            self._schedule_retry("")
+            if not self._schedule_retry(""):
+                await self._notify_give_up(targets, "", weekly=False)
             return
         day = str(view.get("day") or "")
         if not targets:
@@ -792,6 +881,7 @@ class DailyReporter:
                 self._last_sent_day = day
                 self._record(day, True, "image")
                 self._clear_retry()
+                self._save_delivery_state()
                 logger.info("日报已发送（图片）：%s", targets)
                 return
         if await self.plugin.send_text(
@@ -800,11 +890,13 @@ class DailyReporter:
             self._last_sent_day = day
             self._record(day, True, "text")
             self._clear_retry()
+            self._save_delivery_state()
             logger.info("日报已发送（文字）：%s", targets)
         else:
             self._record(day, False, "send failed")
             logger.warning("日报发送失败：%s", targets)
-            self._schedule_retry(day)
+            if not self._schedule_retry(day):
+                await self._notify_give_up(targets, day, weekly=False)
 
     async def preview(
         self, target_umo: str | None, span_days: int = 1

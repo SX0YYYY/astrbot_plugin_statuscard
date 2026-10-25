@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from astrbot.api import logger
+
 from .collectors import cfg_get
 
 DEFAULT_LANGUAGE = "zh-CN"
@@ -14,7 +16,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "cooldown": "状态卡冷却中，请 {seconds} 秒后再试。",
         "privacy_notice": "提示：状态图包含主机名/进程等信息，并会发送到 T2I 服务渲染。",
         "progress_notice": "状态卡生成中，通常十几秒到一分钟，请稍候…",
-        "image_failed": "生成状态图失败，以下为文本摘要：\n{summary}",
+        "image_failed": "生成状态图失败（渲染服务 T2I 暂时不可用，稍后重试通常可恢复），以下为文本摘要：\n{summary}",
         "summary_failed": "获取系统状态失败，请检查 AstrBot 后台日志。",
         "test_sent": "测试通知已发送到当前会话。",
         "test_failed": "测试通知发送失败，请查看后台日志。",
@@ -32,6 +34,19 @@ MESSAGES: dict[str, dict[str, str]] = {
         "weekly_preview_sent": "周报预览已发送。",
         "weekly_preview_sent_text": "周报预览已发送（文字）。",
         "weekly_preview_send_failed": "周报预览发送失败，请查看后台日志。",
+        "report_generating": "日报生成中，通常十几秒到一分钟，请稍候…",
+        "weekly_generating": "周报生成中，通常十几秒到一分钟，请稍候…",
+        "report_retry_give_up": "⚠️ 日报（{day}）连续 3 次发送失败，已停止重试；可发送「预览日报」手动补发。",
+        "weekly_retry_give_up": "⚠️ 周报连续 3 次发送失败，已停止重试；可发送「预览周报」手动补发。",
+        "summary_host": "主机",
+        "summary_disk": "磁盘",
+        "summary_network": "网络",
+        "summary_month": "本月流量",
+        "summary_process": "进程",
+        "summary_friends": "好友",
+        "summary_groups": "群聊",
+        "summary_members": "群员",
+        "summary_recv": "收发",
     },
     "en-US": {
         "platform_unsupported": "Unsupported platform: the status card only supports QQ/OneBot (aiocqhttp).",
@@ -39,7 +54,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "cooldown": "Status card cooldown, try again in {seconds} seconds.",
         "privacy_notice": "Note: the status image includes the hostname/processes and is sent to the configured T2I service for rendering.",
         "progress_notice": "Generating the status card; this usually takes seconds to a minute…",
-        "image_failed": "Failed to generate the status image. Text summary:\n{summary}",
+        "image_failed": "Failed to generate the status image (the T2I rendering service is temporarily unavailable; retrying later usually works). Text summary:\n{summary}",
         "summary_failed": "Failed to collect system status; check the AstrBot backend log.",
         "test_sent": "Test notification sent to this chat.",
         "test_failed": "Test notification failed; check the backend log.",
@@ -57,6 +72,19 @@ MESSAGES: dict[str, dict[str, str]] = {
         "weekly_preview_sent": "Weekly report preview sent.",
         "weekly_preview_sent_text": "Weekly report preview sent as text.",
         "weekly_preview_send_failed": "Failed to send the weekly report preview; check the backend log.",
+        "report_generating": "Generating the daily report; this usually takes seconds to a minute…",
+        "weekly_generating": "Generating the weekly report; this usually takes seconds to a minute…",
+        "report_retry_give_up": "⚠️ The daily report ({day}) failed to send after 3 attempts; use the preview command（预览日报）to resend manually.",
+        "weekly_retry_give_up": "⚠️ The weekly report failed to send after 3 attempts; use the preview command（预览周报）to resend manually.",
+        "summary_host": "Host",
+        "summary_disk": "Disk",
+        "summary_network": "Network",
+        "summary_month": "Month traffic",
+        "summary_process": "Processes",
+        "summary_friends": "Friends",
+        "summary_groups": "Groups",
+        "summary_members": "Members",
+        "summary_recv": "Sent/Recv",
     },
 }
 
@@ -64,8 +92,19 @@ MESSAGES: dict[str, dict[str, str]] = {
 def get_language(config: Any = None) -> str:
     value = str(
         cfg_get(config, "display.language", DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
-    ).strip()
-    return value if value in LANGUAGES else DEFAULT_LANGUAGE
+    )
+    normalized = value.strip().lower().replace("_", "-")
+    for lang in LANGUAGES:
+        if normalized == lang.lower():
+            return lang
+    if value.strip():
+        logger.warning(
+            "display.language 值 %r 不是 %s 之一，已回退 %s",
+            value,
+            "/".join(LANGUAGES),
+            DEFAULT_LANGUAGE,
+        )
+    return DEFAULT_LANGUAGE
 
 
 def tr(config: Any, key: str, **kwargs: Any) -> str:

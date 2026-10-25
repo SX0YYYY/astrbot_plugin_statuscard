@@ -130,3 +130,28 @@ def truncate_text(text: Any, limit: int = 2000) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 12)].rstrip() + "\n…（已截断）"
+
+
+def normalize_targets(raw: Any, platform_id: str) -> list[str]:
+    """Normalize push targets: plain group numbers become full UMOs.
+
+    Alerts, service monitoring and the reports all accept either a full
+    unified message origin or a bare QQ group number; both resolve to the
+    same UMO here so every push path shares one definition.
+    """
+
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value:
+            continue
+        target = value if ":" in value else f"{platform_id}:GroupMessage:{value}"
+        if target not in out:
+            out.append(target)
+    return out

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -195,7 +196,132 @@ def test_weekly_view_spans_seven_days(tmp_path: Path) -> None:
     assert weekly["start_day"] == "2026-10-14"
     assert weekly["window"] == "2026-10-14 00:00 – 2026-10-20 24:00"
     assert weekly["day_label"] == "最后一天"
+    assert weekly["window_label"] == "近 7 天"
     assert weekly["anomalies"]["count"] == 2
+
+
+def _weekly_report_view() -> dict:
+    view = _sample_report_view()
+    view.update(
+        {
+            "title": "系统周报",
+            "span_days": 7,
+            "start_day": "2026-10-14",
+            "day_label": "最后一天",
+            "window_label": "近 7 天",
+            "summary": {
+                "anomaly_count": 5,
+                "token_total_text": "9,548,645",
+                "sent_text": "96",
+                "recv_text": "--",
+            },
+            "window": "2026-10-14 00:00 – 2026-10-20 24:00",
+            "sections": [
+                "resource",
+                "anomaly",
+                "qq",
+                "token",
+                "website",
+                "process",
+            ],
+            "website": {
+                "available": True,
+                "targets": [
+                    {
+                        "name": "Baidu",
+                        "avg_text": "230 ms",
+                        "peak_text": "410 ms",
+                        "availability_text": "98%",
+                    }
+                ],
+            },
+            "process": {
+                "available": True,
+                "top_n": 5,
+                "cpu": [{"rank": 1, "name": "python", "cpu_text": "12.3%"}],
+                "mem": [],
+            },
+        }
+    )
+    return view
+
+
+def test_weekly_build_labels_match_window(tmp_path: Path) -> None:
+    """Weekly captions must state the 7-day window the data covers.
+
+    v2.12.4 parameterized the template label but left the process note and
+    the empty-state text hardcoded to "yesterday", mislabelling window
+    aggregates as last-day figures.
+    """
+
+    store = ReportStore(tmp_path / "report.db")
+    view = _builder(tmp_path, store).build(
+        day="2026-10-20",
+        history_days=7,
+        sections=["resource", "anomaly", "website", "process", "token", "qq"],
+        span_days=7,
+    )
+    assert view["window_label"] == "近 7 天"
+    assert "近 7 天" in view["process"]["note"]
+    assert "昨日" not in view["process"]["note"]
+
+
+def test_weekly_anomaly_time_carries_date(tmp_path: Path) -> None:
+    """Inside a 7-day window a bare "HH:MM" cannot locate an event."""
+
+    store = ReportStore(tmp_path / "report.db")
+    store.add_event(1_700_000_000, "2026-10-19", "service", "Nginx", "down", "alert")
+
+    weekly = _builder(tmp_path, store).build(
+        day="2026-10-20", history_days=7, sections=["anomaly"], span_days=7
+    )
+    assert re.match(
+        r"^\d{2}-\d{2} \d{2}:\d{2}$", weekly["anomalies"]["items"][0]["time"]
+    )
+
+    daily = _builder(tmp_path, store).build(
+        day="2026-10-19", history_days=7, sections=["anomaly"]
+    )
+    assert re.match(r"^\d{2}:\d{2}$", daily["anomalies"]["items"][0]["time"])
+
+    empty = _builder(tmp_path, store).build(
+        day="2026-10-27", history_days=7, sections=["anomaly"], span_days=7
+    )
+    assert empty["anomalies"]["empty_reason"] == "近 7 天无异常事件"
+
+
+def test_weekly_html_and_text_carry_window_scope(tmp_path: Path) -> None:
+    store = ReportStore(tmp_path / "report.db")
+    day = datetime(2026, 10, 20, 0, 0, tzinfo=TZ)
+    start = int(day.timestamp())
+    store.add_resource(start, cpu=3.0)
+    store.add_resource(start + 300, cpu=4.0)
+    store.add_website_samples(
+        start, [{"name": "Baidu", "ok": True, "latency_ms": 120.0, "status": "200"}]
+    )
+    store.add_process_samples(
+        start,
+        "cpu",
+        [{"rank": 1, "name": "python", "pid": 1, "cpu": 50.0, "mem_mb": 100.0}],
+    )
+
+    view = _builder(tmp_path, store).build(
+        day="2026-10-20",
+        history_days=7,
+        sections=["resource", "anomaly", "qq", "token", "website", "process"],
+        span_days=7,
+    )
+    html = build_report_html(view, render_width=650)
+    assert "WEEKLY REPORT" in html
+    assert "近 7 天平均" in html
+    assert "最后一天平均" not in html
+    assert "近 7 天采样峰值" in html
+    assert "最后一天采样峰值" not in html
+
+    text = build_report_text(view)
+    assert "资源(最后一天):" in text
+    assert "网站(近 7 天):" in text
+    assert "Top 进程(近 7 天):" in text
 
 
 def test_empty_report_shows_accumulating_messages(tmp_path: Path) -> None:
@@ -241,12 +367,17 @@ def _sample_report_view() -> dict:
         "day": "2026-10-20",
         "window": "2026-10-20 00:00–24:00",
         "timezone": "Asia/Shanghai",
+        "span_days": 1,
+        "day_label": "昨日",
+        "window_label": "昨日",
         "sections": ["resource", "anomaly", "qq", "token"],
         "resources": {
             "available": True,
             "yesterday": {
                 "cpu": {"avg_text": "3.5%", "peak_text": "86.0%"},
                 "ram": {"avg_text": "57.4%", "peak_text": "63.3%"},
+                "swap": {"avg_text": "1.2%", "peak_text": "2.0%"},
+                "disk": {"avg_text": "42.0%", "peak_text": "42.0%"},
             },
         },
         "anomalies": {"count": 5},
@@ -299,7 +430,7 @@ def test_report_text_contains_key_figures() -> None:
     assert "异常/失败: 5 次" in text
     assert "好友 22" in text
     assert "接收 数据积累中" in text
-    assert "Token: 9,548,645" in text
+    assert "Token(昨日): 9,548,645" in text
 
 
 def test_report_hostname_respects_redact(tmp_path: Path) -> None:
@@ -311,6 +442,22 @@ def test_report_hostname_respects_redact(tmp_path: Path) -> None:
         day="2026-10-20", sections=["resource"], meta={"host": "secret-host"}
     )
     assert view["host"] == "已隐藏"
+
+
+def test_builder_accepts_redactor_instance() -> None:
+    """Passing a Redactor instance must keep its rules, not empty them.
+
+    Wrapping a Redactor into a second Redactor normalizes down to an empty
+    set, which is how the dashboard /reports endpoint silently lost its
+    redaction while ``page_redact`` looked configured.
+    """
+
+    from astrbot_plugin_statuscard.redactor import Redactor
+
+    config = {"display": {"timezone": "Asia/Shanghai"}}
+    builder = DailyReportBuilder(None, config, redact=Redactor(["hostname"]))
+    assert builder.redact == {"hostname"}
+    assert builder.redactor.hostname is True
 
 
 class _FakePlugin:
@@ -598,5 +745,5 @@ def test_report_text_contains_new_sections() -> None:
         },
     }
     text = build_report_text(view)
-    assert "网站: Baidu 120 ms（可用率 100%）" in text
-    assert "Top 进程: python CPU 50.0%" in text
+    assert "网站(昨日): Baidu 120 ms（可用率 100%）" in text
+    assert "Top 进程(昨日): python CPU 50.0%" in text
