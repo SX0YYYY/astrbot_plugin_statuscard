@@ -24,14 +24,14 @@
     </header>
 
     <nav class="tabs" role="tablist" aria-label="看板标签" data-i18n-aria="tabs_label">
-      <button class="tab active" data-tab="overview" role="tab" aria-selected="true" data-i18n="tab_overview">概览</button>
-      <button class="tab" data-tab="history" role="tab" aria-selected="false" data-i18n="tab_history">历史</button>
-      <button class="tab" data-tab="events" role="tab" aria-selected="false" data-i18n="tab_events">事件</button>
-      <button class="tab" data-tab="reports" role="tab" aria-selected="false" data-i18n="tab_reports">日报</button>
+      <button class="tab active" id="tab-overview" data-tab="overview" role="tab" aria-selected="true" aria-controls="panel-overview" tabindex="0" data-i18n="tab_overview">概览</button>
+      <button class="tab" id="tab-history" data-tab="history" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1" data-i18n="tab_history">历史</button>
+      <button class="tab" id="tab-events" data-tab="events" role="tab" aria-selected="false" aria-controls="panel-events" tabindex="-1" data-i18n="tab_events">事件</button>
+      <button class="tab" id="tab-reports" data-tab="reports" role="tab" aria-selected="false" aria-controls="panel-reports" tabindex="-1" data-i18n="tab_reports">日报</button>
     </nav>
 
     <main id="panels">
-      <section class="panel active" id="panel-overview" role="tabpanel">
+      <section class="panel active" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
         <div id="audit-banner" class="audit-banner" hidden></div>
         <div class="metric-grid" id="metrics"></div>
         <div class="card">
@@ -67,7 +67,7 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-history" role="tabpanel">
+      <section class="panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history">
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_resources">资源趋势</h2>
@@ -91,10 +91,11 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-events" role="tabpanel">
+      <section class="panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events">
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_events">异常事件</h2>
+            <span id="event-summary" class="card-note"></span>
             <div class="segmented" id="event-switch">
               <button type="button" data-days="1" class="active" data-i18n="range_today">今天</button>
               <button type="button" data-days="7" data-i18n="range_7d">7 天</button>
@@ -105,7 +106,7 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-reports" role="tabpanel">
+      <section class="panel" id="panel-reports" role="tabpanel" aria-labelledby="tab-reports">
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_report">昨日日报</h2>

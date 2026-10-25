@@ -136,7 +136,7 @@
 
   function formatTime(ts) {
     const date = new Date(Number(ts) * 1000);
-    return date.toLocaleTimeString("zh-CN", {
+    return date.toLocaleTimeString(currentLocale(), {
       hour12: false,
       hour: "2-digit",
       minute: "2-digit",
@@ -145,7 +145,7 @@
 
   function formatDateTime(ts) {
     const date = new Date(Number(ts) * 1000);
-    return date.toLocaleString("zh-CN", {
+    return date.toLocaleString(currentLocale(), {
       hour12: false,
       month: "2-digit",
       day: "2-digit",
@@ -157,16 +157,23 @@
   function labelForTs(ts, range) {
     const date = new Date(Number(ts) * 1000);
     if (range === "24h") {
-      return date.toLocaleTimeString("zh-CN", {
+      return date.toLocaleTimeString(currentLocale(), {
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
       });
     }
-    return date.toLocaleDateString("zh-CN", {
+    return date.toLocaleDateString(currentLocale(), {
       month: "2-digit",
       day: "2-digit",
     });
+  }
+
+  function pctText(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+      return "--";
+    }
+    return Number(value).toFixed(1) + "%";
   }
 
   function tone(percent) {
@@ -370,14 +377,13 @@
     const swap = data.swap || {};
     const disk = data.disk || {};
     const host = data.host || "--";
-    $("subtitle").textContent =
-      host + " · " + (data.platform || "default") + " · " + (data.uptime || "--");
+    $("subtitle").textContent = host + " · " + (data.platform || "default");
     $("plugin-version").textContent = "v" + (data.plugin_version || "--");
 
     $("metrics").innerHTML = [
       metric(
         t("metric_cpu", "CPU"),
-        (cpu.percent || 0).toFixed(1) + "%",
+        pctText(cpu.percent),
         t("metric_cores", "{count} 核 · 负载 {load}", {
           count: cpu.count || 0,
           load:
@@ -389,7 +395,7 @@
       ),
       metric(
         t("metric_memory", "内存"),
-        (memory.percent || 0).toFixed(1) + "%",
+        pctText(memory.percent),
         t("metric_used_total", "{used} / {total}", {
           used: memory.used_text || "--",
           total: memory.total_text || "--",
@@ -398,7 +404,7 @@
       ),
       metric(
         t("metric_swap", "SWAP"),
-        (swap.percent || 0).toFixed(1) + "%",
+        pctText(swap.percent),
         t("metric_used_total", "{used} / {total}", {
           used: swap.used_text || "--",
           total: swap.total_text || "--",
@@ -406,10 +412,10 @@
         swap.percent,
       ),
       metric(
-        t("metric_disk", "磁盘"),
-        disk.percent === null || disk.percent === undefined
-          ? "--"
-          : disk.percent.toFixed(1) + "%",
+        disk.path
+          ? t("metric_disk_path", "磁盘 {path}", { path: disk.path })
+          : t("metric_disk", "磁盘"),
+        pctText(disk.percent),
         t("metric_used_total", "{used} / {total}", {
           used: disk.used_text || "--",
           total: disk.total_text || "--",
@@ -551,14 +557,27 @@
     }
     const range = state.historyRange || "7d";
     const kinds = ["resources", "processes", "websites", "events"];
+    let exported = 0;
     for (const kind of kinds) {
       const data = await bridge.apiGet("export", { kind, range });
       if (!data || !data.ok) {
-        throw new Error((data && data.error) || t("error_load", "加载失败"));
+        throw new Error(
+          (data && data.error) ||
+            t("export_partial", "导出在 {kind} 中断（已导出 {count} 个文件）", {
+              kind,
+              count: exported,
+            }),
+        );
       }
+      if ((data.rows || []).length) exported += 1;
       downloadCsv(kind, range, data.rows || []);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    toast(
+      exported
+        ? t("export_done", "已导出 {count} 个文件", { count: exported })
+        : t("export_empty", "所选范围内没有可导出的数据"),
+    );
   }
 
   function downloadCsv(kind, range, rows) {
@@ -655,8 +674,7 @@
         recovery: t("status_recovery", "恢复"),
         failed: t("status_failed", "推送失败"),
       }[status] ||
-      status ||
-      t("status_alert", "事件")
+      (status ? t("status_unknown", "未知") + " (" + status + ")" : t("status_unknown", "未知"))
     );
   }
 
@@ -679,7 +697,8 @@
     const summary = Object.keys(counts)
       .map((key) => statusText(key) + " " + counts[key])
       .join(" · ");
-    if (summary) toast(summary);
+    const summaryBox = $("event-summary");
+    if (summaryBox) summaryBox.textContent = summary;
     $("event-list").innerHTML = items.length
       ? items
           .map((item) => {
@@ -955,6 +974,7 @@
       const active = button.dataset.tab === name;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
+      button.setAttribute("tabindex", active ? "0" : "-1");
     });
     document.querySelectorAll(".panel").forEach((panel) => {
       panel.classList.toggle("active", panel.id === "panel-" + name);
@@ -965,7 +985,7 @@
       state.loaded.add(name);
     } catch (error) {
       if (force) throw error;
-      toast(error.message || "加载失败");
+      toast(error.message || t("error_load", "加载失败"));
     }
   }
 
