@@ -807,3 +807,33 @@ def test_qq_section_notes_skewed_snapshot_capture(tmp_path: Path) -> None:
     builder = _builder(tmp_path, store)
     section = builder._qq_section(day.date(), 7)
     assert section["recv_note"] == "昨日快照的记录时刻有偏移，接收差值仅供参考。"
+
+
+def test_restore_delivery_state_survives_bad_types(tmp_path: Path) -> None:
+    """A hand-edited state.json must not abort plugin loading."""
+
+    class _StatefulPlugin(_FakePlugin):
+        def __init__(self, state):
+            self.state = state
+
+    class _State:
+        def __init__(self, data):
+            self._data = data
+
+        def get(self, key, default=None):
+            return self._data.get(key, default)
+
+    state = _State(
+        {
+            "report_delivery": {
+                "pending_retry_count": "not-a-number",
+                "weekly_retry_count": ["bad"],
+                "pending_retry": {"day": "2026-10-25", "due": "soon-ish"},
+            }
+        }
+    )
+    store = ReportStore(tmp_path / "report.db")
+    reporter = DailyReporter(_StatefulPlugin(state), store, _report_config())
+    assert reporter._pending_retry_count == 0
+    assert reporter._weekly_retry_count == 0
+    assert reporter._pending_retry is None

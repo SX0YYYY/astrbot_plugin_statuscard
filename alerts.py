@@ -342,6 +342,14 @@ class AlertEngine:
         alerting = bool(st.get("alerting"))
         last_sent = float(st.get("last_sent") or 0)
 
+        if threshold <= 0:
+            # A threshold of 0 (slider misjudged as "rule off") would make
+            # "value >= threshold" true for every sample and stick the rule
+            # in alerting forever; treat it as disabled instead.
+            st["count"] = 0
+            st["alerting"] = False
+            return
+
         if value >= threshold:
             # Keep any unsent recovery notice: dropping it here would silently
             # lose the "recovered" message when the value crosses the threshold

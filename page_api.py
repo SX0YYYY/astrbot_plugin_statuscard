@@ -4,7 +4,8 @@ import asyncio
 import os
 import socket
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 from typing import Any
 
 import psutil
@@ -340,25 +341,33 @@ class PageApi:
         start = end - seconds
         store = self.plugin.report_store
         limit = 20000
+        truncated = False
         if kind == "resources":
-            rows = [
-                row
-                for row in store.list_resources(start, limit=limit)
-                if int(row.get("ts") or 0) <= end
-            ]
+            fetched = store.list_resources(start, limit=limit + 1)
+            truncated = len(fetched) > limit
+            rows = [row for row in fetched[:limit] if int(row.get("ts") or 0) <= end]
         elif kind == "processes":
             # cpu and mem are two independent tables; truncating after the
             # merge used to drop the whole mem half once cpu filled the cap.
             half = limit // 2
-            rows = store.list_process_samples(start, end + 60, "cpu")[:half]
-            rows += store.list_process_samples(start, end + 60, "mem")[:half]
+            cpu_rows = store.list_process_samples(
+                start, end + 60, "cpu", limit=half + 1
+            )
+            mem_rows = store.list_process_samples(
+                start, end + 60, "mem", limit=half + 1
+            )
+            truncated = len(cpu_rows) > half or len(mem_rows) > half
+            rows = cpu_rows[:half]
+            rows += mem_rows[:half]
             if "process" in self._redact():
                 rows = [dict(row, name="已隐藏") for row in rows]
         elif kind == "websites":
             rows = store.list_website_samples(start, end + 60)
         elif kind == "events":
             # One range query instead of one connection per day.
-            rows = store.list_events_range(start, end, limit=limit)
+            fetched = store.list_events_range(start, end, limit=limit + 1)
+            truncated = len(fetched) > limit
+            rows = fetched[:limit]
         else:
             return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
         return jsonify(
@@ -367,6 +376,7 @@ class PageApi:
                 "kind": kind,
                 "range": range_key,
                 "generated_at": end,
+                "truncated": truncated,
                 "rows": rows[:limit],
             }
         )
@@ -380,11 +390,9 @@ class PageApi:
         seconds = RANGE_SECONDS.get(key, 86400)
         end = int(time.time())
         start = end - seconds
-        rows = [
-            row
-            for row in self.plugin.report_store.list_resources(start)
-            if int(row.get("ts") or 0) <= end
-        ]
+        fetched = self.plugin.report_store.list_resources(start, limit=20001)
+        truncated = len(fetched) > 20000
+        rows = [row for row in fetched[:20000] if int(row.get("ts") or 0) <= end]
         points = [
             {
                 "ts": int(row["ts"]),
@@ -421,6 +429,7 @@ class PageApi:
                 "network": net_points,
                 "network_redacted": network_redacted,
                 "network_note": network_note,
+                "truncated": truncated,
             }
         )
 
@@ -434,23 +443,29 @@ class PageApi:
         except (TypeError, ValueError):
             days = 7
         days = max(1, min(30, days))
-        today = now_in_timezone(self.plugin.config).date()
-        items: list[dict[str, Any]] = []
-        for offset in range(days):
-            day = (today - timedelta(days=offset)).isoformat()
-            for event in self.plugin.report_store.list_events(day, limit=200):
-                items.append(
-                    {
-                        "id": event.get("id"),
-                        "ts": event.get("ts"),
-                        "day": event.get("day"),
-                        "kind": event.get("kind"),
-                        "name": event.get("name"),
-                        "detail": str(event.get("detail") or "")[:200],
-                        "status": event.get("status"),
-                        "resolved_ts": event.get("resolved_ts"),
-                    }
-                )
+        tz = now_in_timezone(self.plugin.config).tzinfo
+        start_dt = datetime.combine(
+            (now_in_timezone(self.plugin.config).date() - timedelta(days=days - 1)),
+            dtime.min,
+            tzinfo=tz,
+        )
+        # One range query instead of one connection per day.
+        events = self.plugin.report_store.list_events_range(
+            int(start_dt.timestamp()), int(time.time()) + 60, limit=2000
+        )
+        items: list[dict[str, Any]] = [
+            {
+                "id": event.get("id"),
+                "ts": event.get("ts"),
+                "day": event.get("day"),
+                "kind": event.get("kind"),
+                "name": event.get("name"),
+                "detail": str(event.get("detail") or "")[:200],
+                "status": event.get("status"),
+                "resolved_ts": event.get("resolved_ts"),
+            }
+            for event in events
+        ]
         items.sort(
             key=lambda item: (
                 int(item.get("ts") or 0),
@@ -468,6 +483,7 @@ class PageApi:
                 "days": days,
                 "items": items[:200],
                 "counts": counts,
+                "truncated": len(items) >= 2000,
             }
         )
 
@@ -482,6 +498,7 @@ class PageApi:
         if cached and now_ts - cached[0] < self._reports_cache_seconds:
             return jsonify(cached[1])
         view: dict[str, Any] = {}
+        build_failed = False
         try:
             builder = DailyReportBuilder(
                 plugin.report_store, plugin.config, redact=self._redactor().rules
@@ -499,6 +516,7 @@ class PageApi:
             )
         except Exception:
             logger.exception("插件页面聚合日报失败")
+            build_failed = True
         payload = {
             "ok": True,
             "day": view.get("day"),
@@ -513,5 +531,8 @@ class PageApi:
             "runs": plugin.report_store.list_report_runs(limit=30),
             "snapshots": plugin.report_store.list_snapshots(30),
         }
-        self._reports_cache = (now_ts, payload)
+        # Do not cache a failed build: a transient SQLite hiccup would pin
+        # an empty page for the whole cache window and block recovery.
+        if not build_failed:
+            self._reports_cache = (now_ts, payload)
         return jsonify(payload)

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .collectors import cfg_bool, cfg_get
+from .collectors import cfg_bool, cfg_float, cfg_get
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
 from .utils import normalize_targets
 
@@ -61,8 +61,11 @@ def _monitor_config_errors(config: Any) -> list[str]:
             try:
                 port = int(item.get("port") or 0)
             except (TypeError, ValueError):
+                problems.append(
+                    f"监测项「{name}」（TCP）端口不是数字（当前值 {item.get('port')!r}），无法探测"
+                )
                 continue
-            if port and not (1 <= port <= 65535):
+            if not (1 <= port <= 65535):
                 problems.append(f"监测项「{name}」（TCP）端口 {port} 超出 1–65535")
     return problems
 
@@ -134,4 +137,35 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "每周周报已启用，但推送目标为空（与每日日报共用），周报不会发送。",
             )
         )
+    if cfg_bool(config, "alerts.daily_summary.enabled", False) and not alerts_targets:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "daily_summary_no_targets",
+                "每日定时状态图已启用，但推送目标为空（与资源告警共用 alerts.targets），"
+                "到点后会静默跳过且当天不重试。",
+            )
+        )
+    if alerts_on:
+        # A threshold of 0 makes "value >= threshold" true for every sample:
+        # the rule fires once and then stays stuck in alerting forever.
+        for key, label in (
+            ("alerts.cpu_threshold", "CPU 使用率"),
+            ("alerts.mem_threshold", "内存使用率"),
+            ("alerts.swap_threshold", "SWAP 使用率"),
+            ("alerts.disk_threshold", "磁盘使用率"),
+            ("alerts.load_per_core_threshold", "每核负载"),
+        ):
+            try:
+                if cfg_float(config, key, 1.0) <= 0:
+                    issues.append(
+                        AuditIssue(
+                            "warning",
+                            "alert_threshold_zero",
+                            f"告警阈值「{label}」为 0：该规则会对每次采样告警并卡在告警态"
+                            "无法恢复。如需关闭该规则，请调高阈值而不是设为 0。",
+                        )
+                    )
+            except (TypeError, ValueError):
+                continue
     return issues

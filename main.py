@@ -331,8 +331,7 @@ class StatusCardPlugin(Star):
                     config=self.config,
                 )
                 png = await asyncio.to_thread(render_fallback_card, collected["view"])
-                path = self.data_dir / "statuscard_fallback.png"
-                await asyncio.to_thread(path.write_bytes, png)
+                path = self._write_fallback_card(png)
                 yield event.image_result(str(path))
                 return
             except Exception:
@@ -445,12 +444,28 @@ class StatusCardPlugin(Star):
                 config=self.config,
             )
             png = await asyncio.to_thread(render_fallback_card, collected["view"])
-            path = self.data_dir / "statuscard_fallback.png"
-            await asyncio.to_thread(path.write_bytes, png)
-            return str(path)
+            return str(self._write_fallback_card(png))
         except Exception:
             logger.exception("本地简化卡渲染失败")
             return None
+
+    def _write_fallback_card(self, png: bytes):
+        """Write the fallback card under a unique name.
+
+        The manual 查看状态 path and the scheduled daily image can hit the
+        same T2I outage concurrently; a fixed file name made them overwrite
+        each other's card. Old files are swept so the data dir does not grow.
+        """
+
+        path = self.data_dir / f"statuscard_fallback_{int(time.time() * 1000)}.png"
+        path.write_bytes(png)
+        try:
+            for old in self.data_dir.glob("statuscard_fallback_*.png"):
+                if old != path and old.stat().st_mtime < time.time() - 600:
+                    old.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("清理旧的本地简化卡文件失败")
+        return path
 
     async def render_report_image(self, view: dict) -> str:
         """Render a daily-report view through the same T2I options as the card."""
@@ -911,11 +926,6 @@ class StatusCardPlugin(Star):
             )
         else:
             lines.append("最近日报: 暂无发送记录")
-        telemetry_on = cfg_bool(self.config, "telemetry.enabled", False)
-        lines.append(
-            "匿名指标: "
-            + ("已开启（当前版本仅本地开关，不上报）" if telemetry_on else "未开启")
-        )
         lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
         yield event.plain_result("\n".join(lines))
 

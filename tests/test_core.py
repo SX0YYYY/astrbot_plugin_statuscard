@@ -156,7 +156,7 @@ def test_normalize_website_targets_defaults_and_clamping() -> None:
         ]
     )
     assert [x.name for x in sites] == ["A", "https://b.example"]
-    assert sites[0].timeout == 30.0
+    assert sites[0].timeout == 15.0
     assert sites[1].timeout == 3.0
 
 
@@ -778,3 +778,38 @@ def test_disk_io_first_call_only_primes_baseline(monkeypatch) -> None:
     assert collectors.disk_io() == []
     # Second call has a real baseline and returns whatever psutil reports.
     assert isinstance(collectors.disk_io(), list)
+
+
+def test_monitor_flags_non_numeric_tcp_port(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-numeric port is a config error, not a recurring outage."""
+
+    caplog.set_level("WARNING", logger="astrbot_plugin_statuscard")
+    monitor = _monitor(
+        tmp_path,
+        [{"__template_key": "tcp", "name": "字符串端口", "port": "abc"}],
+    )
+    assert len(monitor.items) == 1
+    assert monitor.items[0].get("config_error")
+    assert "1–65535" in caplog.text
+
+
+def test_alert_threshold_zero_disables_rule(tmp_path: Path) -> None:
+    """threshold=0 must not fire on every sample nor stick in alerting."""
+
+    state = StateStore(tmp_path / "state.json")
+    state.data["alerts"] = {"rules": {"cpu": {"count": 5, "alerting": True}}}
+    config = {
+        "alerts": {
+            "enabled": True,
+            "targets": ["123456"],
+            "sustain_samples": 1,
+            "cooldown_seconds": 1800,
+        }
+    }
+    engine = AlertEngine(_FailingPlugin(), state, config)
+    asyncio.run(engine._evaluate("cpu", "CPU", 3.2, 0.0, "%", "3.2%"))
+    rule = state.data["alerts"]["rules"]["cpu"]
+    assert rule["count"] == 0
+    assert rule["alerting"] is False

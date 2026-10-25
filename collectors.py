@@ -352,7 +352,9 @@ def _normalize_website_targets(raw: Any) -> list[WebsiteTarget]:
                 timeout = float(item.get("timeout_seconds") or 3.0)
             except (TypeError, ValueError):
                 timeout = 3.0
-            timeout = min(30.0, max(1.0, timeout))
+            # Keep in sync with the schema slider (1-15s); a wider clamp here
+            # would silently accept values the dashboard cannot express.
+            timeout = min(15.0, max(1.0, timeout))
             out.append(WebsiteTarget(name or url, url, timeout))
         elif isinstance(item, str):
             url = item.strip()

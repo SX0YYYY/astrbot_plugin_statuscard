@@ -180,3 +180,35 @@ def test_resolve_event_matches_kind_and_target(tmp_path: Path) -> None:
     assert store.resolve_event(4000, "同名", 4000, kind="service", target="t2")
     rows = store.list_events("2026-10-19", limit=10)
     assert {row["target"]: row["resolved_ts"] for row in rows}["t2"] == 4000
+
+
+def test_list_keeps_newest_rows_when_over_limit(tmp_path: Path) -> None:
+    """Over-limit windows must keep the NEWEST samples, oldest first.
+
+    The ASC variant used to return the oldest N rows, so a 30-day export
+    silently contained only the first week.
+    """
+
+    store = ReportStore(tmp_path / "report.db")
+    base = 1_700_000_000
+    for i in range(7):
+        store.add_resource(
+            base + i,
+            cpu=float(i),
+            ram=1.0,
+            swap=1.0,
+            disk=1.0,
+            load1=0.0,
+            net_up=0.0,
+            net_down=0.0,
+            disk_read=0.0,
+            disk_write=0.0,
+        )
+    rows = store.list_resources(base, limit=5)
+    assert [r["ts"] for r in rows] == [base + 2, base + 3, base + 4, base + 5, base + 6]
+    assert rows[0]["cpu"] == 2.0
+
+    for i in range(5):
+        store.add_event(base + i, "2026-10-19", "service", "Nginx", "d", "alert", "t")
+    events = store.list_events_range(base, base + 10, limit=3)
+    assert [e["ts"] for e in events] == [base + 2, base + 3, base + 4]

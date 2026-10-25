@@ -43,24 +43,42 @@ TRACK = (51, 65, 85)  # ring background
 
 _FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
-# Same discovery order as AstrBot's own local T2I strategy: a user-provided
-# font first, then the common CJK system fonts, then PIL's fallback.
+# Discovery order matches AstrBot's own local T2I strategy: a user-provided
+# font first (AstrBot data dir), then the common CJK system fonts, then
+# PIL's fallback. DejaVuSans is deliberately absent: it ships on most bare
+# Linux servers but has no CJK glyphs, so "finding" it would render every
+# Chinese label as tofu boxes.
 _FONT_CANDIDATES = (
     "msyh.ttc",  # Windows
     "NotoSansCJK-Regular.ttc",  # Linux
     "NotoSansSC-Regular.otf",  # Linux (distro dependent name)
+    "NotoSansSC-Regular.ttf",  # Linux (seen on Ubuntu with fonts-noto-sc)
+    "wqy-zenhei.ttc",  # Linux (fonts-wqy-zenhei, Debian/Ubuntu default CJK)
     "msyhbd.ttc",  # Windows
     "PingFang.ttc",  # macOS
     "Heiti.ttc",  # macOS
-    "DejaVuSans.ttf",  # generic
 )
+
+
+def _custom_font_path() -> str | None:
+    """AstrBot's conventional custom font location: <data dir>/font.ttf."""
+
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+        return os.path.join(get_astrbot_data_path(), "font.ttf")
+    except Exception:
+        return None
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     cached = _FONT_CACHE.get(size)
     if cached is not None:
         return cached
-    for name in _FONT_CANDIDATES:
+    custom = _custom_font_path()
+    attempts = [custom] if custom else []
+    attempts.extend(_FONT_CANDIDATES)
+    for name in attempts:
         try:
             font = ImageFont.truetype(name, size)
             _FONT_CACHE[size] = font
@@ -69,14 +87,13 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             logger.debug("本地简化卡字体 %s 不可用，尝试下一个候选", name)
             continue
     try:
-        custom = os.path.join(os.path.expanduser("~"), ".astrbot", "data", "font.ttf")
-        font = ImageFont.truetype(custom, size)
-        _FONT_CACHE[size] = font
-        return font
-    except Exception:
+        # Pillow >= 10.1 supports sized default fonts; older bitmapped
+        # fallbacks reject the argument, so fall back to the plain call.
+        font = ImageFont.load_default(size=size)
+    except TypeError:
         font = ImageFont.load_default()
-        _FONT_CACHE[size] = font
-        return font
+    _FONT_CACHE[size] = font
+    return font
 
 
 def _percent_color(percent: float) -> tuple[int, int, int]:

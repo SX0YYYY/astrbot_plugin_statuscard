@@ -523,15 +523,18 @@ class ReportStore:
         return [dict(zip(keys, row)) for row in rows]
 
     def list_resources(self, since_ts: int, limit: int = 20000) -> list[dict[str, Any]]:
+        # DESC + reverse keeps the NEWEST rows when the window exceeds the
+        # limit; ASC would silently drop the most recent samples instead.
         rows = self._query(
             """
             SELECT ts, cpu, ram, swap, disk, load1, net_up, net_down,
                    disk_read, disk_write
             FROM resource_samples WHERE ts >= ?
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts DESC LIMIT ?
             """,
             (int(since_ts), max(1, min(100000, limit))),
         )
+        rows = list(reversed(rows or []))
         keys = (
             "ts",
             "cpu",
@@ -577,7 +580,7 @@ class ReportStore:
             SELECT ts, metric, rank, name, pid, cpu, mem_mb
             FROM process_samples
             WHERE metric = ? AND ts >= ? AND ts < ?
-            ORDER BY ts ASC, rank ASC LIMIT ?
+            ORDER BY ts DESC, rank DESC LIMIT ?
             """,
             (
                 str(metric),
@@ -586,6 +589,7 @@ class ReportStore:
                 max(1, min(200000, limit)),
             ),
         )
+        rows = list(reversed(rows or []))
         keys = ("ts", "metric", "rank", "name", "pid", "cpu", "mem_mb")
         return [dict(zip(keys, row)) for row in rows]
 
@@ -623,18 +627,18 @@ class ReportStore:
 
         One range query replaces the per-day loop the export used to run,
         which opened a fresh SQLite connection (with its pragma + chmod
-        work) for every day of the window.
+        work) for every day of the window. DESC + reverse keeps the newest
+        events when the window exceeds the limit.
         """
 
         rows = self._query(
             """
             SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
-            FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT ?
+            FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             (int(start_ts), int(end_ts), max(1, min(200000, limit))),
         )
-        if rows is None:
-            return []
+        rows = list(reversed(rows or []))
         keys = (
             "id",
             "ts",

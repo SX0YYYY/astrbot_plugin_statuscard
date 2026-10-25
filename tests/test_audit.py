@@ -113,3 +113,40 @@ def test_disabled_monitor_items_are_not_reported() -> None:
         )
     )
     assert [issue for issue in issues if issue.code == "monitor_item_config"] == []
+
+
+def test_tcp_non_numeric_port_is_flagged() -> None:
+    config = _config(
+        monitors={
+            "enabled": True,
+            "items": [
+                {
+                    "__template_key": "tcp",
+                    "name": "坏端口",
+                    "host": "127.0.0.1",
+                    "port": "abc",
+                },
+            ],
+        }
+    )
+    config["alerts"]["targets"] = ["123456"]
+    issues = run_audit(config)
+    assert any(
+        issue.code == "monitor_item_config" and "不是数字" in issue.message
+        for issue in issues
+    )
+
+
+def test_zero_threshold_is_flagged() -> None:
+    config = _config(alerts={"enabled": True, "cpu_threshold": 0})
+    config["alerts"]["targets"] = ["123456"]
+    issues = run_audit(config)
+    matches = [i for i in issues if i.code == "alert_threshold_zero"]
+    assert matches and matches[0].level == "warning"
+    assert "CPU" in matches[0].message
+
+
+def test_daily_summary_without_targets_is_flagged() -> None:
+    config = _config(alerts={"enabled": False, "daily_summary": {"enabled": True}})
+    issues = run_audit(config)
+    assert any(i.code == "daily_summary_no_targets" for i in issues)

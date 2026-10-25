@@ -355,11 +355,21 @@ class DailyReporter:
             saved = {}
         if not isinstance(saved, dict):
             saved = {}
+
+        def _safe_int(value: Any, default: int = 0) -> int:
+            # A hand-edited state.json can hold anything; a ValueError here
+            # would abort plugin loading, so stay defensive like the float
+            # fields below.
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return default
+
         self._last_sent_day = saved.get("last_sent_day") or None
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
-        self._pending_retry_count = int(saved.get("pending_retry_count") or 0)
+        self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = saved.get("pending_retry_day") or None
-        self._weekly_retry_count = int(saved.get("weekly_retry_count") or 0)
+        self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
         pending = saved.get("pending_retry")
         if isinstance(pending, dict) and pending.get("day") is not None:
             try:
@@ -590,7 +600,16 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._pending_retry = None
-                    await self._send_scheduled()
+                    try:
+                        await self._send_scheduled()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # An unexpected error must not eat this retry slot;
+                        # put the day back on the retry plan.
+                        logger.exception("日报重试发送意外失败，重新排入重试")
+                        if _day and not self._schedule_retry(_day):
+                            await self._notify_give_up(self._targets(), _day)
                     await asyncio.sleep(60)
                     continue
                 time_text = self._time_text()
@@ -670,7 +689,16 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._weekly_pending = None
-                    await self._send_weekly_scheduled()
+                    try:
+                        await self._send_weekly_scheduled()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("周报重试发送意外失败，重新排入重试")
+                        if not self._schedule_weekly_retry():
+                            await self._notify_give_up(
+                                self._targets(), "--", weekly=True
+                            )
                     await asyncio.sleep(60)
                     continue
                 time_text = self._weekly_time_text()

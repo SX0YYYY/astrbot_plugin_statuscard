@@ -180,7 +180,10 @@ class Sampler:
         await asyncio.sleep(1.0)
         while True:
             try:
-                self.sample()
+                # The sample pass reads the message_stats JSON files from
+                # disk; run it off the event loop so large deployments do
+                # not stall message handling every interval.
+                await asyncio.to_thread(self.sample)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -202,7 +205,9 @@ class Sampler:
             last_sent = int(net.get("last_sent") or 0)
             last_recv = int(net.get("last_recv") or 0)
 
-            dt = max(1e-6, now - last_ts)
+            # A wall-clock step back (NTP correction) would make dt tiny and
+            # blow the rate up a millionfold; the interval is >= 15s anyway.
+            dt = max(1.0, now - last_ts)
             sent_delta = max(0, int(counters.bytes_sent) - last_sent)
             recv_delta = max(0, int(counters.bytes_recv) - last_recv)
             up_rate = sent_delta / dt
@@ -242,7 +247,8 @@ class Sampler:
             last_ts = float(disk.get("last_ts") or now)
             last_read = int(disk.get("last_read") or 0)
             last_write = int(disk.get("last_write") or 0)
-            dt = max(1e-6, now - last_ts)
+            # See _sample_network: keep the rate sane across clock steps.
+            dt = max(1.0, now - last_ts)
             read_rate = max(0, int(counters.read_bytes) - last_read) / dt
             write_rate = max(0, int(counters.write_bytes) - last_write) / dt
             disk["last_ts"] = now
@@ -281,10 +287,3 @@ class Sampler:
             recv["available"] = True
             recv["source_updated_at"] = source_updated
         recv["updated_at"] = now
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "net": dict(self.state.get("net", {}) or {}),
-            "disk_io": dict(self.state.get("disk_io", {}) or {}),
-            "recv": dict(self.state.get("recv", {}) or {}),
-        }

@@ -558,6 +558,7 @@
     const range = state.historyRange || "7d";
     const kinds = ["resources", "processes", "websites", "events"];
     let exported = 0;
+    let truncated = false;
     for (const kind of kinds) {
       const data = await bridge.apiGet("export", { kind, range });
       if (!data || !data.ok) {
@@ -569,9 +570,13 @@
             }),
         );
       }
+      if (data.truncated) truncated = true;
       if ((data.rows || []).length) exported += 1;
       downloadCsv(kind, range, data.rows || []);
       await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (truncated) {
+      toast(t("export_truncated", "数据量超出上限，仅导出最近的记录"));
     }
     toast(
       exported
@@ -605,6 +610,9 @@
   async function loadHistory() {
     const data = await apiGet("history", { range: state.historyRange });
     $("network-note").textContent = data.network_note || "";
+    if (data.truncated) {
+      toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
+    }
     const points = data.points || [];
     const labels = points.map((point) =>
       labelForTs(point.ts, state.historyRange),

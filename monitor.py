@@ -104,8 +104,10 @@ class ServiceMonitor:
                 config_error = f"缺少 {required} 配置"
             elif kind == "tcp":
                 port = cfg_int(item, "port", 0)
-                if port and not (1 <= port <= 65535):
-                    config_error = f"端口 {port} 超出 1–65535"
+                # cfg_int swallows a non-numeric port into 0; both cases are
+                # config errors, not outages.
+                if not (1 <= port <= 65535):
+                    config_error = f"端口 {item.get('port')!r} 不是有效的 1–65535 端口"
             if config_error:
                 # A misconfigured probe would fail on every round and hit the
                 # alert cooldown as a fake "service down"; keep it visible as
