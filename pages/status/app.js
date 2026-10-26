@@ -6,6 +6,9 @@
     historyRange: "24h",
     eventDays: "1",
     loaded: new Set(),
+    timezone: "",
+    historySeq: 0,
+    eventsSeq: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -134,38 +137,50 @@
     return formatBytes(value) + "/s";
   }
 
+  function safeDate(ts) {
+    const number = Number(ts);
+    return Number.isFinite(number) ? new Date(number * 1000) : null;
+  }
+
   function formatTime(ts) {
-    const date = new Date(Number(ts) * 1000);
+    const date = safeDate(ts);
+    if (!date) return "--";
     return date.toLocaleTimeString(currentLocale(), {
       hour12: false,
       hour: "2-digit",
       minute: "2-digit",
+      timeZone: state.timezone || undefined,
     });
   }
 
   function formatDateTime(ts) {
-    const date = new Date(Number(ts) * 1000);
+    const date = safeDate(ts);
+    if (!date) return "--";
     return date.toLocaleString(currentLocale(), {
       hour12: false,
       month: "2-digit",
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      timeZone: state.timezone || undefined,
     });
   }
 
   function labelForTs(ts, range) {
-    const date = new Date(Number(ts) * 1000);
+    const date = safeDate(ts);
+    if (!date) return "--";
     if (range === "24h") {
       return date.toLocaleTimeString(currentLocale(), {
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
+        timeZone: state.timezone || undefined,
       });
     }
     return date.toLocaleDateString(currentLocale(), {
       month: "2-digit",
       day: "2-digit",
+      timeZone: state.timezone || undefined,
     });
   }
 
@@ -372,6 +387,7 @@
 
   async function loadOverview() {
     const data = await apiGet("overview");
+    if (data.timezone) state.timezone = String(data.timezone);
     const cpu = data.cpu || {};
     const memory = data.memory || {};
     const swap = data.swap || {};
@@ -589,7 +605,10 @@
     if (!rows.length) return;
     const headers = Object.keys(rows[0]);
     const esc = (value) => {
-      const text = value === null || value === undefined ? "" : String(value);
+      let text = value === null || value === undefined ? "" : String(value);
+      // Excel/WPS executes a cell starting with =,+,-,@ as a formula, and
+      // event details can carry text returned by probed services.
+      if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
       return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     };
     const lines = [headers.join(",")];
@@ -608,8 +627,19 @@
   }
 
   async function loadHistory() {
+    const seq = ++state.historySeq;
     const data = await apiGet("history", { range: state.historyRange });
-    $("network-note").textContent = data.network_note || "";
+    if (seq !== state.historySeq) return;
+    const noteKind = data.network_note_kind;
+    $("network-note").textContent =
+      noteKind === "redacted"
+        ? t("network_note_redacted", "已按脱敏配置隐藏网络数据。")
+        : noteKind === "state"
+          ? t(
+              "network_note_state",
+              "网络折线来自插件 state.json，最多保留最近 180 个采样点。",
+            )
+          : data.network_note || "";
     if (data.truncated) {
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
     }
@@ -699,11 +729,13 @@
   }
 
   async function loadEvents() {
+    const seq = ++state.eventsSeq;
     const data = await apiGet("events", { days: state.eventDays });
+    if (seq !== state.eventsSeq) return;
     const items = data.items || [];
     const counts = data.counts || {};
-    const summary = Object.keys(counts)
-      .map((key) => statusText(key) + " " + counts[key])
+    const summary = ["alert", "recovery", "failed"]
+      .map((key) => statusText(key) + " " + (counts[key] ?? 0))
       .join(" · ");
     const summaryBox = $("event-summary");
     if (summaryBox) summaryBox.textContent = summary;

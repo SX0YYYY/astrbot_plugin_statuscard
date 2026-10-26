@@ -270,6 +270,10 @@ class PageApi:
             {
                 "ok": True,
                 "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "timezone": str(
+                    cfg_get(plugin.config, "display.timezone", "Asia/Shanghai")
+                    or "Asia/Shanghai"
+                ),
                 "host": self._host(),
                 "platform": self._platform(),
                 "astrbot_version": self._astrbot_version(),
@@ -410,6 +414,7 @@ class PageApi:
         if network_redacted:
             net_points: list[dict[str, Any]] = []
             network_note = "已按脱敏配置隐藏网络数据。"
+            network_note_kind = "redacted"
         else:
             net_points = [
                 {
@@ -421,6 +426,7 @@ class PageApi:
                 if isinstance(item, (list, tuple)) and len(item) >= 3
             ]
             network_note = "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
+            network_note_kind = "state"
         return jsonify(
             {
                 "ok": True,
@@ -429,6 +435,7 @@ class PageApi:
                 "network": net_points,
                 "network_redacted": network_redacted,
                 "network_note": network_note,
+                "network_note_kind": network_note_kind,
                 "truncated": truncated,
             }
         )

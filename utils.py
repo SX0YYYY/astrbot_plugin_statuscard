@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from astrbot.api import logger
+
 
 @dataclass
 class CpuFreq:
@@ -69,6 +71,27 @@ def is_supported_platform(name: object) -> bool:
 
 
 RETRY_DELAYS = (30.0, 120.0, 600.0)
+
+
+def clamp_config(value: float, low: float, high: float, label: str):
+    """Clamp a configured number to the range the settings page can express.
+
+    A hand-edited JSON can hold values outside the slider range; the clamped
+    value still takes effect, but a warning says so once instead of letting
+    runtime behaviour silently diverge from what the page shows.
+    """
+
+    clamped = max(low, min(high, value))
+    if clamped != value:
+        logger.warning(
+            "%s=%s 超出配置页范围 %s–%s，已按 %s 生效",
+            label,
+            value,
+            low,
+            high,
+            clamped,
+        )
+    return clamped
 
 
 def retry_delay(attempt: int) -> float:

@@ -162,12 +162,22 @@ class DeliveryService:
         label = "图片" if payload.get("image") else "消息"
         for attempt in range(3):
             try:
-                sent = await self.context.send_message(
-                    target, self._build_chain(payload)
+                # Bound the framework path as well: a half-open WebSocket can
+                # otherwise park a monitor/alert/daily loop on this await.
+                sent = await asyncio.wait_for(
+                    self.context.send_message(target, self._build_chain(payload)),
+                    timeout=60,
                 )
                 if sent:
                     return True
                 logger.warning("主动%s未找到匹配平台: %s", label, target)
+                return False
+            except TimeoutError:
+                logger.warning(
+                    "主动发送%s到 %s 超时（60 秒，可能已送达，不再重发以免重复）",
+                    label,
+                    target,
+                )
                 return False
             except Exception as exc:
                 detail = str(exc) or exc.__class__.__name__

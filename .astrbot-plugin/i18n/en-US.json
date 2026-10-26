@@ -114,7 +114,9 @@
                 "refresh_done_short": "Updated",
                 "refresh_failed_short": "Failed",
                 "export_truncated": "Volume exceeded the cap; only the most recent records were exported",
-                "history_truncated": "Range data exceeded the cap; only the most recent records are shown"
+                "history_truncated": "Range data exceeded the cap; only the most recent records are shown",
+                "network_note_redacted": "Network data is hidden by the dashboard redaction setting.",
+                "network_note_state": "The network chart comes from the plugin's state.json (last 180 samples)."
             }
         }
     }

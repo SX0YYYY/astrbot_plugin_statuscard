@@ -22,15 +22,48 @@ class ReportStore:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.available = False
+        self.init_error: str | None = None
+        self._write_failures = 0
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._init_db()
+            self._init_db_with_recovery()
             self._secure_permissions()
             self.available = True
             logger.info("日报数据库已就绪: %s", self.path)
         except Exception:
             logger.exception("初始化日报数据库失败，历史数据将不可用")
+            self.init_error = "初始化失败（详见日志）"
+
+    def _init_db_with_recovery(self) -> None:
+        """Create the schema; rebuild the file when it is truly corrupt.
+
+        A half-written database (power loss, full disk) raises
+        ``sqlite3.DatabaseError`` on every query, and the old behaviour left
+        the plugin silently dropping all samples forever. Only that error
+        class triggers the destructive path (rename aside, then rebuild);
+        permission or I/O errors keep the file untouched.
+        """
+
+        try:
+            self._init_db()
+            return
+        except sqlite3.DatabaseError as exc:
+            logger.warning("日报数据库疑似损坏（%s），尝试改名重建", exc)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        for suffix in ("", "-wal", "-shm"):
+            source = self.path.with_name(self.path.name + suffix)
+            if not source.exists():
+                continue
+            target = backup.with_name(backup.name + suffix)
+            try:
+                os.replace(source, target)
+            except Exception:
+                logger.exception("损坏数据库改名失败: %s", source)
+                raise
+        self._init_db()
+        logger.warning("已重建日报数据库，原损坏文件保留为 %s", backup)
 
     def _secure_permissions(self) -> None:
         """Restrict the database and its WAL side files to the owner.
@@ -53,8 +86,14 @@ class ReportStore:
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=5)
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            # A failed connect would otherwise keep the file locked, which
+            # blocks the rename used by the corruption recovery path.
+            con.close()
+            raise
         # The WAL side files may have just been created by the pragma above.
         self._secure_permissions()
         return con
@@ -149,6 +188,24 @@ class ReportStore:
         finally:
             con.close()
 
+    @staticmethod
+    def _is_corruption(exc: BaseException) -> bool:
+        """A damaged database file, as opposed to a transient lock/busy."""
+
+        message = str(exc).lower()
+        if any(word in message for word in ("locked", "busy")):
+            return False
+        return any(
+            word in message
+            for word in (
+                "not a database",
+                "malformed",
+                "encrypted",
+                "corrupt",
+                "disk image",
+            )
+        )
+
     def _write(self, sql: str, params: tuple[Any, ...] = ()) -> bool:
         if not self.available:
             return False
@@ -158,14 +215,26 @@ class ReportStore:
                 con = self._connect()
                 con.execute(sql, params)
                 con.commit()
+                self._write_failures = 0
                 return True
-            except Exception:
+            except Exception as exc:
                 if con is not None:
                     try:
                         con.rollback()
                     except Exception:
                         pass
                 logger.exception("日报数据库写入失败")
+                self._write_failures += 1
+                if self._is_corruption(exc) or self._write_failures >= 3:
+                    # A run of failures (or a provably corrupt file) gets one
+                    # rebuild attempt instead of silently dropping data until
+                    # an operator restarts the plugin.
+                    try:
+                        self._init_db_with_recovery()
+                        self._write_failures = 0
+                        logger.warning("日报数据库已重建，后续写入将重试")
+                    except Exception:
+                        logger.exception("日报数据库重建失败")
                 return False
             finally:
                 if con is not None:
@@ -266,9 +335,15 @@ class ReportStore:
                 groups = excluded.groups,
                 members = excluded.members,
                 recv_total = excluded.recv_total,
-                complete = excluded.complete,
+                -- A backfill of a late recv_total must not downgrade a
+                -- complete snapshot back to incomplete.
+                complete = MAX(daily_snapshots.complete, excluded.complete),
                 captured_at = excluded.captured_at
             WHERE daily_snapshots.complete = 0
+               OR (
+                    daily_snapshots.recv_total IS NULL
+                    AND excluded.recv_total IS NOT NULL
+               )
             """,
             (
                 day,
@@ -318,30 +393,67 @@ class ReportStore:
         kind: str | None = None,
         target: str | None = None,
     ) -> bool:
-        """Mark the open alerts of ``name`` as resolved.
+        """Mark the newest open alert of ``name`` as resolved.
 
         The alert engine calls this when a condition clears, so the report
         can show how long the interruption lasted even after a restart.
         ``kind``/``target`` narrow the match when two monitor items share a
         name, so one item's recovery cannot close the other's open alert.
+        Only the NEWEST matching alert is closed: one recovery cannot end
+        two interruptions, and an older orphan alert (e.g. its recovery was
+        lost to a reload) must not inherit the newer interruption's duration.
         """
 
-        sql = """
+        conditions = ["resolved_ts IS NULL", "status = 'alert'", "name = ?", "ts <= ?"]
+        case_params: list[Any] = [name, int(ts)]
+        if kind is not None:
+            conditions.append("kind = ?")
+            case_params.append(kind)
+        if target is not None:
+            conditions.append("target = ?")
+            case_params.append(target)
+        cond_sql = " AND ".join(conditions)
+        sql = f"""
             UPDATE events
             SET resolved_ts = ?
-            WHERE resolved_ts IS NULL
-              AND status = 'alert'
-              AND name = ?
-              AND ts <= ?
+            WHERE {cond_sql}
+              AND ts = (SELECT MAX(ts) FROM events WHERE {cond_sql})
         """
-        params: list[Any] = [int(resolved_ts), name, int(ts)]
-        if kind is not None:
-            sql += " AND kind = ?"
-            params.append(kind)
-        if target is not None:
-            sql += " AND target = ?"
-            params.append(target)
-        return self._write(sql, tuple(params))
+        return self._write(sql, (int(resolved_ts), *case_params, *case_params))
+
+    def list_unresolved_alerts(
+        self, before_ts: int, since_ts: int, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Alerts that never got a resolved_ts, started between the bounds.
+
+        Used by the daily report so an interruption that began days ago (and
+        is therefore outside the report window) is still visible instead of
+        looking like "no anomalies".
+        """
+
+        rows = self._query(
+            """
+            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            FROM events
+            WHERE status = 'alert' AND resolved_ts IS NULL
+              AND ts >= ? AND ts < ?
+            ORDER BY ts DESC LIMIT ?
+            """,
+            (int(since_ts), int(before_ts), max(1, min(500, limit))),
+        )
+        rows = list(reversed(rows or []))
+        keys = (
+            "id",
+            "ts",
+            "day",
+            "kind",
+            "name",
+            "target",
+            "detail",
+            "status",
+            "resolved_ts",
+        )
+        return [dict(zip(keys, row)) for row in rows]
 
     def add_website_samples(self, ts: int, samples: list[dict[str, Any]]) -> bool:
         rows = []

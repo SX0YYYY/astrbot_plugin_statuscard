@@ -364,6 +364,9 @@ class DailyReportBuilder:
             "anomaly_count": (
                 anomalies.get("count", 0) if "anomaly" in sections else "未开启"
             ),
+            "unresolved_count": (
+                anomalies.get("unresolved", 0) if "anomaly" in sections else "未开启"
+            ),
             "token_total_text": (
                 token.get("total_text", "暂无数据") if "token" in sections else "未开启"
             ),
@@ -635,6 +638,45 @@ class DailyReportBuilder:
                     "duration": duration_text,
                 }
             )
+        # An interruption that began before the window and never got a
+        # resolved timestamp (e.g. its recovery notice was lost to a reload)
+        # would otherwise read as "no anomalies". Surface it explicitly, but
+        # skip names that already show a recovery inside the window.
+        window_start_dt = datetime.combine(
+            day - timedelta(days=span - 1), time.min, tzinfo=self.tz
+        )
+        window_start_ts = int(window_start_dt.timestamp())
+        recovered_names = {
+            str(event.get("name") or "")
+            for event in events
+            if str(event.get("status") or "") == "recovery"
+        }
+        stale: dict[str, dict[str, Any]] = {}
+        for alert in self.store.list_unresolved_alerts(
+            window_start_ts, window_start_ts - 30 * 86400, limit=50
+        ):
+            name = str(alert.get("name") or "")
+            if not name or name in recovered_names:
+                continue
+            # Oldest start per name wins ("ongoing since ...").
+            if name not in stale:
+                stale[name] = alert
+        unresolved_items: list[dict[str, Any]] = []
+        for alert in stale.values():
+            started = datetime.fromtimestamp(int(alert.get("ts") or 0), self.tz)
+            unresolved_items.append(
+                {
+                    "time": started.strftime("%m-%d %H:%M"),
+                    "kind": self._kind_text(str(alert.get("kind") or "")),
+                    "name": str(alert.get("name") or "--"),
+                    "status": "未恢复",
+                    "status_key": "alert",
+                    "detail": "开始于此处，未记录恢复时刻（可能已恢复）",
+                    "duration": "进行中",
+                }
+            )
+        if unresolved_items:
+            items = unresolved_items + items
         return {
             "available": bool(items),
             "empty_reason": (
@@ -643,6 +685,7 @@ class DailyReportBuilder:
             if not items
             else None,
             "count": count,
+            "unresolved": len(unresolved_items),
             "total": len(items),
             "items": items[:20],
             "normal": {
@@ -869,10 +912,13 @@ class DailyReportBuilder:
                 SELECT substr(timestamp, 1, 10) AS day, SUM(count)
                 FROM platform_stats
                 WHERE platform_id = 'aiocqhttp'
-                  AND substr(timestamp, 1, 10) BETWEEN ? AND ?
+                  AND timestamp >= ? AND timestamp < ?
                 GROUP BY day
                 """,
-                (start_day.isoformat(), end_day.isoformat()),
+                (
+                    f"{start_day.isoformat()} 00:00:00",
+                    f"{(end_day + timedelta(days=1)).isoformat()} 00:00:00",
+                ),
             ).fetchall()
             min_row = connection.execute(
                 """
@@ -1237,13 +1283,13 @@ class DailyReportBuilder:
                 SELECT created_at, status, provider_model,
                        token_input_other, token_input_cached, token_output
                 FROM provider_stats
-                WHERE date(created_at) BETWEEN ? AND ?
+                WHERE created_at >= ? AND created_at < ?
                 ORDER BY created_at DESC
                 LIMIT 20000
                 """,
                 (
-                    (start_day - timedelta(days=2)).isoformat(),
-                    (end_day + timedelta(days=2)).isoformat(),
+                    f"{(start_day - timedelta(days=2)).isoformat()} 00:00:00",
+                    f"{(end_day + timedelta(days=3)).isoformat()} 00:00:00",
                 ),
             ).fetchall()
             min_row = connection.execute(
@@ -1290,7 +1336,10 @@ def build_report_text(view: dict[str, Any]) -> str:
             lines.append(f"资源: {resources.get('empty_reason') or '暂无数据'}")
     anomalies = view.get("anomalies") or {}
     if "anomaly" in sections:
-        lines.append(f"异常/失败: {anomalies.get('count', 0)} 次")
+        line = f"异常/失败: {anomalies.get('count', 0)} 次"
+        if anomalies.get("unresolved"):
+            line += f"（另有 {anomalies['unresolved']} 项未恢复）"
+        lines.append(line)
     qq = view.get("qq") or {}
     if "qq" in sections:
         if not qq.get("available", True):

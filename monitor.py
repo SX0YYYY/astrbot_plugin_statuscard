@@ -12,7 +12,7 @@ from astrbot.api import logger
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
 from .state import StateStore
-from .utils import normalize_targets, redact_url, retry_delay
+from .utils import clamp_config, normalize_targets, redact_url, retry_delay
 
 KIND_LABELS = {
     "http": "HTTP",
@@ -55,11 +55,17 @@ class ServiceMonitor:
         self.config = config
         self.report_store = report_store
         self.enabled = cfg_bool(config, "monitors.enabled", False)
-        self.interval = max(
-            15, min(3600, cfg_int(config, "monitors.interval_seconds", 60))
+        self.interval = clamp_config(
+            cfg_int(config, "monitors.interval_seconds", 60),
+            15,
+            600,
+            "monitors.interval_seconds",
         )
-        self.fail_threshold = max(
-            1, min(100, cfg_int(config, "monitors.fail_threshold", 2))
+        self.fail_threshold = clamp_config(
+            cfg_int(config, "monitors.fail_threshold", 2),
+            1,
+            10,
+            "monitors.fail_threshold",
         )
         self.cooldown = max(
             0, min(86400, cfg_int(config, "monitors.cooldown_seconds", 1800))

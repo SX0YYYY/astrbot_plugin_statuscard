@@ -90,7 +90,8 @@ class Sampler:
     ):
         self.state = state
         self.config = config
-        self.interval_seconds = max(15, int(interval_seconds or 60))
+        # Keep in sync with the display.sample_seconds slider (15-600).
+        self.interval_seconds = max(15, min(600, int(interval_seconds or 60)))
         self.history_size = max(30, int(history_size or 180))
         self._task: asyncio.Task | None = None
         self._proc_task: asyncio.Task | None = None

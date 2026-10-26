@@ -335,6 +335,12 @@ class DailyReporter:
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._weekly_last_sent_week: str | None = None
+        # Render retries: a short T2I outage should not turn the report into
+        # text. The attempts and the next retry time survive reloads too.
+        self._image_retry_attempts = 0
+        self._pending_image_retry: float | None = None
+        self._weekly_image_attempts = 0
+        self._weekly_image_pending: float | None = None
         # Retry plans and de-dup markers used to live only in memory, so a
         # plugin reload (which every config save triggers) dropped a queued
         # retry — the weekly report could silently vanish for the whole week.
@@ -386,6 +392,18 @@ class DailyReporter:
             self._weekly_pending = float(weekly_pending) if weekly_pending else None
         except (TypeError, ValueError):
             self._weekly_pending = None
+        self._image_retry_attempts = _safe_int(saved.get("image_retry_attempts"))
+        self._weekly_image_attempts = _safe_int(saved.get("weekly_image_attempts"))
+        for attribute, key in (
+            ("_pending_image_retry", "pending_image_retry"),
+            ("_weekly_image_pending", "weekly_image_pending"),
+        ):
+            raw = saved.get(key)
+            try:
+                value = float(raw) if raw else None
+            except (TypeError, ValueError):
+                value = None
+            setattr(self, attribute, value)
 
     def _save_delivery_state(self) -> None:
         state = getattr(getattr(self, "plugin", None), "state", None)
@@ -408,6 +426,10 @@ class DailyReporter:
                     "weekly_last_sent_week": self._weekly_last_sent_week,
                     "weekly_pending": self._weekly_pending,
                     "weekly_retry_count": self._weekly_retry_count,
+                    "image_retry_attempts": self._image_retry_attempts,
+                    "pending_image_retry": self._pending_image_retry,
+                    "weekly_image_attempts": self._weekly_image_attempts,
+                    "weekly_image_pending": self._weekly_image_pending,
                 },
             )
             state.save()
@@ -594,6 +616,20 @@ class DailyReporter:
                     await asyncio.sleep(60)
                     continue
                 self._disabled_logged = False
+                if self._pending_image_retry is not None:
+                    if time.time() < self._pending_image_retry:
+                        await asyncio.sleep(60)
+                        continue
+                    self._pending_image_retry = None
+                    self._save_delivery_state()
+                    try:
+                        await self._send_scheduled()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("日报图片重试意外失败")
+                    await asyncio.sleep(60)
+                    continue
                 if self._pending_retry:
                     _day, due = self._pending_retry
                     if time.time() < due:
@@ -682,6 +718,20 @@ class DailyReporter:
             try:
                 if not self._weekly_enabled():
                     self._weekly_next_run_text = None
+                    await asyncio.sleep(60)
+                    continue
+                if self._weekly_image_pending is not None:
+                    if time.time() < self._weekly_image_pending:
+                        await asyncio.sleep(60)
+                        continue
+                    self._weekly_image_pending = None
+                    self._save_delivery_state()
+                    try:
+                        await self._send_weekly_scheduled()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("周报图片重试意外失败")
                     await asyncio.sleep(60)
                     continue
                 if self._weekly_pending is not None:
@@ -799,7 +849,18 @@ class DailyReporter:
             try:
                 image_url = await self.plugin.render_report_image(view)
             except Exception:
-                logger.exception("周报渲染失败，回退文字摘要")
+                logger.exception("周报渲染失败")
+            if image_url is None and self._weekly_image_attempts < 2:
+                # Same short-outage policy as the daily report: retry the
+                # render twice before degrading to text.
+                self._weekly_image_attempts += 1
+                self._weekly_image_pending = time.time() + 600
+                self._save_delivery_state()
+                logger.warning(
+                    "周报图片渲染失败，10 分钟后重试第 %d/2 次；仍失败将发送文字版",
+                    self._weekly_image_attempts,
+                )
+                return
             if image_url and await self.plugin.send_image(
                 targets, image_url, source="weekly_report"
             ):
@@ -807,6 +868,8 @@ class DailyReporter:
                 self._record(day, True, "weekly-image")
                 self._weekly_pending = None
                 self._weekly_retry_count = 0
+                self._weekly_image_attempts = 0
+                self._weekly_image_pending = None
                 self._save_delivery_state()
                 logger.info("周报已发送（图片）：%s", targets)
                 return
@@ -817,6 +880,8 @@ class DailyReporter:
             self._record(day, True, "weekly-text")
             self._weekly_pending = None
             self._weekly_retry_count = 0
+            self._weekly_image_attempts = 0
+            self._weekly_image_pending = None
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         else:
@@ -916,12 +981,27 @@ class DailyReporter:
             try:
                 image_url = await self.plugin.render_report_image(view)
             except Exception:
-                logger.exception("日报渲染失败，回退文字摘要")
+                logger.exception("日报渲染失败")
+            if image_url is None and self._image_retry_attempts < 2:
+                # The T2I endpoints fail in short bursts (seen twice right on
+                # 21:00). Silently retry the render twice, ten minutes apart,
+                # before falling back to text: a short outage should still
+                # deliver the image rather than a text-only report.
+                self._image_retry_attempts += 1
+                self._pending_image_retry = time.time() + 600
+                self._save_delivery_state()
+                logger.warning(
+                    "日报图片渲染失败，10 分钟后重试第 %d/2 次；仍失败将发送文字版",
+                    self._image_retry_attempts,
+                )
+                return
             if image_url and await self.plugin.send_image(
                 targets, image_url, source="report"
             ):
                 self._last_sent_day = day
                 self._record(day, True, "image")
+                self._image_retry_attempts = 0
+                self._pending_image_retry = None
                 self._clear_retry()
                 self._save_delivery_state()
                 logger.info("日报已发送（图片）：%s", targets)
@@ -931,6 +1011,8 @@ class DailyReporter:
         ):
             self._last_sent_day = day
             self._record(day, True, "text")
+            self._image_retry_attempts = 0
+            self._pending_image_retry = None
             self._clear_retry()
             self._save_delivery_state()
             logger.info("日报已发送（文字）：%s", targets)

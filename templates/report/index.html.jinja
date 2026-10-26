@@ -106,7 +106,7 @@
     <section class="section">
       <div class="section-head">
         <h2>异常汇总</h2>
-        <span>异常 / 失败 {{ d.anomalies.count }} 次</span>
+        <span>异常 / 失败 {{ d.anomalies.count }} 次{% if d.anomalies.unresolved %} · 未恢复 {{ d.anomalies.unresolved }} 项{% endif %}</span>
       </div>
       {% if d.anomalies["items"] %}
       <div class="event-list">

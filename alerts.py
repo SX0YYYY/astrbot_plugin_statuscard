@@ -29,7 +29,7 @@ from .collectors import (
 )
 from .redactor import HIDDEN, read_rules
 from .state import StateStore
-from .utils import normalize_targets, retry_delay, truncate_text
+from .utils import clamp_config, normalize_targets, retry_delay, truncate_text
 
 
 def _now_text(config: Any = None) -> str:
@@ -55,10 +55,18 @@ class AlertEngine:
         self.state = state
         self.config = config
         self.report_store = report_store
-        self.interval = max(
-            15, min(3600, cfg_int(config, "alerts.interval_seconds", 60))
+        self.interval = clamp_config(
+            cfg_int(config, "alerts.interval_seconds", 60),
+            15,
+            600,
+            "alerts.interval_seconds",
         )
-        self.sustain = max(1, min(100, cfg_int(config, "alerts.sustain_samples", 3)))
+        self.sustain = clamp_config(
+            cfg_int(config, "alerts.sustain_samples", 3),
+            1,
+            10,
+            "alerts.sustain_samples",
+        )
         self.cooldown = max(
             0, min(86400, cfg_int(config, "alerts.cooldown_seconds", 1800))
         )
@@ -76,12 +84,11 @@ class AlertEngine:
         self.disk_threshold = max(
             0.0, min(100.0, cfg_float(config, "alerts.disk_threshold", 85.0))
         )
-        self.load_threshold = max(
+        self.load_threshold = clamp_config(
+            cfg_float(config, "alerts.load_per_core_threshold", 2.0),
             0.0,
-            min(
-                100.0,
-                cfg_float(config, "alerts.load_per_core_threshold", 2.0),
-            ),
+            16.0,
+            "alerts.load_per_core_threshold",
         )
         self.platform_id = str(
             cfg_get(config, "alerts.platform_id", "default") or "default"
@@ -97,7 +104,60 @@ class AlertEngine:
         self._webhook_site: Any = None
         self._primed = False
         self._daily_last_sent_day: str | None = None
+        self._daily_last_attempt_day: str | None = None
         self._next_daily_text: str | None = None
+        try:
+            alerts_state = self.state.get("alerts", {}) or {}
+            summary_state = (
+                alerts_state.get("daily_summary")
+                if isinstance(alerts_state, dict)
+                else None
+            )
+            if isinstance(summary_state, dict):
+                sent = summary_state.get("last_sent_day")
+                attempted = summary_state.get("last_attempt_day")
+                self._daily_last_sent_day = sent if isinstance(sent, str) else None
+                self._daily_last_attempt_day = (
+                    attempted if isinstance(attempted, str) else None
+                )
+        except Exception:
+            logger.debug("读取每日定时状态图发送标记失败", exc_info=True)
+
+    def _mark_daily_sent(self, day: str) -> None:
+        self._daily_last_sent_day = day
+        self._daily_last_attempt_day = day
+        self._save_daily_markers(day, day)
+
+    def _daily_catch_up_allowed(self, today_text: str) -> bool:
+        """Whether a missed window today should be sent right after startup.
+
+        No marker at all means a fresh install or an upgrade from a version
+        that kept the marker in memory only; that day's image was most likely
+        already sent, so it is not re-sent.
+        """
+
+        return (
+            self._daily_last_attempt_day is not None
+            and self._daily_last_attempt_day != today_text
+        )
+
+    def _mark_daily_attempt(self, day: str) -> None:
+        self._daily_last_attempt_day = day
+        self._save_daily_markers(self._daily_last_sent_day, day)
+
+    def _save_daily_markers(self, sent: str | None, attempted: str) -> None:
+        try:
+            with self.state.section("alerts") as alerts:
+                summary = alerts.get("daily_summary")
+                if not isinstance(summary, dict):
+                    summary = {}
+                    alerts["daily_summary"] = summary
+                if sent:
+                    summary["last_sent_day"] = sent
+                summary["last_attempt_day"] = attempted
+            self.state.save()
+        except Exception:
+            logger.debug("保存每日定时状态图发送标记失败", exc_info=True)
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -388,14 +448,33 @@ class AlertEngine:
                     else:
                         retry_count = int(st.get("retry_count") or 0) + 1
                         st["retry_count"] = retry_count
-                        st["next_attempt"] = now + retry_delay(retry_count)
-                        st["count"] = self.sustain
-                        self._record_event(
-                            "resource",
-                            name,
-                            f"{value_text}（阈值 {threshold:.1f}{unit}）",
-                            "failed",
-                        )
+                        if retry_count >= 3:
+                            # Stop retrying: an unreachable target used to be
+                            # retried every ~10 minutes forever, writing one
+                            # "failed" event per attempt. Mark the rule as
+                            # alerting so only the recovery notice tries again.
+                            logger.warning(
+                                "告警 %s 连续发送失败 %d 次，停止重试（恢复时仍会通知）",
+                                name,
+                                retry_count,
+                            )
+                            st["alerting"] = True
+                            st["alert_since"] = now
+                            st["count"] = 0
+                            st["retry_count"] = 0
+                            st["next_attempt"] = 0
+                        else:
+                            st["next_attempt"] = now + retry_delay(retry_count)
+                            st["count"] = self.sustain
+                            if retry_count == 1:
+                                # One failed event per interruption, not one
+                                # per retry.
+                                self._record_event(
+                                    "resource",
+                                    name,
+                                    f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                                    "failed",
+                                )
         else:
             st["count"] = 0
             pending_text = st.get("pending_recovery")
@@ -633,7 +712,14 @@ class AlertEngine:
                 now = datetime.now(tz)
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
-                    target += timedelta(days=1)
+                    today_text = now.strftime("%Y-%m-%d")
+                    if self._daily_catch_up_allowed(today_text):
+                        # The window passed while the plugin was down or
+                        # reloading; send now instead of silently skipping
+                        # the whole day.
+                        target = now
+                    else:
+                        target += timedelta(days=1)
                 if last_logged != target:
                     self._next_daily_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
@@ -673,6 +759,9 @@ class AlertEngine:
                             "每日定时状态图重试失败（第 %d 次）",
                             attempt + 1,
                         )
+                self._mark_daily_attempt(
+                    now_in_timezone(self.config).strftime("%Y-%m-%d")
+                )
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -700,7 +789,7 @@ class AlertEngine:
                     self.targets, image_url, source="daily_summary"
                 )
                 if ok:
-                    self._daily_last_sent_day = today
+                    self._mark_daily_sent(today)
                     logger.info("每日定时状态图已发送（图片）：%s", self.targets)
                     return True
         summary = await self.plugin.build_summary_text()
@@ -709,7 +798,7 @@ class AlertEngine:
             source="daily_summary",
         )
         if ok:
-            self._daily_last_sent_day = today
+            self._mark_daily_sent(today)
             logger.info("每日定时状态图已发送（文字）：%s", self.targets)
             return True
         logger.warning("每日定时状态图发送失败：%s", self.targets)

@@ -114,7 +114,9 @@
                 "refresh_done_short": "已刷新",
                 "refresh_failed_short": "刷新失败",
                 "export_truncated": "数据量超出上限，仅导出最近的记录",
-                "history_truncated": "范围数据超出上限，仅显示最近的记录"
+                "history_truncated": "范围数据超出上限，仅显示最近的记录",
+                "network_note_redacted": "已按脱敏配置隐藏网络数据。",
+                "network_note_state": "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
             }
         }
     }

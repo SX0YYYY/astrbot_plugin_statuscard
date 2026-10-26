@@ -37,7 +37,7 @@ from .report_store import ReportStore
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html, build_report_html
-from .utils import clean_report_sections, is_supported_platform
+from .utils import clamp_config, clean_report_sections, is_supported_platform
 from .version import __version__
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
@@ -59,7 +59,12 @@ class StatusCardPlugin(Star):
         self._migrate_media_sources()
         self._migrate_report_sections()
         self.report_store = ReportStore(self.data_dir / "report.db")
-        interval = cfg_int(self.config, "display.sample_seconds", 60)
+        interval = clamp_config(
+            cfg_int(self.config, "display.sample_seconds", 60),
+            15,
+            600,
+            "display.sample_seconds",
+        )
         self.sampler = Sampler(
             self.state, interval_seconds=interval, config=self.config
         )
@@ -883,6 +888,12 @@ class StatusCardPlugin(Star):
             )
         report_status = self.report.status()
         store_stats = report_status.get("store", {})
+        if not self.report_store.available:
+            lines.append(
+                "日报数据库: 不可用（"
+                + str(getattr(self.report_store, "init_error", None) or "初始化失败")
+                + "，详见后台日志）"
+            )
         lines.append(
             "日报数据: "
             + ("记录中" if report_status.get("enabled") else "未记录")
