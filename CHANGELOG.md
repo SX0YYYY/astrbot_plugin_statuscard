@@ -43,7 +43,7 @@
 
 ### 测试
 
-- 新增 `tests/test_v2140_fixes.py` 11 例；212 passed。
+- 新增 `tests/test_v2140_fixes.py` 11 例（并删除 1 例已废弃的队列测试）；213 passed。
 - ruff check / format 全绿。
 
 ## v2.13.4 — 2026-10-27
