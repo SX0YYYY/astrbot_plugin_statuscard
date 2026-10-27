@@ -376,3 +376,17 @@ def test_audit_flags_notify_center() -> None:
         {"notify": {"rules": [{"enabled": True, "target": "123456", "kinds": []}]}}
     )
     assert any(issue.code == "notify_rule_invalid" for issue in issues2)
+
+
+def test_send_test_uses_center_targets_when_taken_over(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.json")
+    plugin = _OkPlugin()
+    config = {
+        "alerts": {"enabled": True, "targets": ["999"]},
+        "notify": {
+            "rules": [{"enabled": True, "target": "555", "kinds": ["resource"]}]
+        },
+    }
+    engine = alerts_module.AlertEngine(plugin, state, config)
+    asyncio.run(engine.send_test())
+    assert plugin.texts[0][0] == ["default:GroupMessage:555"]

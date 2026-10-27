@@ -164,7 +164,8 @@
         "verify_webhook_not_listening": "Webhook is not listening",
         "verify_webhook_ok": "Chain verified (HTTP 200): listen → parse → push all fine.",
         "verify_webhook_bad": "HTTP {status}: check the token and target settings.",
-        "verify_none": "Nothing to check"
+        "verify_none": "Nothing to check",
+        "verify_confirm_again": "Click again to confirm"
       }
     }
   }

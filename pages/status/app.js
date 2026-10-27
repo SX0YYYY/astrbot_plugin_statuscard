@@ -1616,15 +1616,14 @@
             item.state !== "ok",
           );
         }
+        const detail = String(item.detail || "");
+        // HTTP probe details already end with their own "（N ms）"; appending
+        // the measured elapsed time again showed the duration twice.
+        const elapsed = /（\d+ms）\s*$/.test(detail)
+          ? ""
+          : "（" + item.elapsed_ms + "ms）";
         return verifyRow(
-          (item.name || "--") +
-            "：" +
-            (item.ok ? "✅" : "❌") +
-            " " +
-            (item.detail || "") +
-            "（" +
-            item.elapsed_ms +
-            "ms）",
+          (item.name || "--") + "：" + (item.ok ? "✅" : "❌") + " " + detail + elapsed,
           !item.ok,
         );
       })
@@ -1632,20 +1631,29 @@
     box.innerHTML = '<ul class="verify-list">' + rows + "</ul>";
   }
 
+  let verifyArmTimer = 0;
+
   async function runVerify(kind, button) {
     if (!button || button.disabled) return;
-    if (
-      kind === "targets" &&
-      !window.confirm(
-        t(
-          "verify_confirm_targets",
-          "将向所有配置的推送目标真实发送一条验证消息，继续？",
-        ),
-      )
-    ) {
+    // The dashboard iframe sandbox has no allow-modals, so window.confirm is
+    // silently rejected there. Use a two-step arm button instead: the first
+    // click arms the button, the second click (within 5s) really sends.
+    if (kind === "targets" && button.dataset.armed !== "1") {
+      button.dataset.armed = "1";
+      button.classList.add("verify-armed");
+      button.textContent = t("verify_confirm_again", "再点一次确认发送");
+      clearTimeout(verifyArmTimer);
+      verifyArmTimer = setTimeout(() => {
+        button.dataset.armed = "";
+        button.classList.remove("verify-armed");
+        button.textContent = t("verify_targets", "验证推送目标");
+      }, 5000);
       return;
     }
-    const original = button.textContent;
+    button.dataset.armed = "";
+    button.classList.remove("verify-armed");
+    clearTimeout(verifyArmTimer);
+    const original = t("verify_targets", "验证推送目标");
     button.disabled = true;
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");

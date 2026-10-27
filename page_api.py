@@ -30,6 +30,7 @@ from .collectors import (
     format_duration,
     get_timezone,
     memory_stat,
+    notify_rules_active,
     now_in_timezone,
     process_info,
     swap_stat,
@@ -377,6 +378,19 @@ class PageApi:
                 cfg_get(plugin.config, "alerts.platform_id", "default") or "default"
             )
             merged: list[str] = []
+            if notify_rules_active(plugin.config):
+                # The notification center has taken over: verify the targets
+                # that real notifications would use, not the legacy lists.
+                rules = cfg_get(plugin.config, "notify.rules", []) or []
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    item = str(cfg_get(rule, "target", "") or "").strip()
+                    if not item:
+                        continue
+                    for one in normalize_targets([item], platform_id):
+                        if one not in merged:
+                            merged.append(one)
             for key in (
                 "alerts.targets",
                 "monitors.targets",
@@ -667,10 +681,13 @@ class PageApi:
                 ),
             ),
         )
+        # Detect on the raw rows, not the downsampled points: downsampling
+        # stretches the spacing between samples far beyond the sampling
+        # interval and would flag every normal pair as a gap.
         gaps = [
             gap
             for gap in detect_resource_gaps(
-                [int(point.get("ts") or 0) for point in points], sample_interval
+                [int(row.get("ts") or 0) for row in rows], 2 * sample_interval
             )
             if gap["end"] > start and gap["start"] < end
         ]

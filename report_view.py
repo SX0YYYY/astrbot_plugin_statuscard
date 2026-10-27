@@ -536,7 +536,8 @@ class DailyReportBuilder:
         expected = max(1, 86400 // interval)
         coverage = len(yesterday_rows) / expected
         gaps = detect_resource_gaps(
-            [int(row.get("ts") or 0) for row in yesterday_rows], interval
+            [int(row.get("ts") or 0) for row in yesterday_rows],
+            max(2 * interval, 600),
         )
         gaps_text = None
         if gaps:
@@ -1358,7 +1359,7 @@ class DailyReportBuilder:
 
 
 def detect_resource_gaps(
-    timestamps: list[int], interval_seconds: int
+    timestamps: list[int], threshold_seconds: int
 ) -> list[dict[str, int]]:
     """Sampling holes: the plugin or AstrBot itself was down.
 
@@ -1368,7 +1369,7 @@ def detect_resource_gaps(
     otherwise quiet report honest.
     """
 
-    threshold = max(2 * max(60, interval_seconds), 600)
+    threshold = max(60, int(threshold_seconds))
     ordered = sorted({int(ts) for ts in timestamps if ts})
     return [
         {"start": prev, "end": cur}

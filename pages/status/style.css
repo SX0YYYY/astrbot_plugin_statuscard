@@ -925,3 +925,9 @@ main.is-refreshing::after {
 .verify-list .verify-bad {
   color: var(--bad);
 }
+
+.segmented button.verify-armed {
+  border-color: var(--bad);
+  color: var(--bad);
+  font-weight: 600;
+}

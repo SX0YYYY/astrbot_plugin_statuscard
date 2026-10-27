@@ -403,7 +403,10 @@ class AlertEngine:
             logger.exception("记录告警事件失败")
 
     async def send_test(self, target_umo: str | None = None) -> bool:
-        targets = [target_umo] if target_umo else self.targets
+        # When the notification center has taken over, the legacy ``targets``
+        # list is inert: the test must exercise the targets that real alerts
+        # would use, otherwise the command validates the wrong destination.
+        targets = [target_umo] if target_umo else self._targets_for("resource")
         if not targets:
             return False
         text = (

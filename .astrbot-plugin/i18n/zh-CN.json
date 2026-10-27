@@ -164,7 +164,8 @@
         "verify_webhook_not_listening": "Webhook 未在监听",
         "verify_webhook_ok": "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
         "verify_webhook_bad": "HTTP {status}：请检查 Token 与目标配置。",
-        "verify_none": "没有可验证的项"
+        "verify_none": "没有可验证的项",
+        "verify_confirm_again": "再点一次确认发送"
       }
     }
   }

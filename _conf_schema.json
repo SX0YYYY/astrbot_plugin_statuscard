@@ -250,51 +250,50 @@
         "items": {
             "rules": {
                 "description": "通知规则",
-                "type": "list",
+                "type": "template_list",
                 "default": [],
-                "items": {
-                    "type": "object"
-                },
-                "__template_key": "rule",
-                "template": {
-                    "type": "object",
-                    "items": {
-                        "enabled": {
-                            "description": "启用该规则",
-                            "type": "bool",
-                            "default": true
-                        },
-                        "target": {
-                            "description": "推送目标",
-                            "type": "string",
-                            "hint": "QQ 群号（如 123456789）或完整 UMO（如 default:GroupMessage:123456789）。"
-                        },
-                        "kinds": {
-                            "description": "接收的通知类型",
-                            "type": "list",
-                            "default": [],
-                            "options": [
-                                "resource",
-                                "service",
-                                "offline",
-                                "daily",
-                                "weekly",
-                                "daily_image"
-                            ],
-                            "labels": [
-                                "资源告警",
-                                "服务监测告警",
-                                "掉线/恢复",
-                                "每日日报",
-                                "每周周报",
-                                "每日定时状态图"
-                            ],
-                            "render_type": "checkbox",
-                            "hint": "勾选该目标要接收的通知类型；留空 = 该规则不生效。"
+                "hint": "添加至少一条启用且勾选了类型的规则后，通知中心接管所有推送目标（alerts/monitors/daily_report 三处的「推送目标」不再生效）；清空全部规则即回退旧行为。",
+                "templates": {
+                    "rule": {
+                        "name": "通知规则",
+                        "items": {
+                            "enabled": {
+                                "description": "启用该规则",
+                                "type": "bool",
+                                "default": true
+                            },
+                            "target": {
+                                "description": "推送目标",
+                                "type": "string",
+                                "default": "",
+                                "hint": "QQ 群号（如 123456789）或完整 UMO（如 default:GroupMessage:123456789）。"
+                            },
+                            "kinds": {
+                                "description": "接收的通知类型",
+                                "type": "list",
+                                "default": [],
+                                "options": [
+                                    "resource",
+                                    "service",
+                                    "offline",
+                                    "daily",
+                                    "weekly",
+                                    "daily_image"
+                                ],
+                                "labels": [
+                                    "资源告警",
+                                    "服务监测告警",
+                                    "掉线/恢复",
+                                    "每日日报",
+                                    "每周周报",
+                                    "每日定时状态图"
+                                ],
+                                "render_type": "checkbox",
+                                "hint": "勾选该目标要接收的通知类型；留空 = 该规则不生效。"
+                            }
                         }
                     }
-                },
-                "hint": "添加至少一条启用且勾选了类型的规则后，通知中心接管所有推送目标（alerts/monitors/daily_report 三处的「推送目标」不再生效）；清空全部规则即回退旧行为。"
+                }
             }
         }
     },
