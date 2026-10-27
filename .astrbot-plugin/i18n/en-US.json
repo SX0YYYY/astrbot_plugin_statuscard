@@ -165,7 +165,21 @@
         "verify_webhook_ok": "Chain verified (HTTP 200): listen → parse → push all fine.",
         "verify_webhook_bad": "HTTP {status}: check the token and target settings.",
         "verify_none": "Nothing to check",
-        "verify_confirm_again": "Click again to confirm"
+        "verify_confirm_again": "Click again to confirm",
+        "section_quality": "LLM Service Quality",
+        "quality_today_calls": "Calls today",
+        "quality_success": "Success rate",
+        "quality_failed_aborted": "Failed / aborted",
+        "quality_streak": "Consecutive failures",
+        "quality_scope_today": "Today · display timezone",
+        "quality_latency": "Avg latency",
+        "quality_ttft": "Time to first token",
+        "report_quality": "LLM Service Quality",
+        "table_calls": "Calls",
+        "table_errors": "Failed",
+        "table_fail_rate": "Fail rate",
+        "table_conversation": "Conversation",
+        "kind_provider": "LLM"
       }
     }
   }

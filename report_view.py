@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import socket
 import sqlite3
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,22 @@ from .collectors import (
     format_duration,
     get_timezone,
     now_in_timezone,
+)
+from .provider_quality import (
+    aggregate as aggregate_provider_rows,
+)
+from .provider_quality import (
+    connect_readonly as connect_provider_db,
+)
+from .provider_quality import (
+    error_streak,
+    parse_utc_value,
+)
+from .provider_quality import (
+    fetch_recent as fetch_provider_recent,
+)
+from .provider_quality import (
+    fetch_window as fetch_provider_window,
 )
 from .redactor import Redactor, read_rules
 from .report_store import ReportStore
@@ -37,6 +53,7 @@ VALID_SECTIONS = (
     "token",
     "website",
     "process",
+    "provider",
 )
 DEFAULT_SECTIONS = ("resource", "anomaly", "qq", "token")
 
@@ -48,6 +65,24 @@ def _fmt_num(value: Any) -> str:
         return f"{round(float(value)):,}"
     except (TypeError, ValueError, OverflowError):
         return "--"
+
+
+def _fmt_seconds(value: Any) -> str:
+    """Human seconds for latency/TTFT: ``--``, ``1.23s``, ``12.3s``, ``123s``."""
+
+    if value is None:
+        return "--"
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if seconds < 0 or not math.isfinite(seconds):
+        return "--"
+    if seconds < 10:
+        return f"{seconds:.2f}s"
+    if seconds < 100:
+        return f"{seconds:.1f}s"
+    return f"{seconds:.0f}s"
 
 
 def _fmt_compact(value: Any) -> str:
@@ -92,19 +127,6 @@ def _nice_ceil(value: float) -> float:
         if base <= step:
             return step * (10**exp)
     return 10 ** (exp + 1)
-
-
-def _parse_utc(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _line_chart(
@@ -329,6 +351,10 @@ class DailyReportBuilder:
             view["qq"] = self._qq_section(target, history_days)
         if "token" in selected:
             view["token"] = self._token_section(target, history_days, span)
+        if "provider" in selected:
+            view["provider_quality"] = self._provider_quality_section(
+                target, history_days, span
+            )
         if "website" in selected:
             view["website"] = self._website_section(
                 target, previous, history_days, span
@@ -1230,7 +1256,7 @@ class DailyReportBuilder:
             }
 
         min_day = None
-        parsed_min = _parse_utc(min_created)
+        parsed_min = parse_utc_value(min_created)
         if parsed_min is not None:
             min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
 
@@ -1240,7 +1266,7 @@ class DailyReportBuilder:
         }
         by_model: dict[str, int] = {}
         for row in rows:
-            created = _parse_utc(row[0])
+            created = parse_utc_value(row[0])
             if created is None:
                 continue
             local_day = created.astimezone(self.tz).strftime("%Y-%m-%d")
@@ -1317,6 +1343,155 @@ class DailyReportBuilder:
                     else ""
                 )
             ),
+        }
+
+    def _provider_quality_section(
+        self, day: date, history_days: int, span: int = 1
+    ) -> dict[str, Any]:
+        """LLM service quality over the report window (provider_stats)."""
+
+        chart_days = [day - timedelta(days=i) for i in range(history_days - 1, -1, -1)]
+        window_days = [day - timedelta(days=i) for i in range(span - 1, -1, -1)]
+        window_set = {item.isoformat() for item in window_days}
+        labels = [item.strftime("%m-%d") for item in chart_days]
+
+        connection = connect_provider_db(self.db_path)
+        if connection is None:
+            return {
+                "available": False,
+                "empty_reason": "未找到 AstrBot 数据库（data_v4.db）",
+                "stats": {},
+                "top_models": [],
+                "top_conversations": [],
+                "trend": None,
+                "note": "",
+            }
+        try:
+            start_text = f"{(chart_days[0] - timedelta(days=2)).isoformat()} 00:00:00"
+            end_text = f"{(chart_days[-1] + timedelta(days=3)).isoformat()} 00:00:00"
+            rows, min_created, truncated = fetch_provider_window(
+                connection, start_text, end_text
+            )
+            recent = fetch_provider_recent(connection, 20)
+        except Exception:
+            return {
+                "available": False,
+                "empty_reason": "provider_stats 查询失败",
+                "stats": {},
+                "top_models": [],
+                "top_conversations": [],
+                "trend": None,
+                "note": "",
+            }
+        finally:
+            connection.close()
+
+        if not rows:
+            return {
+                "available": False,
+                "empty_reason": "暂无数据（所选时间范围内没有 LLM 调用记录）",
+                "stats": {},
+                "top_models": [],
+                "top_conversations": [],
+                "trend": None,
+                "note": "",
+            }
+
+        stats = aggregate_provider_rows(rows, window_set, self.tz)
+        streak = error_streak(recent)
+
+        min_day = None
+        parsed_min = parse_utc_value(min_created)
+        if parsed_min is not None:
+            min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
+
+        trend_calls: list[int | None] = []
+        trend_errors: list[int | None] = []
+        for item in chart_days:
+            day_text = item.isoformat()
+            bucket = stats["by_day"].get(day_text) or {"calls": 0, "errors": 0}
+            if min_day and day_text < min_day:
+                trend_calls.append(None)
+                trend_errors.append(None)
+            else:
+                trend_calls.append(bucket["calls"])
+                trend_errors.append(bucket["errors"])
+        trend = _line_chart(
+            labels,
+            [
+                {
+                    "name": "调用",
+                    "color": "#38bdf8",
+                    "values": trend_calls,
+                },
+                {
+                    "name": "失败",
+                    "color": "#f87171",
+                    "values": trend_errors,
+                },
+            ],
+            y_formatter=_fmt_compact,
+            height=150,
+        )
+
+        top_models = []
+        for model in stats["by_model"][:5]:
+            top_models.append(
+                {
+                    "name": model["name"],
+                    "calls_text": _fmt_num(model["calls"]),
+                    "errors_text": _fmt_num(model["errors"]),
+                    "fail_rate_text": (
+                        f"{model['fail_rate']:.1f}%"
+                        if model["fail_rate"] is not None
+                        else "--"
+                    ),
+                    "avg_latency_text": _fmt_seconds(model["avg_latency"]),
+                }
+            )
+        top_conversations = []
+        for conv in stats["by_conversation"][:5]:
+            top_conversations.append(
+                {
+                    "conversation": conv["conversation"],
+                    "calls_text": _fmt_num(conv["calls"]),
+                    "errors_text": _fmt_num(conv["errors"]),
+                }
+            )
+
+        note = (
+            "口径：成功率 = 完成 / (完成 + 失败)；用户主动中止（aborted）单列，"
+            "不计入失败。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为未记录。"
+            "按 AstrBot provider_stats 记录统计。"
+        )
+        if truncated:
+            note += "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+
+        return {
+            "available": True,
+            "empty_reason": None,
+            "stats": {
+                "calls": stats["total"],
+                "calls_text": _fmt_num(stats["total"]),
+                "completed_text": _fmt_num(stats["completed"]),
+                "errors_text": _fmt_num(stats["errors"]),
+                "aborted_text": _fmt_num(stats["aborted"]),
+                "success_rate_text": (
+                    f"{stats['success_rate']:.1f}%"
+                    if stats["success_rate"] is not None
+                    else "--"
+                ),
+                "avg_latency_text": _fmt_seconds(stats["avg_latency"]),
+                "p95_latency_text": _fmt_seconds(stats["p95_latency"]),
+                "avg_ttft_text": _fmt_seconds(stats["avg_ttft"]),
+                "p95_ttft_text": _fmt_seconds(stats["p95_ttft"]),
+                "streak": streak,
+                "streak_text": _fmt_num(streak),
+            },
+            "top_models": top_models,
+            "top_conversations": top_conversations,
+            "trend": trend,
+            "note": note,
         }
 
     def _provider_rows(
@@ -1449,6 +1624,28 @@ def build_report_text(view: dict[str, Any]) -> str:
             )
         else:
             lines.append(f"Token: {token.get('empty_reason') or '暂无数据'}")
+    quality = view.get("provider_quality") or {}
+    if "provider" in sections:
+        if quality.get("available"):
+            stats = quality.get("stats") or {}
+            models = quality.get("top_models") or []
+            model_note = ""
+            if models:
+                model_note = "；最忙模型 " + models[0].get("name", "--")
+            lines.append(
+                "LLM 质量({}): {} 次调用，成功率 {}，平均延迟 {}，TTFT {}{}".format(
+                    window_label,
+                    stats.get("calls_text", "--"),
+                    stats.get("success_rate_text", "--"),
+                    stats.get("avg_latency_text", "--"),
+                    stats.get("avg_ttft_text", "--"),
+                    model_note,
+                )
+            )
+            if stats.get("streak"):
+                lines.append(f"LLM 连续失败: {stats['streak_text']} 次")
+        else:
+            lines.append(f"LLM 质量: {quality.get('empty_reason') or '暂无数据'}")
     website = view.get("website") or {}
     if "website" in sections:
         if website.get("available"):

@@ -242,6 +242,83 @@
     </section>
     {% endif %}
 
+    {% if "provider" in d.sections and d.provider_quality %}
+    <section class="section">
+      <div class="section-head">
+        <h2>LLM 服务质量</h2>
+        <span>{{ d.window_label }} · 趋势最近 {{ d.history_days }} 天</span>
+      </div>
+      {% if not d.provider_quality.available %}
+      <div class="empty">{{ d.provider_quality.empty_reason }}</div>
+      {% else %}
+      <div class="stat-grid token-grid">
+        <div class="stat">
+          <div class="stat-label">调用次数</div>
+          <div class="stat-value">{{ d.provider_quality.stats.calls_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">成功率</div>
+          <div class="stat-value">{{ d.provider_quality.stats.success_rate_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">失败 / 中止</div>
+          <div class="stat-value">{{ d.provider_quality.stats.errors_text }} / {{ d.provider_quality.stats.aborted_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">平均延迟</div>
+          <div class="stat-value">{{ d.provider_quality.stats.avg_latency_text }}</div>
+          <div class="stat-sub">P95 {{ d.provider_quality.stats.p95_latency_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">首字延迟</div>
+          <div class="stat-value">{{ d.provider_quality.stats.avg_ttft_text }}</div>
+          <div class="stat-sub">P95 {{ d.provider_quality.stats.p95_ttft_text }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">当前连续失败</div>
+          <div class="stat-value">{{ d.provider_quality.stats.streak_text }}</div>
+        </div>
+      </div>
+      {% if d.provider_quality.top_models %}
+      <table class="model-table">
+        <thead><tr><th>模型</th><th>调用</th><th>失败</th><th>失败率</th><th>平均延迟</th></tr></thead>
+        <tbody>
+          {% for model in d.provider_quality.top_models %}
+          <tr>
+            <td>{{ model.name }}</td>
+            <td>{{ model.calls_text }}</td>
+            <td>{{ model.errors_text }}</td>
+            <td>{{ model.fail_rate_text }}</td>
+            <td>{{ model.avg_latency_text }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+      {% if d.provider_quality.top_conversations %}
+      <table class="model-table">
+        <thead><tr><th>会话</th><th>调用</th><th>失败</th></tr></thead>
+        <tbody>
+          {% for conv in d.provider_quality.top_conversations %}
+          <tr>
+            <td>{{ conv.conversation }}</td>
+            <td>{{ conv.calls_text }}</td>
+            <td>{{ conv.errors_text }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+      <div class="chart-block">
+        <div class="chart-title">调用 / 失败 <span>按日</span></div>
+        {{ legend(d.provider_quality.trend) }}
+        {{ chart_svg(d.provider_quality.trend) }}
+      </div>
+      <p class="note">{{ d.provider_quality.note }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
     {% if "website" in d.sections and d.website %}
     <section class="section">
       <div class="section-head">

@@ -276,6 +276,7 @@
                                     "resource",
                                     "service",
                                     "offline",
+                                    "provider",
                                     "daily",
                                     "weekly",
                                     "daily_image"
@@ -284,6 +285,7 @@
                                     "资源告警",
                                     "服务监测告警",
                                     "掉线/恢复",
+                                    "LLM 服务告警",
                                     "每日日报",
                                     "每周周报",
                                     "每日定时状态图"
@@ -556,6 +558,41 @@
                     }
                 }
             },
+            "provider_watch": {
+                "description": "LLM 服务告警",
+                "type": "object",
+                "hint": "按 AstrBot 的 provider_stats 记录监测 LLM 调用质量：连续失败达到阈值时告警，恢复后通知。用户主动中止（aborted）不算失败，也不打断连续计数。",
+                "items": {
+                    "enabled": {
+                        "description": "启用 LLM 连续失败告警",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "默认关闭。数据来自 AstrBot 自带的 provider_stats 表（4.26.7+），无需额外配置。"
+                    },
+                    "threshold": {
+                        "description": "连续失败几次后告警",
+                        "type": "int",
+                        "default": 3,
+                        "slider": {
+                            "min": 1,
+                            "max": 10,
+                            "step": 1
+                        },
+                        "hint": "按时间连续的 provider_stats 记录计算，中间的用户主动中止不打断连续链。"
+                    },
+                    "cooldown_seconds": {
+                        "description": "LLM 告警冷却（秒）",
+                        "type": "int",
+                        "default": 1800,
+                        "slider": {
+                            "min": 300,
+                            "max": 86400,
+                            "step": 60
+                        },
+                        "hint": "恢复后再次触发告警的最小间隔，避免故障抖动时反复轰炸。"
+                    }
+                }
+            },
             "platform_id": {
                 "description": "平台实例 ID",
                 "type": "string",
@@ -700,6 +737,7 @@
                     "anomaly",
                     "qq",
                     "token",
+                    "provider",
                     "website",
                     "process"
                 ],
@@ -708,6 +746,7 @@
                     "异常汇总",
                     "QQ 趋势",
                     "Token 消耗",
+                    "LLM 服务质量",
                     "网站延迟",
                     "Top 进程"
                 ],
@@ -723,6 +762,7 @@
                     "anomaly",
                     "qq",
                     "token",
+                    "provider",
                     "website",
                     "process"
                 ],
@@ -731,6 +771,7 @@
                     "异常汇总",
                     "QQ 趋势",
                     "Token 消耗",
+                    "LLM 服务质量",
                     "网站延迟",
                     "Top 进程"
                 ],

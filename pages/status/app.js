@@ -826,6 +826,34 @@
         .join("");
     }
 
+    const quality = data.provider_quality || {};
+    if (quality.available) {
+      $("provider-overview").innerHTML = [
+        [t("quality_today_calls", "今日调用"), String(quality.calls || 0)],
+        [t("quality_success", "成功率"), quality.success_text || "--"],
+        [t("quality_failed_aborted", "失败 / 中止"), (quality.errors || 0) + " / " + (quality.aborted || 0)],
+        [t("quality_streak", "当前连续失败"), String(quality.error_streak || 0)],
+      ]
+        .map(
+          (pair) =>
+            '<div class="network-item"><span>' +
+            esc(pair[0]) +
+            "</span><strong>" +
+            esc(pair[1]) +
+            "</strong></div>",
+        )
+        .join("");
+      $("provider-summary").textContent = t(
+        "quality_scope_today",
+        "今天 · 按展示时区",
+      );
+    } else {
+      $("provider-overview").innerHTML = empty(
+        quality.empty_reason || t("report_no_data", "暂无数据"),
+      );
+      $("provider-summary").textContent = "--";
+    }
+
     const audit = data.audit || [];
     const banner = $("audit-banner");
     if (audit.length) {
@@ -1144,6 +1172,7 @@
         resource: t("kind_resource", "资源"),
         offline: t("kind_offline", "掉线"),
         service: t("kind_service", "服务"),
+        provider: t("kind_provider", "LLM"),
       }[kind] ||
       kind ||
       t("kind_service", "事件")
@@ -1303,6 +1332,88 @@
                     esc(model.tokens_text) +
                     "</td><td>" +
                     esc(model.share_text) +
+                    "</td></tr>",
+                )
+                .join("") +
+              "</tbody></table></div>"
+            : "") +
+          "</div>",
+      );
+    }
+    const quality = data.provider_quality || {};
+    if (quality.available) {
+      const stats = quality.stats || {};
+      const pairs = [
+        [t("report_calls", "调用次数"), stats.calls_text],
+        [t("quality_success", "成功率"), stats.success_rate_text],
+        [t("quality_failed_aborted", "失败 / 中止"), (stats.errors_text || "--") + " / " + (stats.aborted_text || "--")],
+        [t("quality_latency", "平均延迟"), stats.avg_latency_text, "P95 " + (stats.p95_latency_text || "--")],
+        [t("quality_ttft", "首字延迟"), stats.avg_ttft_text, "P95 " + (stats.p95_ttft_text || "--")],
+        [t("quality_streak", "当前连续失败"), stats.streak_text],
+      ];
+      blocks.push(
+        '<div class="detail-block"><h3>' +
+          esc(t("report_quality", "LLM 服务质量")) +
+          '</h3><div class="detail-grid">' +
+          pairs
+            .map(
+              (pair) =>
+                '<div class="detail-item"><span>' +
+                esc(pair[0]) +
+                "</span><strong>" +
+                esc(pair[1] || "--") +
+                (pair[2] ? '<small class="detail-sub">' + esc(pair[2]) + "</small>" : "") +
+                "</strong></div>",
+            )
+            .join("") +
+          "</div>" +
+          (quality.top_models && quality.top_models.length
+            ? '<div class="table-wrap"><table class="table"><thead><tr><th>' +
+              esc(t("table_model", "模型")) +
+              "</th><th>" +
+              esc(t("table_calls", "调用")) +
+              "</th><th>" +
+              esc(t("table_errors", "失败")) +
+              "</th><th>" +
+              esc(t("table_fail_rate", "失败率")) +
+              "</th><th>" +
+              esc(t("quality_latency", "平均延迟")) +
+              "</th></tr></thead><tbody>" +
+              quality.top_models
+                .map(
+                  (model) =>
+                    "<tr><td>" +
+                    esc(model.name) +
+                    "</td><td>" +
+                    esc(model.calls_text) +
+                    "</td><td>" +
+                    esc(model.errors_text) +
+                    "</td><td>" +
+                    esc(model.fail_rate_text) +
+                    "</td><td>" +
+                    esc(model.avg_latency_text) +
+                    "</td></tr>",
+                )
+                .join("") +
+              "</tbody></table></div>"
+            : "") +
+          (quality.top_conversations && quality.top_conversations.length
+            ? '<div class="table-wrap"><table class="table"><thead><tr><th>' +
+              esc(t("table_conversation", "会话")) +
+              "</th><th>" +
+              esc(t("table_calls", "调用")) +
+              "</th><th>" +
+              esc(t("table_errors", "失败")) +
+              "</th></tr></thead><tbody>" +
+              quality.top_conversations
+                .map(
+                  (conv) =>
+                    "<tr><td>" +
+                    esc(conv.conversation) +
+                    "</td><td>" +
+                    esc(conv.calls_text) +
+                    "</td><td>" +
+                    esc(conv.errors_text) +
                     "</td></tr>",
                 )
                 .join("") +

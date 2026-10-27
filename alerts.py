@@ -30,6 +30,7 @@ from .collectors import (
     swap_stat,
 )
 from .delivery import DeliveryResult
+from .provider_quality import recent_streak as provider_recent_streak
 from .redactor import HIDDEN, read_rules
 from .state import StateStore
 from .utils import clamp_config, normalize_targets, retry_delay, truncate_text
@@ -96,6 +97,22 @@ class AlertEngine:
         )
         self.recover_notify = cfg_bool(config, "alerts.recover_notify", True)
         self.offline_notify = cfg_bool(config, "alerts.offline_notify", True)
+        self.provider_watch_enabled = cfg_bool(
+            config, "alerts.provider_watch.enabled", False
+        )
+        self.provider_watch_threshold = clamp_config(
+            cfg_int(config, "alerts.provider_watch.threshold", 3),
+            1,
+            10,
+            "alerts.provider_watch.threshold",
+        )
+        self.provider_watch_cooldown = clamp_config(
+            cfg_int(config, "alerts.provider_watch.cooldown_seconds", 1800),
+            300,
+            86400,
+            "alerts.provider_watch.cooldown_seconds",
+        )
+        self._provider_last_check = 0.0
         self.cpu_threshold = clamp_config(
             cfg_float(config, "alerts.cpu_threshold", 85.0),
             0.0,
@@ -503,6 +520,8 @@ class AlertEngine:
 
         if self.offline_notify:
             await self._check_offline()
+        if self.provider_watch_enabled:
+            await self._check_provider_quality()
         self.state.set("alerts_last_sample", now)
         self.state.save()
 
@@ -896,6 +915,95 @@ class AlertEngine:
                 self._record_event(
                     "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
+
+    async def _check_provider_quality(self) -> None:
+        """Alert when the newest provider_stats rows fail consecutively.
+
+        Re-checked at most once a minute on top of the sampling loop; the
+        walk itself reads a handful of rows from data_v4.db read-only in a
+        worker thread. ``aborted`` rows neither count nor break the streak,
+        so a user stop in the middle cannot hide a real failure streak.
+        Recovery requires an explicit ``completed`` as the newest row -
+        an unreadable table keeps the current state instead of resolving
+        the alert. A send failure is recorded as a ``failed`` event and the
+        rule still latches, so the recovery notice is the retry path; the
+        cooldown only gates re-alerting after a recovery.
+        """
+
+        now = time.time()
+        if now - self._provider_last_check < 60:
+            return
+        self._provider_last_check = now
+        try:
+            streak, latest, sampled = await asyncio.to_thread(
+                provider_recent_streak,
+                None,
+                max(20, self.provider_watch_threshold * 3),
+            )
+        except Exception:
+            logger.debug("LLM 服务质量检查失败", exc_info=True)
+            return
+        if not sampled:
+            return
+
+        alerts_state = self.state.setdefault("alerts", {})
+        # setdefault (not get): the live nested dict is required, otherwise
+        # the alerting latch below would mutate a detached local dict.
+        watch = alerts_state.setdefault("provider_watch", {})
+        alerting = bool(watch.get("alerting"))
+        last_alert_ts = float(watch.get("last_alert_ts") or 0.0)
+
+        if not alerting and streak >= self.provider_watch_threshold:
+            if last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown:
+                return
+            text = (
+                "⚠️ LLM 服务连续失败\n"
+                "──────────────\n"
+                f"连续失败: {streak} 次（阈值 {self.provider_watch_threshold}）\n"
+                f"最近状态: {latest or '未知'}\n"
+                f"时间: {_now_text(self.config)}"
+            )
+            result = await self._send(text, source="provider", kind="provider")
+            delivered = self._delivered(result)
+            watch["alerting"] = True
+            watch["last_alert_ts"] = now
+            self.state.save()
+            if delivered:
+                self._record_event(
+                    "provider",
+                    "LLM 服务",
+                    f"连续 {streak} 次 LLM 调用失败",
+                    "alert",
+                )
+                logger.warning("LLM 服务连续失败 %d 次，已发送告警", streak)
+            else:
+                self._record_event(
+                    "provider",
+                    "LLM 服务",
+                    f"连续 {streak} 次 LLM 调用失败（推送失败）",
+                    "failed",
+                )
+                logger.warning("LLM 服务告警发送失败，恢复时将一并通知")
+            return
+
+        if alerting and latest == "completed":
+            watch["alerting"] = False
+            self.state.save()
+            self._record_event(
+                "provider",
+                "LLM 服务",
+                "最近一次 LLM 调用成功",
+                "recovery",
+            )
+            if self.recover_notify:
+                text = (
+                    "✅ 已恢复 · LLM 服务\n"
+                    "──────────────\n"
+                    f"最近状态: completed\n"
+                    f"时间: {_now_text(self.config)}"
+                )
+                await self._send(text, source="provider", kind="provider")
+            logger.info("LLM 服务已恢复（最近一次调用成功）")
 
     def _hostname(self) -> str:
         # The push text must obey the same hostname rule as the card, the

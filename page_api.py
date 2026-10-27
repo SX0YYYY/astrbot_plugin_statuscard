@@ -35,6 +35,7 @@ from .collectors import (
     process_info,
     swap_stat,
 )
+from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
 from .utils import normalize_targets
@@ -302,6 +303,21 @@ class PageApi:
             )
 
         daily_status = plugin.daily_report.status()
+        try:
+            provider_quality = await asyncio.to_thread(today_overview, plugin.config)
+        except Exception:
+            logger.exception("插件页面 LLM 服务质量概览失败")
+            provider_quality = {
+                "available": False,
+                "empty_reason": "查询失败",
+                "calls": 0,
+                "completed": 0,
+                "errors": 0,
+                "aborted": 0,
+                "success_rate": None,
+                "success_text": "--",
+                "error_streak": 0,
+            }
         return jsonify(
             {
                 "ok": True,
@@ -355,6 +371,7 @@ class PageApi:
                     "sections": daily_status.get("sections"),
                     "last_run": daily_status.get("last_run"),
                 },
+                "provider_quality": provider_quality,
                 "audit": [issue.as_dict() for issue in plugin.audit_issues()],
                 "store": plugin.report_store.stats(),
             }
@@ -809,6 +826,7 @@ class PageApi:
             "anomalies": view.get("anomalies"),
             "qq": view.get("qq"),
             "token": view.get("token"),
+            "provider_quality": view.get("provider_quality"),
             "website": view.get("website"),
             "process": view.get("process"),
             "runs": plugin.report_store.list_report_runs(limit=30),

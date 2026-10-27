@@ -17,6 +17,7 @@ from .collectors import (
     cfg_float,
     cfg_get,
     notify_rules_active,
+    resolve_targets,
 )
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
 from .redactor import RULES as REDACT_RULES
@@ -152,6 +153,21 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "到点后会静默跳过且当天不重试。",
             )
         )
+    if cfg_bool(config, "alerts.provider_watch.enabled", False):
+        # The notification center takes over the "provider" kind once a rule
+        # matches; otherwise the alert falls back to alerts.targets.
+        provider_targets = resolve_targets(config, "provider")
+        if provider_targets is None:
+            provider_targets = alerts_targets
+        if not provider_targets:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "provider_watch_no_targets",
+                    "LLM 服务告警已启用，但推送目标为空（通知中心无 provider 规则且"
+                    "alerts.targets 未填写），连续失败时不会送达任何会话。",
+                )
+            )
     if alerts_on:
         # A threshold of 0 disables the rule (see AlertEngine._evaluate); the
         # audit only needs to make that silent behaviour discoverable.

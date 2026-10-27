@@ -165,7 +165,21 @@
         "verify_webhook_ok": "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
         "verify_webhook_bad": "HTTP {status}：请检查 Token 与目标配置。",
         "verify_none": "没有可验证的项",
-        "verify_confirm_again": "再点一次确认发送"
+        "verify_confirm_again": "再点一次确认发送",
+        "section_quality": "LLM 服务质量",
+        "quality_today_calls": "今日调用",
+        "quality_success": "成功率",
+        "quality_failed_aborted": "失败 / 中止",
+        "quality_streak": "当前连续失败",
+        "quality_scope_today": "今天 · 按展示时区",
+        "quality_latency": "平均延迟",
+        "quality_ttft": "首字延迟",
+        "report_quality": "LLM 服务质量",
+        "table_calls": "调用",
+        "table_errors": "失败",
+        "table_fail_rate": "失败率",
+        "table_conversation": "会话",
+        "kind_provider": "LLM"
       }
     }
   }

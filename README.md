@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.15.0-blue)
+![Version](https://img.shields.io/badge/version-2.16.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -31,7 +31,8 @@
 - **进程信息**：进程状态统计 + CPU 占用最高的进程表
 - **告警与定时状态图**：资源阈值、Bot 掉线/恢复、每日定时状态图、Komari Webhook 转发
 - **服务监测**：网站、端口、Docker 容器、系统服务、进程的可用性监测，异常/恢复推送到 QQ 群
-- **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、网站延迟和 Top 进程；图片失败会自动重试并回退文字；默认关闭，可用 `预览日报` 手动查看
+- **每日日报**：每天定时发送资源趋势、异常汇总、QQ 趋势、Token 消耗、LLM 服务质量、网站延迟和 Top 进程；图片失败会自动重试并回退文字；默认关闭，可用 `预览日报` 手动查看
+- **LLM 服务质量**：基于 AstrBot 自带的 provider_stats 记录统计成功率、调用延迟、首字延迟（TTFT）、按模型/会话分布；可选「LLM 服务告警」在连续失败时推送、恢复后通知（默认关闭）
 - **每周周报**：每周日定时汇总此前 7 个完整自然日的趋势（与日报共用模块和模板），默认关闭，可用 `预览周报` 手动查看
 - **看板导出 CSV**：服务器状态看板的「历史趋势」卡片可一键导出资源采样、进程采样、网站延迟、异常事件四份 CSV，跟随 24h/7d/30d 范围，进程名遵守看板脱敏开关；进程采样同时给出单核口径 `cpu` 与整机口径 `cpu_pct_total` 两列
 - **扩展统计**：每 5 分钟记录网站延迟和 CPU/内存 Top 进程，日报展示昨日峰值和趋势
@@ -207,7 +208,7 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览、历史趋
 - **启用每周周报**：默认关闭；开启后每周日按设定时间发送最近 7 天的汇总，目标与内容复用日报设置。
 - **周报发送时间**：默认 `21:30`，仅周日生效。
 - **推送目标**：留空复用“告警与每日定时状态图”的推送目标。
-- **日报内容**：资源趋势 / 异常汇总 / QQ 趋势 / Token 消耗 / 网站延迟 / Top 进程，可勾选；默认只勾选前四项。
+- **日报内容**：资源趋势 / 异常汇总 / QQ 趋势 / Token 消耗 / LLM 服务质量 / 网站延迟 / Top 进程，可勾选；默认只勾选前四项。
 - **发送图片**：关闭或图片失败时发送文字摘要。
 - **日报主题**：`light`（默认）或 `dark`，只影响日报图片。
 - **趋势天数**：7–30 天，默认 7。
@@ -466,6 +467,9 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `alerts.interval_seconds` | `60` | 资源告警采样间隔（秒）；不影响状态卡折线采样 |
 | `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警（资源告警）；服务监测的失败阈值在「服务可用性监测」分组 |
 | `alerts.cooldown_seconds` | `1800` | 同一规则告警冷却（秒） |
+| `alerts.provider_watch.enabled` | `false` | LLM 服务告警：连续失败达到阈值时推送、恢复后通知（数据来自 AstrBot provider_stats） |
+| `alerts.provider_watch.threshold` | `3` | 连续失败几次后告警；用户主动中止不算失败也不打断连续链 |
+| `alerts.provider_watch.cooldown_seconds` | `1800` | LLM 告警冷却（秒）；恢复后再次触发的最小间隔 |
 | `monitors.interval_seconds` | `60` | 服务监测轮询间隔（秒） |
 | `monitors.fail_threshold` | `2` | 连续失败几次后告警（服务监测）；资源告警的连续次数在「告警与每日定时状态图」分组 |
 | `monitors.silence_enabled` | `false` | 启用维护静默；只有开启时 `silence_until` 才生效 |
@@ -479,7 +483,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `daily_report.weekly_enabled` | `false` | 启用每周周报（每周日发送最近 7 天汇总） |
 | `daily_report.weekly_time` | `21:30` | 周报发送时间（仅周日生效），24 小时制 `HH:MM` |
 | `daily_report.targets` | 空 | 日报推送目标；留空复用 `alerts.targets` |
-| `daily_report.sections` | 资源 / 异常 / QQ / Token | 日报内容；可额外勾选网站延迟、Top 进程 |
+| `daily_report.sections` | 资源 / 异常 / QQ / Token | 日报内容；可额外勾选 LLM 服务质量、网站延迟、Top 进程 |
 | `daily_report.with_image` | `true` | 发送图片；关闭或失败时发文字摘要 |
 | `daily_report.theme` | `light` | 日报主题，`light` 或 `dark` |
 | `daily_report.history_days` | `7` | 趋势天数，7–30 天 |
