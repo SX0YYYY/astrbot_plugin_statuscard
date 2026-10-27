@@ -514,6 +514,9 @@
             },
             "offline_broadcast": {
                 "description": "掉线恢复全群广播",
+                "condition": {
+                    "show_advanced": true
+                },
                 "type": "object",
                 "items": {
                     "enabled": {
@@ -560,6 +563,9 @@
             },
             "provider_watch": {
                 "description": "LLM 服务告警",
+                "condition": {
+                    "show_advanced": true
+                },
                 "type": "object",
                 "hint": "按 AstrBot 的 provider_stats 记录监测 LLM 调用质量：连续失败达到阈值时告警，恢复后通知。用户主动中止（aborted）不算失败，也不打断连续计数。",
                 "items": {

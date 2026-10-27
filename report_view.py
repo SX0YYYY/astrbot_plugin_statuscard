@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from astrbot.api import logger
 
 from .collectors import (
     cfg_bool,
@@ -383,6 +384,7 @@ class DailyReportBuilder:
         sections = view.get("sections") or []
         anomalies = view.get("anomalies") or {}
         token = view.get("token") or {}
+        quality = view.get("provider_quality") or {}
         qq = view.get("qq") or {}
         yesterday = qq.get("yesterday") or {}
         # A figure for a section the operator did not select would read as a
@@ -399,6 +401,12 @@ class DailyReportBuilder:
                 token.get("total_text", "暂无数据") if "token" in sections else "未开启"
             ),
             "token_enabled": "token" in sections,
+            "provider_calls_text": (
+                (quality.get("stats") or {}).get("calls_text", "暂无数据")
+                if "provider" in sections
+                else "未开启"
+            ),
+            "provider_enabled": "provider" in sections,
             "sent_text": (
                 yesterday.get("sent_text", "--") if "qq" in sections else "未开启"
             ),
@@ -788,6 +796,7 @@ class DailyReportBuilder:
             "resource": "资源",
             "offline": "掉线",
             "service": "服务",
+            "provider": "LLM",
         }.get(kind, kind or "事件")
 
     @staticmethod
@@ -1369,10 +1378,10 @@ class DailyReportBuilder:
         try:
             start_text = f"{(chart_days[0] - timedelta(days=2)).isoformat()} 00:00:00"
             end_text = f"{(chart_days[-1] + timedelta(days=3)).isoformat()} 00:00:00"
-            rows, min_created, truncated = fetch_provider_window(
+            rows, oldest_kept, truncated = fetch_provider_window(
                 connection, start_text, end_text
             )
-            recent = fetch_provider_recent(connection, 20)
+            recent = fetch_provider_recent(connection, 30)
         except Exception:
             return {
                 "available": False,
@@ -1397,11 +1406,28 @@ class DailyReportBuilder:
                 "note": "",
             }
 
-        stats = aggregate_provider_rows(rows, window_set, self.tz)
-        streak = error_streak(recent)
+        try:
+            stats = aggregate_provider_rows(rows, window_set, self.tz)
+            streak = error_streak(recent)
+        except Exception:
+            # A malformed row set must cost this section only, never the
+            # whole report build.
+            logger.exception("LLM 服务质量聚合失败")
+            return {
+                "available": False,
+                "empty_reason": "LLM 服务质量数据异常",
+                "stats": {},
+                "top_models": [],
+                "top_conversations": [],
+                "trend": None,
+                "note": "",
+            }
 
+        # The cap keeps the newest rows and drops the oldest ones: days
+        # older than the oldest kept row are unknown, so the trend shows a
+        # gap there instead of a fake zero.
         min_day = None
-        parsed_min = parse_utc_value(min_created)
+        parsed_min = parse_utc_value(oldest_kept)
         if parsed_min is not None:
             min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
 
@@ -1643,7 +1669,7 @@ def build_report_text(view: dict[str, Any]) -> str:
                 )
             )
             if stats.get("streak"):
-                lines.append(f"LLM 连续失败: {stats['streak_text']} 次")
+                lines.append(f"LLM 当前连续失败: {stats['streak_text']} 次")
         else:
             lines.append(f"LLM 质量: {quality.get('empty_reason') or '暂无数据'}")
     website = view.get("website") or {}

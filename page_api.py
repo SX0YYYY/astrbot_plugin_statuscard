@@ -310,6 +310,7 @@ class PageApi:
             provider_quality = {
                 "available": False,
                 "empty_reason": "查询失败",
+                "reason_code": "query_failed",
                 "calls": 0,
                 "completed": 0,
                 "errors": 0,

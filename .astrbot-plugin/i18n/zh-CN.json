@@ -179,7 +179,11 @@
         "table_errors": "失败",
         "table_fail_rate": "失败率",
         "table_conversation": "会话",
-        "kind_provider": "LLM"
+        "kind_provider": "LLM",
+        "kind_event": "事件",
+        "quality_reason_no_db": "未找到 AstrBot 数据库（data_v4.db）",
+        "quality_reason_query_failed": "provider_stats 查询失败",
+        "quality_reason_no_data_today": "今天还没有 LLM 调用记录"
       }
     }
   }

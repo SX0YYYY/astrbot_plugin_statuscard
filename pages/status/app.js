@@ -848,9 +848,18 @@
         "今天 · 按展示时区",
       );
     } else {
-      $("provider-overview").innerHTML = empty(
-        quality.empty_reason || t("report_no_data", "暂无数据"),
-      );
+      // The backend ships fixed Chinese reasons; translate the known codes
+      // so an English dashboard does not leak Chinese strings.
+      const reasonCodes = {
+        no_db: t("quality_reason_no_db", "未找到 AstrBot 数据库（data_v4.db）"),
+        query_failed: t("quality_reason_query_failed", "provider_stats 查询失败"),
+        no_data_today: t("quality_reason_no_data_today", "今天还没有 LLM 调用记录"),
+      };
+      const reason =
+        (quality.reason_code && reasonCodes[quality.reason_code]) ||
+        quality.empty_reason ||
+        t("report_no_data", "暂无数据");
+      $("provider-overview").innerHTML = empty(reason);
       $("provider-summary").textContent = "--";
     }
 
@@ -1175,7 +1184,7 @@
         provider: t("kind_provider", "LLM"),
       }[kind] ||
       kind ||
-      t("kind_service", "事件")
+      t("kind_event", "事件")
     );
   }
 
@@ -1419,6 +1428,9 @@
                 .join("") +
               "</tbody></table></div>"
             : "") +
+          (quality.note
+            ? '<p class="card-note">' + esc(quality.note) + "</p>"
+            : "") +
           "</div>",
       );
     }
@@ -1618,7 +1630,7 @@
       activateTab(name, true)
         .then(() => {
           clearPanelError(name);
-          toast(t("refresh_done", "已刷新"));
+          toast(t("refresh_done", "数据已更新"));
         })
         .catch((retryError) => {
           showPanelError(name, retryError);
@@ -1795,7 +1807,7 @@
     try {
       await activateTab(state.tab, true);
       setRefreshState(button, "done");
-      toast(t("refresh_done", "已刷新"));
+      toast(t("refresh_done", "数据已更新"));
     } catch (error) {
       setRefreshState(button, "failed");
       showPanelError(state.tab, error);

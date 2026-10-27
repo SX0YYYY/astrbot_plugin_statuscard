@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -380,12 +381,13 @@ def test_provider_watch_cooldown_gates_realert(tmp_path, monkeypatch) -> None:
     asyncio.run(engine._check_provider_quality())
     assert _watch_state(engine).get("alerting") is False
 
-    # Failing again right after the recovery stays quiet: the cooldown has
-    # not elapsed since the last alert.
+    # Failing again right after the recovery stays quiet push-wise (the
+    # cooldown has not elapsed since the last alert), but the rule still
+    # latches and records the incident.
     monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
     engine._provider_last_check = 0
     asyncio.run(engine._check_provider_quality())
-    assert _watch_state(engine).get("alerting") is False
+    assert _watch_state(engine).get("alerting") is True
     assert len(plugin.sent) == 2
 
 
@@ -497,3 +499,182 @@ def test_overview_streak_uses_newest_first_order(tmp_path: Path) -> None:
         ],
     )
     assert pq.recent_streak(path)[0] == 0
+
+
+# ----------------------------------------------------------------------
+# v2.16.1 找茬修复回归
+# ----------------------------------------------------------------------
+
+
+def test_fail_rate_denominator_excludes_aborted() -> None:
+    rows = [
+        _row(_utc_text(), "completed", model="m-a"),
+        _row(_utc_text(), "error", model="m-a"),
+        _row(_utc_text(), "aborted", model="m-a"),
+    ]
+    stats = pq.aggregate(rows, None, TZ)
+    # 1 error / (1 completed + 1 error) = 50%, not 1/3.
+    assert stats["by_model"][0]["fail_rate"] == pytest.approx(50.0)
+    # A model with only aborts has no measurable failure rate.
+    stats2 = pq.aggregate([_row(_utc_text(), "aborted", model="m-b")], None, TZ)
+    assert stats2["by_model"][0]["fail_rate"] is None
+
+
+def test_fetch_window_oldest_kept_marks_truncated_gap(tmp_path: Path) -> None:
+    rows = [(_utc_text(minutes=-i), "completed", "m", "c", 0, 0, 0) for i in range(7)]
+    path = _make_db(tmp_path, rows)
+    connection = pq.connect_readonly(path)
+    assert connection is not None
+    try:
+        fetched, _oldest_kept, truncated = pq.fetch_window(
+            connection, "2000-01-01 00:00:00", "2999-01-01 00:00:00", limit=5
+        )
+    finally:
+        connection.close()
+    assert truncated is True
+    assert len(fetched) == 5
+    # Exactly-at-cap is NOT truncation.
+    conn2 = pq.connect_readonly(path)
+    try:
+        fetched2, _oldest, truncated2 = pq.fetch_window(
+            conn2, "2000-01-01 00:00:00", "2999-01-01 00:00:00", limit=7
+        )
+    finally:
+        conn2.close()
+    assert truncated2 is False
+    assert fetched2[0][0] == rows[0][0]
+
+
+def test_today_overview_streak_uses_full_table(tmp_path: Path) -> None:
+    path = _make_db(
+        tmp_path,
+        [
+            (_utc_text(minutes=-1), "error", "m", "c", 0, 0, 0),
+            (_utc_text(minutes=-90), "error", "m", "c", 0, 0, 0),
+            (_utc_text(minutes=-95), "error", "m", "c", 0, 0, 0),
+        ],
+    )
+    config = {"display": {"timezone": "Asia/Shanghai"}}
+    # Three newest errors regardless of local day: the card must agree
+    # with the alert engine when the streak crosses midnight.
+    assert pq.today_overview(config, path)["error_streak"] == 3
+
+
+def test_today_overview_reason_codes(tmp_path: Path) -> None:
+    config = {"display": {"timezone": "Asia/Shanghai"}}
+    empty_db = _make_db(tmp_path, [])
+    empty = pq.today_overview(config, empty_db)
+    assert empty["reason_code"] == "no_data_today"
+    missing = pq.today_overview(config, tmp_path / "nope.db")
+    assert missing["reason_code"] == "no_db"
+
+
+def test_provider_watch_cooldown_records_event(tmp_path, monkeypatch) -> None:
+
+    plugin = _OkPlugin()
+    engine = _engine(tmp_path, plugin)
+    store = engine.report_store
+    failing = lambda db_path, limit: (5, "error", 30)
+    monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
+    asyncio.run(engine._check_provider_quality())
+    assert _watch_state(engine).get("alerting") is True
+
+    recovered = lambda db_path, limit: (0, "completed", 30)
+    monkeypatch.setattr(alerts_module, "provider_recent_streak", recovered)
+    engine._provider_last_check = 0
+    asyncio.run(engine._check_provider_quality())
+    assert _watch_state(engine).get("alerting") is False
+
+    # A second threshold hit inside the cooldown must still latch and
+    # record an event - only the duplicate push is suppressed.
+    monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
+    engine._provider_last_check = 0
+    asyncio.run(engine._check_provider_quality())
+    assert _watch_state(engine).get("alerting") is True
+    events = store.list_events_range(0, int(time.time()) + 60, limit=50)
+    cooldown_alerts = [
+        e for e in events if e["kind"] == "provider" and "冷却" in (e["detail"] or "")
+    ]
+    assert len(cooldown_alerts) == 1
+
+
+def test_provider_watch_recovery_pending_retry(tmp_path, monkeypatch) -> None:
+    plugin = _OkPlugin()
+    engine = _engine(tmp_path, plugin)
+    monkeypatch.setattr(
+        alerts_module, "provider_recent_streak", lambda db_path, limit: (3, "error", 30)
+    )
+    asyncio.run(engine._check_provider_quality())
+    assert _watch_state(engine).get("alerting") is True
+
+    monkeypatch.setattr(
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: (0, "completed", 30),
+    )
+    engine._provider_last_check = 0
+    asyncio.run(engine._check_provider_quality())
+    watch = _watch_state(engine)
+    assert watch.get("alerting") is False
+    # First recovery send succeeded (plugin returns True), so nothing pends.
+    assert "pending_recovery" not in watch
+    assert len(plugin.sent) == 2
+    assert "此前连续失败: 3 次" in plugin.sent[1][1]
+
+    # A failed recovery send queues the notice for retry.
+    class _BrokenPlugin:
+        async def send_text(self, targets, text, source="unknown") -> bool:
+            return False
+
+    (tmp_path / "sub2").mkdir(exist_ok=True)
+    engine2 = _engine(tmp_path / "sub2", _OkPlugin())
+    engine2.plugin = _BrokenPlugin()
+    monkeypatch.setattr(
+        alerts_module, "provider_recent_streak", lambda db_path, limit: (3, "error", 30)
+    )
+    asyncio.run(engine2._check_provider_quality())
+    monkeypatch.setattr(
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: (0, "completed", 30),
+    )
+    engine2._provider_last_check = 0
+    asyncio.run(engine2._check_provider_quality())
+    watch2 = _watch_state(engine2)
+    assert watch2.get("pending_recovery")
+    assert watch2.get("recovery_retry_count") == 1
+    # The next check (after the retry delay) retries the queued notice.
+    engine2.plugin = _OkPlugin()
+    watch2["recovery_next_attempt"] = 0
+    engine2.state.save()
+    engine2._provider_last_check = 0
+    asyncio.run(engine2._check_provider_quality())
+    assert "pending_recovery" not in _watch_state(engine2)
+    assert len(engine2.plugin.sent) == 1
+    assert "已恢复" in engine2.plugin.sent[0][1]
+
+
+def test_provider_watch_threshold_zero_disables(tmp_path) -> None:
+    from astrbot_plugin_statuscard.report_store import ReportStore
+    from astrbot_plugin_statuscard.state import StateStore
+
+    config = {
+        "alerts": {
+            "enabled": True,
+            "targets": ["123456"],
+            "provider_watch": {"enabled": True, "threshold": 0},
+        }
+    }
+    engine = AlertEngine(
+        _OkPlugin(),
+        StateStore(tmp_path / "s.json"),
+        config,
+        report_store=ReportStore(tmp_path / "r.db"),
+    )
+    assert engine.provider_watch_threshold == 0
+    asyncio.run(engine._check_provider_quality())
+    assert plugin_sent_empty(engine)
+
+
+def plugin_sent_empty(engine) -> bool:
+    return not engine.plugin.sent

@@ -36,6 +36,10 @@ from typing import Any
 
 PROVIDER_DB_NAME = "data_v4.db"
 
+# Rows whose latency or TTFT exceed this are treated as not recorded: a
+# missing/garbled timestamp or a clock jump must not poison the averages.
+MAX_USABLE_LATENCY = 86400.0
+
 
 def parse_utc_value(value: Any) -> datetime | None:
     """Parse an AstrBot ``created_at`` cell into an aware UTC datetime.
@@ -89,9 +93,11 @@ def fetch_window(
 ) -> tuple[list[tuple[Any, ...]], str | None, bool]:
     """Rows in ``[start_text, end_text)`` newest-first, capped by SQL.
 
-    Returns ``(rows, min_created, truncated)``; ``min_created`` is the oldest
-    ``created_at`` in the whole table so callers can mark partial history,
-    and ``truncated`` flags that the cap cut the oldest part of the window.
+    Returns ``(rows, oldest_kept, truncated)``. ``oldest_kept`` is the oldest
+    ``created_at`` row actually returned: when the cap cuts the window the
+    oldest rows are exactly what is missing, so trend charts must treat
+    everything older than ``oldest_kept`` as unknown (a gap) rather than
+    reading the missing days as zero.
     """
 
     rows = connection.execute(
@@ -103,14 +109,14 @@ def fetch_window(
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        (start_text, end_text, int(limit)),
+        (start_text, end_text, int(limit) + 1),
     ).fetchall()
-    min_row = connection.execute(
-        "SELECT MIN(created_at) FROM provider_stats"
-    ).fetchone()
-    min_created = str(min_row[0]) if min_row and min_row[0] else None
-    truncated = len(rows) >= int(limit)
-    return rows, min_created, truncated
+    # Fetch one extra row purely to distinguish "exactly at the cap" from
+    # "truncated"; drop it before returning.
+    truncated = len(rows) > int(limit)
+    rows = rows[: int(limit)]
+    oldest_kept = str(rows[-1][0]) if rows else None
+    return rows, oldest_kept, truncated
 
 
 def fetch_recent(
@@ -173,30 +179,6 @@ def recent_streak(
     return error_streak(recent), latest, len(recent)
 
 
-def watch_window_text(
-    config: Any, days: int = 1, today: Any = None
-) -> tuple[str, str, set[str], Any]:
-    """SQL window plus local day-keys for a quality report window.
-
-    Returns ``(start_text, end_text, window_keys, tz)`` for the last
-    ``days`` local days ending ``today`` (default: today in
-    ``display.timezone``). The SQL window is widened by two days on each
-    side so the UTC string comparison cannot clip local-day boundaries;
-    ``window_keys`` narrows the aggregates back to the local window.
-    """
-
-    from .collectors import get_timezone, now_in_timezone
-
-    tz = get_timezone(config)
-    today = today or now_in_timezone(config).date()
-    days = max(1, int(days))
-    start_day = today - timedelta(days=days - 1)
-    keys = {(start_day + timedelta(days=offset)).isoformat() for offset in range(days)}
-    start_text = f"{(start_day - timedelta(days=2)).isoformat()} 00:00:00"
-    end_text = f"{(today + timedelta(days=3)).isoformat()} 00:00:00"
-    return start_text, end_text, keys, tz
-
-
 def _percentile(sorted_values: list[float], fraction: float) -> float | None:
     """Nearest-rank percentile of an ascending list; ``None`` when empty."""
 
@@ -245,7 +227,13 @@ def aggregate(
             ttft = float(row[6] or 0.0)
         except (TypeError, ValueError):
             start_ts = end_ts = ttft = 0.0
-        latency = end_ts - start_ts if end_ts > start_ts > 0 else 0.0
+        # A sane upper bound keeps one corrupted row (clock jump, dirty
+        # data) from dragging the averages and percentiles to nonsense.
+        latency = (
+            end_ts - start_ts
+            if 0 < start_ts < end_ts <= start_ts + MAX_USABLE_LATENCY
+            else 0.0
+        )
 
         local_day = created.astimezone(tz).strftime("%Y-%m-%d")
         day_bucket = by_day.setdefault(local_day, {"calls": 0, "errors": 0})
@@ -272,16 +260,25 @@ def aggregate(
 
         model = str(row[2] or "未知模型")
         model_stats = by_model.setdefault(
-            model, {"calls": 0, "errors": 0, "latency_sum": 0.0, "latency_n": 0}
+            model,
+            {
+                "calls": 0,
+                "errors": 0,
+                "completed_n": 0,
+                "latency_sum": 0.0,
+                "latency_n": 0,
+            },
         )
         model_stats["calls"] += 1
         if status == "error":
             model_stats["errors"] += 1
+        if status == "completed":
+            model_stats["completed_n"] += 1
         if status == "completed" and latency > 0:
             model_stats["latency_sum"] += latency
             model_stats["latency_n"] += 1
             latencies.append(latency)
-        if status == "completed" and ttft > 0:
+        if status == "completed" and 0 < ttft <= MAX_USABLE_LATENCY:
             ttfts.append(ttft)
 
         conv = str(row[3] or "").strip()
@@ -302,13 +299,16 @@ def aggregate(
     for model, stats in sorted(
         by_model.items(), key=lambda pair: pair[1]["calls"], reverse=True
     ):
+        # Same denominator as the headline success rate: user aborts are
+        # not model failures, so they stay out of the per-model rate too.
+        model_attempts = stats["completed_n"] + stats["errors"]
         models_out.append(
             {
                 "name": model,
                 "calls": int(stats["calls"]),
                 "errors": int(stats["errors"]),
                 "fail_rate": (
-                    stats["errors"] / stats["calls"] * 100.0 if stats["calls"] else None
+                    stats["errors"] / model_attempts * 100.0 if model_attempts else None
                 ),
                 "avg_latency": (
                     stats["latency_sum"] / stats["latency_n"]
@@ -352,7 +352,10 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
 
     Covers today (``display.timezone``) only. Everything degrades to
     ``available=False`` with a reason when the database is missing or the
-    day has no records yet.
+    day has no records yet. ``reason_code`` lets the dashboard translate
+    the fixed Chinese reason into the UI language. The streak uses the
+    newest rows of the whole table so the card agrees with the alert
+    engine when a failure streak crosses midnight.
     """
 
     from .collectors import get_timezone, now_in_timezone
@@ -360,6 +363,7 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
     result: dict[str, Any] = {
         "available": False,
         "empty_reason": None,
+        "reason_code": None,
         "calls": 0,
         "completed": 0,
         "errors": 0,
@@ -371,15 +375,20 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
     connection = connect_readonly(db_path)
     if connection is None:
         result["empty_reason"] = "未找到 AstrBot 数据库（data_v4.db）"
+        result["reason_code"] = "no_db"
         return result
     tz = get_timezone(config)
     try:
         today = now_in_timezone(config).date()
         start_text = f"{(today - timedelta(days=2)).isoformat()} 00:00:00"
         end_text = f"{(today + timedelta(days=2)).isoformat()} 00:00:00"
-        rows, _min_created, _truncated = fetch_window(connection, start_text, end_text)
+        rows, _oldest_kept, _truncated = fetch_window(connection, start_text, end_text)
+        # Streak over the newest rows regardless of day, same as the alert
+        # engine's walk; a streak that started yesterday must stay visible.
+        recent = fetch_recent(connection, 30)
     except Exception:
         result["empty_reason"] = "provider_stats 查询失败"
+        result["reason_code"] = "query_failed"
         return result
     finally:
         connection.close()
@@ -392,16 +401,15 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
     ]
     if not window_rows:
         result["empty_reason"] = "今天还没有 LLM 调用记录"
+        result["reason_code"] = "no_data_today"
         return result
 
     stats = aggregate(window_rows, None, tz)
-    streak = error_streak(
-        [(str(row[0] or ""), str(row[1] or "")) for row in window_rows]
-    )
     result.update(
         {
             "available": True,
             "empty_reason": None,
+            "reason_code": None,
             "calls": stats["total"],
             "completed": stats["completed"],
             "errors": stats["errors"],
@@ -412,7 +420,7 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
                 if stats["success_rate"] is not None
                 else "--"
             ),
-            "error_streak": streak,
+            "error_streak": error_streak(recent),
         }
     )
     return result

@@ -19,6 +19,8 @@ python -m pytest -q
 |---|---|
 | `main.py` | 命令、渲染入口、插件生命周期 |
 | `collectors.py` | psutil / OneBot / 数据库采集 |
+| `provider_quality.py` | LLM 服务质量聚合（只读 AstrBot provider_stats）与连续失败检测 |
+| `aggregator.py` | 告警聚合降噪（窗口内合并后续告警） |
 | `redactor.py` | **脱敏规则的唯一定义**：状态卡、日报、Web 看板共用 |
 | `delivery.py` | **投递服务**：发送、重试判定、回执记录、待发队列 |
 | `onebot_receipt.py` | OneBot 协议回执解析与「能否安全重发」判定 |
@@ -26,7 +28,7 @@ python -m pytest -q
 | `audit.py` | 配置体检：阈值 0、缺目标、脱敏规则拼错、监测项无效等（启动与看板提示） |
 | `monitor.py` | 服务可用性监测（HTTP/TCP/Docker/进程/systemd） |
 | `report.py` / `report_view.py` / `report_store.py` | 日报的数据采集、聚合与存储 |
-| `page_api.py` | Web 看板的 5 个 API（基于官方 `astrbot.api.web`） |
+| `page_api.py` | Web 看板的 6 个 API（基于官方 `astrbot.api.web`） |
 | `sampler.py` / `state.py` | 后台采样与线程安全的本地状态存储 |
 | `t2i_renderer.py` | Jinja2 → 单文件 HTML（CSS/图片内联） |
 | `local_card.py` | T2I 不可用时用 Pillow 绘制的本地降级卡 |

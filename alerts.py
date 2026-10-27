@@ -100,11 +100,14 @@ class AlertEngine:
         self.provider_watch_enabled = cfg_bool(
             config, "alerts.provider_watch.enabled", False
         )
-        self.provider_watch_threshold = clamp_config(
-            cfg_int(config, "alerts.provider_watch.threshold", 3),
-            1,
-            10,
-            "alerts.provider_watch.threshold",
+        # A hand-edited threshold of 0 means "disabled" (same reading as the
+        # resource rules); clamping it to the slider minimum would instead
+        # turn it into the most sensitive value.
+        raw_threshold = cfg_int(config, "alerts.provider_watch.threshold", 3)
+        self.provider_watch_threshold = (
+            clamp_config(raw_threshold, 1, 10, "alerts.provider_watch.threshold")
+            if raw_threshold > 0
+            else 0
         )
         self.provider_watch_cooldown = clamp_config(
             cfg_int(config, "alerts.provider_watch.cooldown_seconds", 1800),
@@ -925,20 +928,25 @@ class AlertEngine:
         so a user stop in the middle cannot hide a real failure streak.
         Recovery requires an explicit ``completed`` as the newest row -
         an unreadable table keeps the current state instead of resolving
-        the alert. A send failure is recorded as a ``failed`` event and the
-        rule still latches, so the recovery notice is the retry path; the
-        cooldown only gates re-alerting after a recovery.
+        the alert. A send failure is recorded as a ``failed`` event, the
+        rule still latches and the recovery notice is queued with retries
+        (``pending_recovery``), so one unreachable window cannot swallow
+        the whole episode. A second threshold hit inside the cooldown
+        still latches and records an event - only the duplicate push is
+        suppressed, so the report keeps the full incident trail.
         """
 
         now = time.time()
         if now - self._provider_last_check < 60:
+            return
+        if self.provider_watch_threshold <= 0:
             return
         self._provider_last_check = now
         try:
             streak, latest, sampled = await asyncio.to_thread(
                 provider_recent_streak,
                 None,
-                max(20, self.provider_watch_threshold * 3),
+                max(30, self.provider_watch_threshold * 3),
             )
         except Exception:
             logger.debug("LLM 服务质量检查失败", exc_info=True)
@@ -953,20 +961,71 @@ class AlertEngine:
         alerting = bool(watch.get("alerting"))
         last_alert_ts = float(watch.get("last_alert_ts") or 0.0)
 
+        # Retries for a recovery notice whose send failed earlier.
+        pending_text = str(watch.get("pending_recovery") or "")
+        if pending_text:
+            next_attempt = float(watch.get("recovery_next_attempt") or 0.0)
+            if now >= next_attempt:
+                result = await self._send(
+                    pending_text, source="provider", kind="provider"
+                )
+                if self._delivered(result):
+                    watch.pop("pending_recovery", None)
+                    watch.pop("recovery_retry_count", None)
+                    watch.pop("recovery_next_attempt", None)
+                    self.state.save()
+                    logger.info("LLM 服务恢复通知补发成功")
+                else:
+                    retry_count = int(watch.get("recovery_retry_count") or 1) + 1
+                    if retry_count >= 3:
+                        watch.pop("pending_recovery", None)
+                        watch.pop("recovery_retry_count", None)
+                        watch.pop("recovery_next_attempt", None)
+                        self.state.save()
+                        logger.warning(
+                            "LLM 服务恢复通知连续发送失败 %d 次，放弃补发",
+                            retry_count,
+                        )
+                    else:
+                        watch["recovery_retry_count"] = retry_count
+                        watch["recovery_next_attempt"] = now + retry_delay(retry_count)
+                        self.state.save()
+            return
+
         if not alerting and streak >= self.provider_watch_threshold:
-            if last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown:
-                return
             text = (
                 "⚠️ LLM 服务连续失败\n"
                 "──────────────\n"
+                f"主机: {self._hostname()}\n"
                 f"连续失败: {streak} 次（阈值 {self.provider_watch_threshold}）\n"
                 f"最近状态: {latest or '未知'}\n"
                 f"时间: {_now_text(self.config)}"
             )
+            in_cooldown = bool(
+                last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown
+            )
+            if in_cooldown:
+                # Latch and record without pushing: the event log keeps the
+                # incident and the recovery notice tells the rest of it.
+                watch["alerting"] = True
+                watch["last_streak"] = streak
+                self.state.save()
+                self._record_event(
+                    "provider",
+                    "LLM 服务",
+                    f"连续 {streak} 次 LLM 调用失败（冷却窗口内，未重复推送）",
+                    "alert",
+                )
+                logger.warning(
+                    "LLM 服务冷却窗口内再次连续失败 %d 次，已记录事件不重复推送",
+                    streak,
+                )
+                return
             result = await self._send(text, source="provider", kind="provider")
             delivered = self._delivered(result)
             watch["alerting"] = True
             watch["last_alert_ts"] = now
+            watch["last_streak"] = streak
             self.state.save()
             if delivered:
                 self._record_event(
@@ -996,13 +1055,24 @@ class AlertEngine:
                 "recovery",
             )
             if self.recover_notify:
+                last_streak = int(watch.get("last_streak") or 0)
                 text = (
                     "✅ 已恢复 · LLM 服务\n"
                     "──────────────\n"
-                    f"最近状态: completed\n"
+                    f"主机: {self._hostname()}\n"
+                    + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
+                    + f"最近状态: completed\n"
                     f"时间: {_now_text(self.config)}"
                 )
-                await self._send(text, source="provider", kind="provider")
+                result = await self._send(text, source="provider", kind="provider")
+                if not self._delivered(result):
+                    # The recovery notice is the only signal for a suppressed
+                    # or failed-alert episode; retry it before giving up.
+                    watch["pending_recovery"] = text
+                    watch["recovery_retry_count"] = 1
+                    watch["recovery_next_attempt"] = now + retry_delay(1)
+                    self.state.save()
+                    logger.warning("LLM 服务恢复通知发送失败，稍后补发")
             logger.info("LLM 服务已恢复（最近一次调用成功）")
 
     def _hostname(self) -> str:

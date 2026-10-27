@@ -179,7 +179,11 @@
         "table_errors": "Failed",
         "table_fail_rate": "Fail rate",
         "table_conversation": "Conversation",
-        "kind_provider": "LLM"
+        "kind_provider": "LLM",
+        "kind_event": "Event",
+        "quality_reason_no_db": "AstrBot database (data_v4.db) not found",
+        "quality_reason_query_failed": "provider_stats query failed",
+        "quality_reason_no_data_today": "No LLM calls today yet"
       }
     }
   }
