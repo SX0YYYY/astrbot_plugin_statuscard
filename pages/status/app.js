@@ -379,8 +379,32 @@
     const max = options.max || niceMax(Math.max.apply(null, values) * 1.15);
     const formatter = options.format || ((value) => String(Math.round(value)));
     const count = labels.length;
+    // Place samples by timestamp, not by array index: with a 30-day window
+    // and only a few days of history, index spacing stretches that data over
+    // the whole chart and looks identical to the 7-day view. A time axis
+    // leaves the empty part of the window visibly empty.
+    const timestamps = Array.isArray(options.timestamps)
+      ? options.timestamps
+      : null;
+    const windowStart = Number(options.windowStart);
+    const windowEnd = Number(options.windowEnd);
+    const useTimeAxis = Boolean(
+      timestamps &&
+      timestamps.length === count &&
+      Number.isFinite(windowStart) &&
+      Number.isFinite(windowEnd) &&
+      windowEnd > windowStart,
+    );
+    const span = useTimeAxis ? windowEnd - windowStart : 0;
     const x = (index) =>
-      left + plotW * (index / Math.max(1, count - 1));
+      useTimeAxis
+        ? left +
+          plotW *
+            Math.min(
+              1,
+              Math.max(0, (Number(timestamps[index]) - windowStart) / span),
+            )
+        : left + plotW * (index / Math.max(1, count - 1));
     const y = (value) =>
       top + plotH * (1 - Math.min(1, Math.max(0, value / max)));
 
@@ -423,23 +447,36 @@
         esc(formatter((max * index) / 4)) +
         "</text>";
     }
-    const indexes = Array.from(
-      new Set(
-        [0, 0.25, 0.5, 0.75, 1].map((ratio) =>
-          Math.round((count - 1) * ratio),
+    if (useTimeAxis && options.labelForTime) {
+      [0, 0.25, 0.5, 0.75, 1].forEach((ratio) => {
+        svg +=
+          '<text class="axis" x="' +
+          (left + plotW * ratio) +
+          '" y="' +
+          (height - 6) +
+          '" text-anchor="middle">' +
+          esc(options.labelForTime(windowStart + span * ratio)) +
+          "</text>";
+      });
+    } else {
+      const indexes = Array.from(
+        new Set(
+          [0, 0.25, 0.5, 0.75, 1].map((ratio) =>
+            Math.round((count - 1) * ratio),
+          ),
         ),
-      ),
-    );
-    indexes.forEach((index) => {
-      svg +=
-        '<text class="axis" x="' +
-        x(index) +
-        '" y="' +
-        (height - 6) +
-        '" text-anchor="middle">' +
-        esc(labels[index]) +
-        "</text>";
-    });
+      );
+      indexes.forEach((index) => {
+        svg +=
+          '<text class="axis" x="' +
+          x(index) +
+          '" y="' +
+          (height - 6) +
+          '" text-anchor="middle">' +
+          esc(labels[index]) +
+          "</text>";
+      });
+    }
     series.forEach((item) => {
       const segments = [];
       let current = [];
@@ -514,6 +551,11 @@
       series,
       formatter,
       labels,
+      timestamps,
+      windowStart,
+      windowEnd,
+      useTimeAxis,
+      span,
       titleFor: options.titleFor,
     });
   }
@@ -541,7 +583,20 @@
       const rect = svg.getBoundingClientRect();
       if (!rect.width) return -1;
       const localX = ((clientX - rect.left) * ctx.width) / rect.width;
-      const ratio = (localX - ctx.left) / ctx.plotW;
+      const ratio = Math.max(0, Math.min(1, (localX - ctx.left) / ctx.plotW));
+      if (ctx.useTimeAxis) {
+        const target = ctx.windowStart + ctx.span * ratio;
+        let best = 0;
+        let bestDiff = Infinity;
+        ctx.timestamps.forEach((ts, index) => {
+          const diff = Math.abs(Number(ts) - target);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            best = index;
+          }
+        });
+        return best;
+      }
       return Math.max(
         0,
         Math.min(ctx.count - 1, Math.round(ratio * (ctx.count - 1))),
@@ -945,6 +1000,10 @@
       labels,
       max: 100,
       format: (value) => Math.round(value) + "%",
+      timestamps: points.map((point) => point.ts),
+      windowStart: data.window_start,
+      windowEnd: data.window_end,
+      labelForTime: (ts) => labelForTs(ts, range),
       titleFor: (index) => formatDateTime(points[index] && points[index].ts),
     });
 
@@ -975,6 +1034,10 @@
       labels: networkLabels,
       height: 170,
       format: formatRate,
+      timestamps: network.map((point) => point.ts),
+      windowStart: data.window_start,
+      windowEnd: data.window_end,
+      labelForTime: (ts) => labelForTs(ts, range),
       titleFor: (index) =>
         formatDateTime(network[index] && network[index].ts),
     });

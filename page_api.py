@@ -504,6 +504,8 @@ class PageApi:
             {
                 "ok": True,
                 "range": key,
+                "window_start": start,
+                "window_end": end,
                 "points": points,
                 "network": net_points,
                 "network_redacted": network_redacted,

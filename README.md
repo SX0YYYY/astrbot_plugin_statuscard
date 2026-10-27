@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.13.3-blue)
+![Version](https://img.shields.io/badge/version-2.13.4-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -150,7 +150,7 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览、历史趋
 
 ![日报（趋势图）](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/config-page-3.png)
 
-> 三张截图展示的是**打开“显示高级选项”后**的配置页，图中数值为示例配置（如磁盘阈值 80、日报内容六项全勾、状态图时间 20:00），**默认值以下文文字为准**。截图中的推送目标已替换为示例值，Webhook Token 以掩码显示。
+> 三张截图为配置页的**默认折叠状态**（未展开高级选项）。图中数值为示例配置（日报内容六项全勾、状态图时间 20:00），**默认值以下文文字为准**；推送目标已替换为示例值。
 
 配置页按使用顺序分为六个分组：**状态卡显示、告警与每日定时状态图、日报（趋势图）、服务可用性监测、头像、背景**。默认只显示常用项；打开“显示高级选项”后才出现阈值、时区、脱敏等精细设置。
 
@@ -616,6 +616,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.13.4**：7/30 天趋势按时间铺开（数据不足会留白），配置页截图更新为默认折叠状态
 - **v2.13.3**：看板曲线悬停查看数值、范围切换加载反馈、网络趋势支持 7/30 天；日报回执超时不再误记为「已发送」
 - **v2.13.2**：看板语言切换、日报刷新、未恢复告警显示、英文界面格式、窄屏布局等体验修复
 - **v2.13.1**：消息不重复发送闭环、日报「接收」口径修正、周报可独立开启、CSV 导出遵守脱敏
