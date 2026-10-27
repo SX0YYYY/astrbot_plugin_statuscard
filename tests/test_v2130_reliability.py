@@ -155,7 +155,11 @@ def test_alert_gives_up_after_three_failures(tmp_path: Path) -> None:
     rule = state.data["alerts"]["rules"]["cpu"]
     assert rule["alerting"] is True  # treated as delivered-but-failed
     assert rule["retry_count"] == 0
-    events = store.list_events(date.today().isoformat(), limit=50)
+    # Query by timestamp, not date.today(): the event day is written in
+    # display.timezone (Asia/Shanghai), while CI runs in UTC. Around 00:00
+    # Beijing time the two dates differ and a date-based lookup misses the
+    # event entirely.
+    events = store.list_events_range(0, int(time.time()) + 60, limit=50)
     failed = [e for e in events if e["status"] == "failed"]
     assert len(failed) == 1
 
