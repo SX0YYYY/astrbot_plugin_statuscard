@@ -54,40 +54,27 @@ class DeliveryResult:
 
         return not self.ok and not self.uncertain_targets
 
+    @property
+    def partial(self) -> bool:
+        """True when at least one target succeeded and another failed.
+
+        ``ok`` stays True (the message did reach someone) but callers should
+        surface the partial success instead of recording a clean delivery.
+        """
+
+        return self.ok and bool(self.failed_targets)
+
     def as_state(self) -> dict[str, Any]:
         """The shape stored in ``state.json`` for the diagnostics command."""
 
         return {
             "ok": self.ok,
+            "partial": self.partial,
             "ok_targets": list(self.ok_targets),
             "failed_targets": list(self.failed_targets),
             "uncertain_targets": list(self.uncertain_targets),
             "receipts": dict(self.receipts),
             "retcodes": dict(self.retcodes),
-        }
-
-
-@dataclass
-class Delivery:
-    """One message that is waiting to be delivered."""
-
-    kind: str
-    source: str
-    targets: list[str]
-    payload: dict[str, Any]
-    created_at: float = field(default_factory=time.time)
-    attempts: int = 0
-    last_error: str = ""
-
-    def to_state(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "source": self.source,
-            "targets": list(self.targets),
-            "payload": dict(self.payload),
-            "created_at": self.created_at,
-            "attempts": self.attempts,
-            "last_error": self.last_error,
         }
 
 
@@ -111,7 +98,6 @@ class DeliveryService:
         self.state = state
         self._get_client = get_client
         self._build_chain = build_chain
-        self._queue: list[Delivery] = []
 
     # ------------------------------------------------------------------
     # sending
@@ -281,34 +267,3 @@ class DeliveryService:
             self.state.save()
         except Exception as exc:
             logger.warning("记录主动推送结果失败: %s", exc)
-
-    # ------------------------------------------------------------------
-    # queue
-    # ------------------------------------------------------------------
-
-    def enqueue(self, delivery: Delivery) -> None:
-        """Remember a message that could not be delivered yet."""
-
-        self._queue.append(delivery)
-
-    def dequeue(self, source: str | None = None) -> list[Delivery]:
-        """Take the queued messages, optionally of one source only."""
-
-        if source is None:
-            pending = list(self._queue)
-            self._queue.clear()
-            return pending
-        pending = [item for item in self._queue if item.source == source]
-        for item in pending:
-            self._queue.remove(item)
-        return pending
-
-    def queued(self, source: str | None = None) -> list[Delivery]:
-        """The queued messages without removing them."""
-
-        if source is None:
-            return list(self._queue)
-        return [item for item in self._queue if item.source == source]
-
-    def clear_queue(self) -> None:
-        self._queue.clear()

@@ -5,7 +5,8 @@
 - **项目**：astrbot_plugin_picstatus
 - **作者**：薄暝（exynos967）
 - **仓库**：https://github.com/exynos967/astrbot_plugin_picstatus
-- **许可证**：GNU Affero General Public License v3.0（AGPL-3.0）
+- **参考版本**：`main` 分支 `d9bede6d2b0e76cf4e5102e5b9a5e3612b2c77c6`（2026-02-24，查阅于 2026-10-27）
+- **上游许可证**：上游仓库当前未附独立 `LICENSE` 文件，README 与 `metadata.yaml` 也未声明许可证；本仓库对上游代码的使用以其仓库声明为准。若上游后续补充许可证，以补充后的版本为准。
 
 上游代码的版权归原作者所有。
 
@@ -16,6 +17,7 @@
 - 新增状态采样器与 JSON 状态持久化
 - 新增主动告警引擎：资源阈值、掉线/恢复、每日定时状态图、Komari Webhook
 - 新增管理员诊断命令
+- 新增 Web 看板、日报/周报、服务可用性监测、Pillow 降级卡
 
 ## 本仓库版权
 

@@ -14,6 +14,7 @@ from typing import Any
 
 from .collectors import cfg_bool, cfg_float, cfg_get
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
+from .redactor import RULES as REDACT_RULES
 from .utils import normalize_targets
 
 
@@ -168,4 +169,30 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
             except (TypeError, ValueError):
                 continue
+    # normalize_rules silently drops unknown values; a typo such as
+    # "hostnames" therefore looks like redaction is on while nothing is
+    # hidden. Make the ignored values visible.
+    for key, label in (
+        ("display.redact", "状态卡脱敏"),
+        ("display.page_redact", "看板脱敏"),
+    ):
+        raw = cfg_get(config, key, []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            continue
+        unknown = [
+            str(item).strip()
+            for item in raw
+            if str(item).strip() and str(item).strip().lower() not in REDACT_RULES
+        ]
+        if unknown:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "unknown_redact_rule",
+                    f"{label}规则含未知值：{', '.join(sorted(set(unknown)))}；"
+                    f"可用值为 {', '.join(REDACT_RULES)}，未知值会被忽略。",
+                )
+            )
     return issues

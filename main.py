@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import astrbot.api.message_components as Comp
+import psutil
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
@@ -22,12 +23,13 @@ from .collectors import (
     cfg_bool,
     cfg_get,
     cfg_int,
+    cgroup_memory_limit,
     collect_all,
     effective_media_source,
     fetch_avatar_bytes,
     uploaded_file_path,
 )
-from .delivery import Delivery, DeliveryResult, DeliveryService
+from .delivery import DeliveryResult, DeliveryService
 from .i18n import tr
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
@@ -626,29 +628,6 @@ class StatusCardPlugin(Star):
             targets, {"image": image_url}, kind="image", source=source
         )
 
-    async def queue_delivery(
-        self,
-        targets: list[str],
-        payload: dict[str, Any],
-        kind: str = "text",
-        source: str = "unknown",
-    ) -> None:
-        """Remember a message that could not be delivered yet."""
-
-        self._delivery_service().enqueue(
-            Delivery(
-                kind=kind,
-                source=source,
-                targets=list(targets),
-                payload=dict(payload),
-            )
-        )
-
-    def pending_deliveries(self, source: str | None = None) -> list[Delivery]:
-        """The messages that are still waiting to be delivered."""
-
-        return self._delivery_service().queued(source)
-
     async def build_summary_text(self, event: AstrMessageEvent | None = None) -> str:
         collected = await collect_all(
             context=self.context,
@@ -764,6 +743,12 @@ class StatusCardPlugin(Star):
         client = _get_aiocqhttp_client(self.context, platform_id)
         if client is None:
             lines.append("OneBot: 未找到 aiocqhttp 客户端")
+            if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
+                self.config, "alerts.offline_notify", True
+            ):
+                lines.append(
+                    "掉线告警: 已开启，但当前没有可用的 OneBot 连接，无法确认在线状态"
+                )
         else:
             try:
                 status = _normalize_object(
@@ -808,6 +793,20 @@ class StatusCardPlugin(Star):
         if monitor_status.get("silenced"):
             lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
 
+        cgroup_limit = cgroup_memory_limit()
+        if cgroup_limit:
+            try:
+                host_total = psutil.virtual_memory().total
+            except Exception:
+                host_total = 0
+            if host_total and cgroup_limit < host_total * 0.95:
+                lines.append(
+                    "内存口径: 容器 cgroup 上限 "
+                    f"{cgroup_limit / (1024**3):.1f} GB"
+                    f"（宿主机 {host_total / (1024**3):.1f} GB；"
+                    "内存使用率按宿主机计算，可能偏高）"
+                )
+
         audit = self.audit_issues()
         if audit:
             lines.append(f"配置体检: {len(audit)} 项待处理")
@@ -846,7 +845,7 @@ class StatusCardPlugin(Star):
             age = max(0, int(time.time() - float(delivery["ts"])))
             uncertain_targets = delivery.get("uncertain_targets") or []
             if delivery.get("ok"):
-                push_state = "成功"
+                push_state = "部分成功" if delivery.get("partial") else "成功"
             elif uncertain_targets:
                 push_state = "未确认（可能未送达）"
             else:
@@ -893,18 +892,6 @@ class StatusCardPlugin(Star):
                     lines.append("OneBot 回执: " + "；".join(parts))
         else:
             lines.append("最近主动推送: 暂无记录")
-        pending = self.pending_deliveries()
-        if pending:
-            lines.append(
-                f"待发消息: {len(pending)} 条"
-                + (
-                    "（来源 "
-                    + "、".join(sorted({item.source for item in pending})[:3])
-                    + "）"
-                    if pending
-                    else ""
-                )
-            )
         report_status = self.report.status()
         store_stats = report_status.get("store", {})
         if not self.report_store.available:

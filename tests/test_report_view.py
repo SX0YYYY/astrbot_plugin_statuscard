@@ -176,7 +176,9 @@ def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
     recovery = next(
         item for item in anomalies["items"] if item["status_key"] == "recovery"
     )
-    assert recovery["duration"] == "00:10:00"
+    # The alert starts before the report window; its duration is still paired
+    # with the recovery inside the window and labelled accordingly.
+    assert recovery["duration"] == "00:10:00（窗口前开始）"
 
 
 def test_weekly_view_spans_seven_days(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import time
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import psutil
@@ -369,16 +369,22 @@ class DailyReporter:
         self._weekly_task: asyncio.Task | None = None
         self._weekly_running = False
         self._weekly_pending: float | None = None
+        self._weekly_pending_report_day: str | None = None
         self._weekly_retry_count = 0
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._weekly_last_sent_week: str | None = None
         # Render retries: a short T2I outage should not turn the report into
         # text. The attempts and the next retry time survive reloads too.
+        # The report day is pinned as well: a retry that crosses midnight must
+        # rebuild the same report, not the next day's empty one.
         self._image_retry_attempts = 0
         self._pending_image_retry: float | None = None
+        self._pending_image_retry_report_day: str | None = None
+        self._pending_image_retry_send_day: str | None = None
         self._weekly_image_attempts = 0
         self._weekly_image_pending: float | None = None
+        self._weekly_image_report_day: str | None = None
         # Retry plans and de-dup markers used to live only in memory, so a
         # plugin reload (which every config save triggers) dropped a queued
         # retry — the weekly report could silently vanish for the whole week.
@@ -414,6 +420,14 @@ class DailyReporter:
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = saved.get("pending_retry_day") or None
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
+        self._weekly_pending_report_day = saved.get("weekly_pending_report_day") or None
+        self._pending_image_retry_report_day = (
+            saved.get("pending_image_retry_report_day") or None
+        )
+        self._pending_image_retry_send_day = (
+            saved.get("pending_image_retry_send_day") or None
+        )
+        self._weekly_image_report_day = saved.get("weekly_image_report_day") or None
         pending = saved.get("pending_retry")
         if isinstance(pending, dict) and pending.get("day") is not None:
             try:
@@ -463,11 +477,17 @@ class DailyReporter:
                     "pending_retry_day": self._pending_retry_day,
                     "weekly_last_sent_week": self._weekly_last_sent_week,
                     "weekly_pending": self._weekly_pending,
+                    "weekly_pending_report_day": self._weekly_pending_report_day,
                     "weekly_retry_count": self._weekly_retry_count,
                     "image_retry_attempts": self._image_retry_attempts,
                     "pending_image_retry": self._pending_image_retry,
+                    "pending_image_retry_report_day": (
+                        self._pending_image_retry_report_day
+                    ),
+                    "pending_image_retry_send_day": self._pending_image_retry_send_day,
                     "weekly_image_attempts": self._weekly_image_attempts,
                     "weekly_image_pending": self._weekly_image_pending,
+                    "weekly_image_report_day": self._weekly_image_report_day,
                 },
             )
             state.save()
@@ -668,9 +688,21 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._pending_image_retry = None
+                    report_day = self._pending_image_retry_report_day
+                    send_day = self._pending_image_retry_send_day
+                    self._pending_image_retry_report_day = None
+                    self._pending_image_retry_send_day = None
+                    if send_day and send_day != self._today():
+                        logger.warning(
+                            "日报图片重试已跨天，放弃本次重试（避免发送另一份报告）"
+                        )
+                        self._record(report_day or "", False, "image retry cross-day")
+                        self._save_delivery_state()
+                        await asyncio.sleep(60)
+                        continue
                     self._save_delivery_state()
                     try:
-                        await self._send_scheduled()
+                        await self._send_scheduled(report_day)
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -683,8 +715,20 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._pending_retry = None
+                    if (
+                        self._pending_retry_day
+                        and self._pending_retry_day != self._today()
+                    ):
+                        logger.warning(
+                            "日报 %s 的重试已跨天，放弃本次重试（避免发送另一份报告）",
+                            _day or "--",
+                        )
+                        self._record(_day, False, "send failed (cross-day)")
+                        self._clear_retry()
+                        await asyncio.sleep(60)
+                        continue
                     try:
-                        await self._send_scheduled()
+                        await self._send_scheduled(_day)
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -774,9 +818,19 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._weekly_image_pending = None
+                    report_day = self._weekly_image_report_day
+                    self._weekly_image_report_day = None
+                    if report_day and report_day != self._default_report_day():
+                        logger.warning(
+                            "周报图片重试已跨周，放弃本次重试（避免发送另一份周报）"
+                        )
+                        self._record(report_day, False, "weekly-image retry cross-week")
+                        self._save_delivery_state()
+                        await asyncio.sleep(60)
+                        continue
                     self._save_delivery_state()
                     try:
-                        await self._send_weekly_scheduled()
+                        await self._send_weekly_scheduled(report_day)
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -788,8 +842,21 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._weekly_pending = None
+                    report_day = self._weekly_pending_report_day
+                    if report_day and report_day != self._default_report_day():
+                        logger.warning(
+                            "周报重试已跨周，放弃本次重试（避免发送另一份周报）"
+                        )
+                        self._record(
+                            report_day, False, "weekly send failed (cross-week)"
+                        )
+                        self._weekly_pending_report_day = None
+                        self._weekly_retry_count = 0
+                        self._save_delivery_state()
+                        await asyncio.sleep(60)
+                        continue
                     try:
-                        await self._send_weekly_scheduled()
+                        await self._send_weekly_scheduled(report_day)
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -855,10 +922,14 @@ class DailyReporter:
                 logger.exception("周报定时任务失败")
                 await asyncio.sleep(60)
 
+    def _default_report_day(self) -> str:
+        return (now_in_timezone(self.config) - timedelta(days=1)).date().isoformat()
+
     def _schedule_weekly_retry(self) -> bool:
         self._weekly_retry_count += 1
         if self._weekly_retry_count > 3:
             self._weekly_pending = None
+            self._weekly_pending_report_day = None
             self._weekly_retry_count = 0
             self._save_delivery_state()
             logger.warning("周报连续发送失败 3 次，停止重试")
@@ -873,19 +944,29 @@ class DailyReporter:
         )
         return True
 
-    async def _send_weekly_scheduled(self) -> None:
+    async def _send_weekly_scheduled(self, day: str | None = None) -> None:
         if self._sections() is not None and not self._sections():
             logger.warning("周报内容为空（daily_report.sections=[]），跳过发送")
             return
+        if not self.store.available:
+            logger.error("日报数据库不可用，跳过本次周报发送")
+            await self._notify_store_unavailable(self._targets())
+            return
         try:
-            view = await asyncio.to_thread(self._build_view, span_days=7)
+            view = await asyncio.to_thread(self._build_view, day, 7)
         except Exception:
             logger.exception("周报数据聚合失败")
             if not self._schedule_weekly_retry():
                 await self._notify_give_up(self._targets(), "--", weekly=True)
             return
-        iso = now_in_timezone(self.config).date().isocalendar()
-        week_key = f"{iso.year}-W{iso.week:02d}"
+        report_day = str(view.get("day") or "")
+        self._weekly_pending_report_day = report_day
+        try:
+            iso = date.fromisoformat(report_day).isocalendar()
+            week_key = f"{iso.year}-W{iso.week:02d}"
+        except ValueError:
+            iso = now_in_timezone(self.config).date().isocalendar()
+            week_key = f"{iso.year}-W{iso.week:02d}"
         if self._weekly_last_sent_week == week_key:
             logger.info("周报 %s 已发送过，跳过重复发送", week_key)
             return
@@ -894,7 +975,7 @@ class DailyReporter:
             logger.warning("周报推送目标为空，跳过发送")
             self._schedule_weekly_retry()
             return
-        day = str(view.get("day") or "")
+        day = report_day
         if self._with_image():
             image_url = None
             try:
@@ -906,6 +987,7 @@ class DailyReporter:
                 # render twice before degrading to text.
                 self._weekly_image_attempts += 1
                 self._weekly_image_pending = time.time() + 600
+                self._weekly_image_report_day = day
                 self._save_delivery_state()
                 logger.warning(
                     "周报图片渲染失败，10 分钟后重试第 %d/2 次；仍失败将发送文字版",
@@ -918,11 +1000,19 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     self._weekly_last_sent_week = week_key
-                    self._record(day, True, "weekly-image")
+                    self._record(
+                        day,
+                        True,
+                        "weekly-image"
+                        if not (isinstance(result, DeliveryResult) and result.partial)
+                        else "weekly-image (partial)",
+                    )
                     self._weekly_pending = None
+                    self._weekly_pending_report_day = None
                     self._weekly_retry_count = 0
                     self._weekly_image_attempts = 0
                     self._weekly_image_pending = None
+                    self._weekly_image_report_day = None
                     self._save_delivery_state()
                     logger.info("周报已发送（图片）：%s", targets)
                     return
@@ -933,9 +1023,11 @@ class DailyReporter:
                     self._weekly_last_sent_week = week_key
                     self._record(day, True, "weekly-image unconfirmed")
                     self._weekly_pending = None
+                    self._weekly_pending_report_day = None
                     self._weekly_retry_count = 0
                     self._weekly_image_attempts = 0
                     self._weekly_image_pending = None
+                    self._weekly_image_report_day = None
                     self._save_delivery_state()
                     return
         result = await self.plugin.send_text(
@@ -943,11 +1035,19 @@ class DailyReporter:
         )
         if _delivered(result):
             self._weekly_last_sent_week = week_key
-            self._record(day, True, "weekly-text")
+            self._record(
+                day,
+                True,
+                "weekly-text"
+                if not (isinstance(result, DeliveryResult) and result.partial)
+                else "weekly-text (partial)",
+            )
             self._weekly_pending = None
+            self._weekly_pending_report_day = None
             self._weekly_retry_count = 0
             self._weekly_image_attempts = 0
             self._weekly_image_pending = None
+            self._weekly_image_report_day = None
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         elif _uncertain(result):
@@ -955,15 +1055,46 @@ class DailyReporter:
             self._weekly_last_sent_week = week_key
             self._record(day, True, "weekly-text unconfirmed")
             self._weekly_pending = None
+            self._weekly_pending_report_day = None
             self._weekly_retry_count = 0
             self._weekly_image_attempts = 0
             self._weekly_image_pending = None
+            self._weekly_image_report_day = None
             self._save_delivery_state()
         else:
             self._record(day, False, "weekly send failed")
             logger.warning("周报发送失败：%s", targets)
             if not self._schedule_weekly_retry():
                 await self._notify_give_up(targets, day, weekly=True)
+
+    async def _notify_store_unavailable(self, targets: list[str]) -> None:
+        """Tell the operator at most once per day that report.db is unusable."""
+
+        if not targets:
+            return
+        today = self._today()
+        state = getattr(self.plugin, "state", None)
+        if state is not None:
+            try:
+                sent = state.get("report_store_notice", {}) or {}
+                if isinstance(sent, dict) and sent.get("day") == today:
+                    return
+            except Exception:
+                pass
+        try:
+            await self.plugin.send_text(
+                targets,
+                tr(self.config, "report_db_unavailable", day=today),
+                source="report_db_unavailable",
+            )
+        except Exception:
+            logger.debug("发送日报数据库不可用提示失败", exc_info=True)
+        if state is not None:
+            try:
+                state.set("report_store_notice", {"day": today, "ts": time.time()})
+                state.save()
+            except Exception:
+                logger.debug("记录日报数据库不可用提示失败", exc_info=True)
 
     async def _notify_give_up(
         self, targets: list[str], day: str, weekly: bool = False
@@ -1022,30 +1153,41 @@ class DailyReporter:
             self._pending_retry is not None
             or bool(self._pending_retry_count)
             or self._pending_retry_day is not None
+            or self._pending_image_retry_report_day is not None
+            or self._pending_image_retry_send_day is not None
         )
         self._pending_retry = None
         self._pending_retry_count = 0
         self._pending_retry_day = None
+        self._pending_image_retry_report_day = None
+        self._pending_image_retry_send_day = None
         if changed:
             self._save_delivery_state()
 
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
 
-    async def _send_scheduled(self) -> None:
+    async def _send_scheduled(self, day: str | None = None) -> None:
         targets = self._targets()
         if self._sections() is not None and not self._sections():
             logger.warning("日报内容为空（daily_report.sections=[]），跳过发送")
             self._record("", False, "sections empty")
             self._clear_retry()
             return
+        if not self.store.available:
+            # A damaged or read-only database would otherwise produce a page
+            # full of "--" and send it as if it were a real report.
+            logger.error("日报数据库不可用，跳过本次日报发送")
+            self._record(day or "", False, "db unavailable")
+            await self._notify_store_unavailable(targets)
+            return
         try:
-            view = await asyncio.to_thread(self._build_view)
+            view = await asyncio.to_thread(self._build_view, day)
         except Exception:
             logger.exception("日报数据聚合失败")
-            self._record("", False, "build failed")
-            if not self._schedule_retry(""):
-                await self._notify_give_up(targets, "", weekly=False)
+            self._record(day or "", False, "build failed")
+            if not self._schedule_retry(day or ""):
+                await self._notify_give_up(targets, day or "", weekly=False)
             return
         day = str(view.get("day") or "")
         if not targets:
@@ -1070,6 +1212,8 @@ class DailyReporter:
                 # deliver the image rather than a text-only report.
                 self._image_retry_attempts += 1
                 self._pending_image_retry = time.time() + 600
+                self._pending_image_retry_report_day = str(view.get("day") or "")
+                self._pending_image_retry_send_day = self._today()
                 self._save_delivery_state()
                 logger.warning(
                     "日报图片渲染失败，10 分钟后重试第 %d/2 次；仍失败将发送文字版",
@@ -1082,7 +1226,13 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     self._last_sent_day = day
-                    self._record(day, True, "image")
+                    self._record(
+                        day,
+                        True,
+                        "image"
+                        if not (isinstance(result, DeliveryResult) and result.partial)
+                        else "image (partial)",
+                    )
                     self._image_retry_attempts = 0
                     self._pending_image_retry = None
                     self._clear_retry()
@@ -1105,7 +1255,13 @@ class DailyReporter:
         )
         if _delivered(result):
             self._last_sent_day = day
-            self._record(day, True, "text")
+            self._record(
+                day,
+                True,
+                "text"
+                if not (isinstance(result, DeliveryResult) and result.partial)
+                else "text (partial)",
+            )
             self._image_retry_attempts = 0
             self._pending_image_retry = None
             self._clear_retry()

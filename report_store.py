@@ -405,6 +405,7 @@ class ReportStore:
         resolved_ts: int,
         kind: str | None = None,
         target: str | None = None,
+        close_all: bool = False,
     ) -> bool:
         """Mark the newest open alert of ``name`` as resolved.
 
@@ -412,9 +413,13 @@ class ReportStore:
         can show how long the interruption lasted even after a restart.
         ``kind``/``target`` narrow the match when two monitor items share a
         name, so one item's recovery cannot close the other's open alert.
-        Only the NEWEST matching alert is closed: one recovery cannot end
-        two interruptions, and an older orphan alert (e.g. its recovery was
-        lost to a reload) must not inherit the newer interruption's duration.
+        Only the NEWEST matching alert is closed by default: one recovery
+        cannot end two interruptions, and an older orphan alert (e.g. its
+        recovery was lost to a reload) must not inherit the newer
+        interruption's duration. ``close_all`` closes every open alert of
+        the same rule/target after a second failure overwrote the pending
+        recovery notice; otherwise that orphan would stay "unresolved"
+        forever and keep showing up in the daily report.
         """
 
         conditions = ["resolved_ts IS NULL", "status = 'alert'", "name = ?", "ts <= ?"]
@@ -426,6 +431,13 @@ class ReportStore:
             conditions.append("target = ?")
             case_params.append(target)
         cond_sql = " AND ".join(conditions)
+        if close_all:
+            sql = f"""
+                UPDATE events
+                SET resolved_ts = ?
+                WHERE {cond_sql}
+            """
+            return self._write(sql, (int(resolved_ts), *case_params))
         sql = f"""
             UPDATE events
             SET resolved_ts = ?

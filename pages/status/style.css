@@ -1,3 +1,7 @@
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --bg: #f4f7fb;
   --panel: #ffffff;
@@ -659,6 +663,28 @@ main.is-refreshing::after {
   background: var(--panel-soft);
   color: var(--muted);
   text-align: center;
+}
+
+.error-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
+  border-radius: 12px;
+  background: var(--bad-soft);
+  color: var(--text);
+}
+
+.error-state p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.error-state button {
+  flex: none;
 }
 
 .event-list {

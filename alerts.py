@@ -208,10 +208,42 @@ class AlertEngine:
         if exc is not None:
             logger.error("状态卡后台任务异常退出: %r", exc, exc_info=exc)
 
+    def _mark_stale_rules(self) -> None:
+        """Mark rules that were alerting while the engine was not sampling.
+
+        A restart or ``alerts.enabled=false`` leaves the alerting flag and its
+        start time in state.json. Without this mark the next recovery would
+        report the entire disabled window as one interruption.
+        """
+
+        rules = (self.state.data.get("alerts") or {}).get("rules") or {}
+        offline = (self.state.data.get("alerts") or {}).get("offline") or {}
+        if not isinstance(rules, dict):
+            return
+        now = time.time()
+        tracked: list[tuple[str, Any]] = [(str(key), st) for key, st in rules.items()]
+        if isinstance(offline, dict):
+            tracked.append(("offline", offline))
+        for key, st in tracked:
+            if not isinstance(st, dict) or not st.get("alerting"):
+                continue
+            last_seen = float(st.get("last_seen") or st.get("alert_since") or 0)
+            if not last_seen and key == "offline":
+                last_seen = float(st.get("since") or 0)
+            if last_seen and now - last_seen > 86400:
+                st["stale"] = True
+                logger.warning(
+                    "告警规则 %s 已超过 24 小时未采样（可能关闭了告警），"
+                    "恢复时只记事件、不发恢复消息",
+                    key,
+                )
+
     def start(self) -> None:
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
         daily_on = cfg_bool(self.config, "alerts.daily_summary.enabled", False)
         self._running = alerts_on or daily_on
+        if alerts_on:
+            self._mark_stale_rules()
         if alerts_on:
             self._monitor_task = asyncio.create_task(self._monitor_loop())
             self._monitor_task.add_done_callback(self._on_task_done)
@@ -320,7 +352,9 @@ class AlertEngine:
                 # Close the open alert of the same rule so the report can
                 # show how long the interruption lasted, even across a
                 # plugin restart.
-                self.report_store.resolve_event(int(now), name, int(now), kind=kind)
+                self.report_store.resolve_event(
+                    int(now), name, int(now), kind=kind, close_all=True
+                )
         except Exception:
             logger.exception("记录告警事件失败")
 
@@ -438,6 +472,7 @@ class AlertEngine:
         rules = alerts.setdefault("rules", {})
         st = rules.setdefault(key, {})
         now = time.time()
+        st["last_seen"] = now
         count = int(st.get("count") or 0)
         alerting = bool(st.get("alerting"))
         last_sent = float(st.get("last_sent") or 0)
@@ -538,6 +573,7 @@ class AlertEngine:
                         st["recovery_retry_count"] = retry_count
                         st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
+                stale = bool(st.pop("stale", False))
                 st["alerting"] = False
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
@@ -553,7 +589,7 @@ class AlertEngine:
                     f"持续 {format_duration(duration)}",
                     "recovery",
                 )
-                if self.recover_notify:
+                if self.recover_notify and not stale:
                     text = (
                         f"✅ 已恢复 · {name}\n"
                         "──────────────\n"
@@ -628,6 +664,7 @@ class AlertEngine:
                         st["recovery_next_attempt"] = now + retry_delay(retry_count)
                         logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
             if st.get("alerting") or st.get("pending_alert_text"):
+                stale = bool(st.pop("stale", False))
                 duration = now - float(st.get("since") or now)
                 queued = st.pop("pending_alert_text", None)
                 st["alerting"] = False
@@ -635,7 +672,7 @@ class AlertEngine:
                 parts: list[str] = []
                 if queued:
                     parts.append(str(queued))
-                if self.recover_notify:
+                if self.recover_notify and not stale:
                     text = (
                         "✅ Bot 连接已恢复\n"
                         "──────────────\n"

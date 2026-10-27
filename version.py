@@ -8,6 +8,7 @@ single documented place.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from importlib import metadata
 from inspect import isawaitable
@@ -16,7 +17,13 @@ from typing import Any
 from astrbot.api import logger
 
 # The version of this plugin. Keep it in sync with ``metadata.yaml``.
-__version__ = "2.13.4"
+__version__ = "2.14.0"
+
+# Probing imports the package and consults its metadata, and it is called
+# from several render paths. A short cache keeps a burst of status cards or
+# a dashboard refresh from redoing the same import every time.
+_VERSION_CACHE_TTL = 300.0
+_version_cache: tuple[float, str, str] | None = None
 
 
 def _normalize_version(raw: Any) -> str | None:
@@ -94,9 +101,18 @@ def resolve_astrbot_version(context: Any = None, default: str = "vUnknown") -> s
 
     The version is probed from the context first, then from the imported
     package, and finally from the installed package metadata, so it works
-    across the AstrBot versions the plugin supports.
+    across the AstrBot versions the plugin supports. The result is cached
+    for a few minutes because the probes import modules.
     """
 
+    global _version_cache
+    now = time.monotonic()
+    if (
+        _version_cache is not None
+        and _version_cache[1] == default
+        and now - _version_cache[0] < _VERSION_CACHE_TTL
+    ):
+        return _version_cache[2]
     probes: tuple[Callable[[], str | None], ...] = (
         lambda: _resolve_from_context(context),
         _resolve_from_astrbot_module,
@@ -105,6 +121,9 @@ def resolve_astrbot_version(context: Any = None, default: str = "vUnknown") -> s
     for probe in probes:
         version = probe()
         if version:
+            _version_cache = (now, default, version)
             return version
     normalized_default = _normalize_version(default)
-    return normalized_default or "vUnknown"
+    result = normalized_default or "vUnknown"
+    _version_cache = (now, default, result)
+    return result

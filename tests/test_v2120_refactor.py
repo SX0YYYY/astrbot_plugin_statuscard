@@ -11,10 +11,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from astrbot_plugin_statuscard.delivery import (
-    Delivery,
-    DeliveryService,
-)
+from astrbot_plugin_statuscard.delivery import DeliveryService
 from astrbot_plugin_statuscard.redactor import (
     HIDDEN,
     Redactor,
@@ -241,25 +238,6 @@ def test_delivery_records_the_outcome_in_the_state() -> None:
     assert recorded["kind"] == "text"
     assert recorded["ok"] is True
     assert recorded["ok_targets"] == ["default:GroupMessage:1"]
-
-
-def test_delivery_queue_keeps_pending_messages() -> None:
-    service = _service(_FakeContext())
-    service.enqueue(
-        Delivery(
-            kind="text",
-            source="alert",
-            targets=["default:GroupMessage:1"],
-            payload={"text": "hi"},
-        )
-    )
-    assert len(service.queued()) == 1
-    assert len(service.queued("alert")) == 1
-    assert len(service.queued("monitor")) == 0
-
-    pending = service.dequeue("alert")
-    assert len(pending) == 1
-    assert service.queued() == []
 
 
 # ----------------------------------------------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import platform
@@ -1214,6 +1215,81 @@ def effective_media_source(
     )
 
 
+def cgroup_memory_limit() -> int | None:
+    """Return the cgroup memory limit when running inside a container.
+
+    psutil reports the host's memory, so a container with a 1 GB limit on a
+    3.6 GB host would show a misleadingly low usage percentage. The diagnostic
+    command surfaces this instead of silently changing the numbers.
+    """
+
+    for raw in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        try:
+            text = Path(raw).read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            logger.debug("读取 cgroup 内存上限失败 %s: %s", raw, exc)
+            continue
+        if not text or text == "max":
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            continue
+        # cgroup v1 writes a huge sentinel when the limit is unlimited.
+        if 0 < value < (1 << 60):
+            return value
+    return None
+
+
+AVATAR_CACHE_TTL = 24 * 3600
+
+
+def _avatar_cache_path(data_dir: Any, url: str) -> Path | None:
+    """A stable on-disk cache path for one QQ avatar URL."""
+
+    if data_dir is None:
+        return None
+    try:
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+        folder = Path(data_dir) / "files" / "avatar_cache"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"{digest}.img"
+    except Exception:
+        return None
+
+
+def _read_avatar_cache(path: Path | None, max_age: float | None) -> bytes | None:
+    if path is None:
+        return None
+    try:
+        if not path.is_file():
+            return None
+        if max_age is not None and time.time() - path.stat().st_mtime > max_age:
+            return None
+        data = path.read_bytes()
+        return data or None
+    except Exception:
+        return None
+
+
+def _write_avatar_cache(path: Path | None, data: bytes) -> None:
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.debug("写入头像缓存失败: %s", exc)
+
+
 async def fetch_avatar_bytes(
     bot: dict[str, Any], config: Any, data_dir: Any = None
 ) -> bytes | None:
@@ -1240,6 +1316,10 @@ async def fetch_avatar_bytes(
     url = bot.get("avatar_url") or ""
     if not url:
         return None
+    cache_path = _avatar_cache_path(data_dir, url)
+    cached = _read_avatar_cache(cache_path, AVATAR_CACHE_TTL)
+    if cached is not None:
+        return cached
     try:
         async with (
             httpx.AsyncClient(follow_redirects=True, timeout=5) as cli,
@@ -1251,10 +1331,14 @@ async def fetch_avatar_bytes(
                 data.extend(chunk)
                 if len(data) > MAX_IMAGE_BYTES:
                     raise ValueError("头像超过 10 MB")
-            return bytes(data)
+            payload = bytes(data)
+            _write_avatar_cache(cache_path, payload)
+            return payload
     except Exception as exc:
         logger.warning("获取头像失败 %s: %s", url, exc)
-        return None
+        # A stale cached avatar is still better than dropping to the built-in
+        # one just because qlogo.cn had a transient failure.
+        return _read_avatar_cache(cache_path, None)
 
 
 # ---------------------------------------------------------------------------

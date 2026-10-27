@@ -11,6 +11,9 @@
     timezone: "",
     historySeq: 0,
     eventsSeq: 0,
+    overviewSeq: 0,
+    reportsSeq: 0,
+    exporting: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -160,15 +163,25 @@
     const key = String(detail || "");
     const map = {
       image: ["method_image", "图片"],
+      "image (partial)": ["method_image_partial", "图片（部分成功）"],
       "image unconfirmed": ["method_image_unconfirmed", "图片（未确认）"],
       text: ["method_text", "文字"],
+      "text (partial)": ["method_text_partial", "文字（部分成功）"],
       "text unconfirmed": ["method_text_unconfirmed", "文字（未确认）"],
       "weekly-image": ["method_weekly_image", "周报图片"],
+      "weekly-image (partial)": [
+        "method_weekly_image_partial",
+        "周报图片（部分成功）",
+      ],
       "weekly-image unconfirmed": [
         "method_weekly_image_unconfirmed",
         "周报图片（未确认）",
       ],
       "weekly-text": ["method_weekly_text", "周报文字"],
+      "weekly-text (partial)": [
+        "method_weekly_text_partial",
+        "周报文字（部分成功）",
+      ],
       "weekly-text unconfirmed": [
         "method_weekly_text_unconfirmed",
         "周报文字（未确认）",
@@ -704,7 +717,9 @@
   // ------------------------------------------------------------------
 
   async function loadOverview() {
+    const seq = ++state.overviewSeq;
     const data = await apiGet("overview");
+    if (seq !== state.overviewSeq) return;
     if (data.timezone) state.timezone = String(data.timezone);
     const cpu = data.cpu || {};
     const memory = data.memory || {};
@@ -819,44 +834,57 @@
     }
 
     const monitors = data.monitors || {};
-    $("monitor-summary").textContent = t(
-      "monitor_summary",
-      "正常 {ok} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
-      {
-        ok: monitors.ok || 0,
-        fail: monitors.fail || 0,
-        unknown: monitors.unknown || 0,
-        config_error: monitors.config_error || 0,
-      },
-    );
-    const items = monitors.items || [];
-    $("monitors").innerHTML = items.length
-      ? items
-          .map((item) => {
-            const meta =
-              item.config_error
-                ? t("monitor_config_error", "配置不完整（{error}），未探测", {
-                    error: item.config_error,
-                  })
-                : item.status === "fail" && item.last_error
-                  ? item.last_error
-                  : item.last_checked
-                    ? t("monitor_last_check", "最近检查 {time}", {
-                        time: formatTime(item.last_checked),
-                      })
-                    : t("monitor_not_checked", "尚未检查");
-            return (
-              '<div class="monitor"><i class="dot ' +
-              esc(item.status) +
-              '"></i><div class="monitor-main"><div class="monitor-name">' +
-              esc(item.name) +
-              '</div><div class="monitor-meta">' +
-              esc(item.kind + " · " + meta) +
-              "</div></div></div>"
-            );
-          })
-          .join("")
-      : empty(t("monitor_none", "没有配置服务监测目标"));
+    if (monitors.enabled === false) {
+      $("monitor-summary").textContent = t(
+        "monitor_disabled",
+        "服务监测已关闭",
+      );
+      $("monitors").innerHTML = empty(
+        t(
+          "monitor_disabled_hint",
+          "在配置页开启「服务可用性监测」后，这里会显示探测结果。",
+        ),
+      );
+    } else {
+      $("monitor-summary").textContent = t(
+        "monitor_summary",
+        "正常 {ok} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
+        {
+          ok: monitors.ok || 0,
+          fail: monitors.fail || 0,
+          unknown: monitors.unknown || 0,
+          config_error: monitors.config_error || 0,
+        },
+      );
+      const items = monitors.items || [];
+      $("monitors").innerHTML = items.length
+        ? items
+            .map((item) => {
+              const meta =
+                item.config_error
+                  ? t("monitor_config_error", "配置不完整（{error}），未探测", {
+                      error: item.config_error,
+                    })
+                  : item.status === "fail" && item.last_error
+                    ? item.last_error
+                    : item.last_checked
+                      ? t("monitor_last_check", "最近检查 {time}", {
+                          time: formatTime(item.last_checked),
+                        })
+                      : t("monitor_not_checked", "尚未检查");
+              return (
+                '<div class="monitor"><i class="dot ' +
+                esc(item.status) +
+                '"></i><div class="monitor-main"><div class="monitor-name">' +
+                esc(item.name) +
+                '</div><div class="monitor-meta">' +
+                esc(item.kind + " · " + meta) +
+                "</div></div></div>"
+              );
+            })
+            .join("")
+        : empty(t("monitor_none", "没有配置服务监测目标"));
+    }
 
     const processes = data.processes || [];
     const tbody = $("process-table").querySelector("tbody");
@@ -884,7 +912,25 @@
   // history
   // ------------------------------------------------------------------
 
-  async function exportCsv() {
+  function exportCsv() {
+    if (state.exporting) return Promise.resolve();
+    const button = $("export-csv");
+    const label = button ? button.textContent : "";
+    state.exporting = true;
+    if (button) {
+      button.disabled = true;
+      button.textContent = t("exporting", "导出中…");
+    }
+    return runExport().finally(() => {
+      state.exporting = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    });
+  }
+
+  async function runExport() {
     const bridge = getBridge();
     if (!bridge || typeof bridge.apiGet !== "function") {
       throw new Error(
@@ -926,10 +972,13 @@
     const headers = Object.keys(rows[0]);
     const esc = (value) => {
       let text = value === null || value === undefined ? "" : String(value);
+      // A bare CR or CRLF inside a process name/event detail would shift the
+      // following CSV rows in Excel/WPS, so flatten every newline first.
+      text = text.replace(/\r\n|\r|\n/g, " ");
       // Excel/WPS executes a cell starting with =,+,-,@ as a formula, and
       // event details can carry text returned by probed services.
-      if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
-      return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+      if (/^[=+\-@\t]/.test(text)) text = "'" + text;
+      return /[",]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     };
     const lines = [headers.join(",")];
     for (const row of rows) lines.push(headers.map((h) => esc(row[h])).join(","));
@@ -1285,39 +1334,70 @@
   }
 
   async function loadReports(force) {
+    const seq = ++state.reportsSeq;
     const data = await apiGet("reports", force ? { fresh: 1 } : undefined);
+    if (seq !== state.reportsSeq) return;
+    if (!data || data.ok === false) {
+      throw new Error(
+        t(
+          (data && data.error_code) || "report_build_failed",
+          (data && data.error) || "日报数据构建失败，请稍后重试",
+        ),
+      );
+    }
     $("report-day").textContent = data.day
       ? t("report_data_day", "数据日 {day}", { day: data.day })
       : t("report_no_data", "暂无数据");
     const summary = data.summary || {};
+    const notEnabled = t("report_not_enabled", "未开启");
+    const anomalyValue =
+      summary.anomaly_enabled === false
+        ? notEnabled
+        : summary.anomaly_count || 0;
+    const unresolvedValue =
+      summary.anomaly_enabled === false
+        ? notEnabled
+        : summary.unresolved_count || 0;
+    const tokenValue =
+      summary.token_enabled === false
+        ? notEnabled
+        : summary.token_total_text || t("report_no_data", "暂无数据");
+    const sentValue =
+      summary.qq_enabled === false
+        ? notEnabled
+        : summary.sent_text || "--";
+    const recvValue =
+      summary.qq_enabled === false
+        ? notEnabled
+        : summary.recv_text || "--";
     $("report-summary").innerHTML = [
       metric(
         t("report_anomaly", "异常 / 失败"),
-        summary.anomaly_count || 0,
+        anomalyValue,
         t("report_yesterday", "昨日"),
         null,
       ),
       metric(
         t("report_token", "Token"),
-        summary.token_total_text || t("report_no_data", "暂无数据"),
+        tokenValue,
         t("report_last_7d", "最近 7 天"),
         null,
       ),
       metric(
         t("report_sent", "发送"),
-        summary.sent_text || "--",
+        sentValue,
         t("report_yesterday", "昨日"),
         null,
       ),
       metric(
         t("report_recv", "接收"),
-        summary.recv_text || "--",
+        recvValue,
         t("report_yesterday", "昨日"),
         null,
       ),
       metric(
         t("report_unresolved", "未恢复"),
-        summary.unresolved_count || 0,
+        unresolvedValue,
         t("report_recent30", "近 30 天"),
         null,
       ),
@@ -1360,6 +1440,40 @@
     return undefined;
   }
 
+  function clearPanelError(name) {
+    const panel = $("panel-" + name);
+    if (!panel) return;
+    const existing = panel.querySelector(".error-state");
+    if (existing) existing.remove();
+  }
+
+  function showPanelError(name, error) {
+    const panel = $("panel-" + name);
+    if (!panel) return;
+    clearPanelError(name);
+    const box = document.createElement("div");
+    box.className = "error-state";
+    box.innerHTML =
+      "<p>" +
+      esc(error && error.message ? error.message : String(error || "")) +
+      '</p><button type="button" class="ghost">' +
+      esc(t("error_retry", "重试")) +
+      "</button>";
+    box.querySelector("button").addEventListener("click", () => {
+      state.loaded.delete(name);
+      activateTab(name, true)
+        .then(() => {
+          clearPanelError(name);
+          toast(t("refresh_done", "已刷新"));
+        })
+        .catch((retryError) => {
+          showPanelError(name, retryError);
+          toast(retryError.message || t("error_load", "加载失败"));
+        });
+    });
+    panel.prepend(box);
+  }
+
   async function activateTab(name, force) {
     state.tab = name;
     document.querySelectorAll(".tab").forEach((button) => {
@@ -1381,10 +1495,12 @@
     }
     try {
       await loadTab(name, force);
+      clearPanelError(name);
       state.loaded.add(name);
       state.loadedAt.set(name, Date.now());
     } catch (error) {
       if (force) throw error;
+      showPanelError(name, error);
       toast(error.message || t("error_load", "加载失败"));
     }
   }
@@ -1400,6 +1516,7 @@
       toast(t("refresh_done", "已刷新"));
     } catch (error) {
       setRefreshState(button, "failed");
+      showPanelError(state.tab, error);
       toast(error.message || t("error_load", "加载失败"));
     }
   }

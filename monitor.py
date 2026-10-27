@@ -133,6 +133,31 @@ class ServiceMonitor:
             out.append(normalized)
         return out
 
+    def _mark_stale_items(self) -> None:
+        """Mark items that were alerting while the probe loop was not running.
+
+        ``monitors.enabled=false`` (or a long restart) leaves ``alerting`` and
+        ``since`` in state.json. Reporting that whole window as one recovery
+        duration would be misleading, so such a recovery only writes the
+        event and skips the notification.
+        """
+
+        items = (self.state.data.get("monitors") or {}).get("items") or {}
+        if not isinstance(items, dict):
+            return
+        now = time.time()
+        for key, st in items.items():
+            if not isinstance(st, dict) or not st.get("alerting"):
+                continue
+            last_checked = float(st.get("last_checked") or st.get("since") or 0)
+            if last_checked and now - last_checked > 86400:
+                st["stale"] = True
+                logger.warning(
+                    "监测项 %s 已超过 24 小时未探测（可能关闭了监测），"
+                    "恢复时只记事件、不发恢复消息",
+                    key,
+                )
+
     def start(self) -> None:
         if not self.enabled:
             logger.info("服务监测未启用（monitors.enabled=false）")
@@ -145,6 +170,7 @@ class ServiceMonitor:
                 "监测项不会探测也不会告警；请在配置页的“告警与每日定时状态图 → 推送目标”里填写"
             )
         self._prune_state()
+        self._mark_stale_items()
         self._running = True
         self._is_silenced()
         self._validate_suppression()
@@ -198,7 +224,12 @@ class ServiceMonitor:
                 # plugin restart. Matching on kind+target keeps two monitor
                 # items that share a name from closing each other's alerts.
                 self.report_store.resolve_event(
-                    int(now), name, int(now), kind="service", target=redact_url(target)
+                    int(now),
+                    name,
+                    int(now),
+                    kind="service",
+                    target=redact_url(target),
+                    close_all=True,
                 )
         except Exception:
             logger.exception("记录服务监测事件失败")
@@ -390,19 +421,24 @@ class ServiceMonitor:
                 return
 
         if not ok:
-            st.pop("pending_recovery", None)
-            st.pop("recovery_attempt", None)
-            st.pop("recovery_next_attempt", None)
-            st.pop("recovery_retry_count", None)
             fails += 1
+            will_alert = not alerting and fails >= self.fail_threshold
             st["fails"] = fails
             st["last_error"] = detail
             st["last_checked"] = now
-            if not alerting and fails >= self.fail_threshold:
+            if will_alert:
                 next_attempt = float(st.get("next_attempt") or 0)
                 if now >= next_attempt and (
                     not last_sent or now - last_sent >= self.cooldown
                 ):
+                    # A second failure after a recovery notice could not be
+                    # delivered used to drop that notice silently. Fold it
+                    # into the new alert instead of losing the fact that the
+                    # previous recovery never reached the operator.
+                    pending_recovery = st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
                     text = (
                         f"🔴 服务异常 · {name}\n"
                         "──────────────\n"
@@ -412,6 +448,8 @@ class ServiceMonitor:
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.fail_threshold} 次检测失败。"
                     )
+                    if pending_recovery:
+                        text += "\n（上次恢复通知未送达，已合并到本次告警）"
                     result = await self._send(text)
                     delivered = self._delivered(result)
                     st["alerting"] = True
@@ -472,6 +510,7 @@ class ServiceMonitor:
                         st["recovery_retry_count"] = retry_count
                         st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
+                stale = bool(st.pop("stale", False))
                 duration = now - float(st.get("since") or now)
                 st["alerting"] = False
                 st["since"] = 0
@@ -481,7 +520,7 @@ class ServiceMonitor:
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
                 self._record_event(name, target_text, detail, "recovery")
-                if self.recover_notify:
+                if self.recover_notify and not stale:
                     extra = "\n（异常告警此前未能送达）" if pending else ""
                     text = (
                         f"✅ 服务恢复 · {name}\n"

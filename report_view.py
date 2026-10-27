@@ -364,18 +364,21 @@ class DailyReportBuilder:
             "anomaly_count": (
                 anomalies.get("count", 0) if "anomaly" in sections else "未开启"
             ),
+            "anomaly_enabled": "anomaly" in sections,
             "unresolved_count": (
                 anomalies.get("unresolved", 0) if "anomaly" in sections else "未开启"
             ),
             "token_total_text": (
                 token.get("total_text", "暂无数据") if "token" in sections else "未开启"
             ),
+            "token_enabled": "token" in sections,
             "sent_text": (
                 yesterday.get("sent_text", "--") if "qq" in sections else "未开启"
             ),
             "recv_text": (
                 yesterday.get("recv_text", "--") if "qq" in sections else "未开启"
             ),
+            "qq_enabled": "qq" in sections,
         }
 
     def _astrbot_db_path(self) -> Path | None:
@@ -603,10 +606,31 @@ class DailyReportBuilder:
         events.sort(
             key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
         )
+        window_start_dt = datetime.combine(
+            day - timedelta(days=span - 1), time.min, tzinfo=self.tz
+        )
+        window_start_ts = int(window_start_dt.timestamp())
         # ``resolved_ts`` is filled in when a condition clears, so the
         # duration survives a plugin restart. Events recorded before that
         # field was used fall back to pairing them in memory.
         open_alerts: dict[str, int] = {}
+        # An interruption that began before the window still has an alert row
+        # outside ``events``; load the preceding month so a recovery inside
+        # the window can be paired with it instead of showing "--".
+        for alert in self.store.list_events_range(
+            window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
+        ):
+            status = str(alert.get("status") or "")
+            name = str(alert.get("name") or "")
+            if not name:
+                continue
+            if status == "alert":
+                open_alerts[name] = int(alert.get("ts") or 0)
+            elif status == "recovery":
+                # A recovery before the window closes the alert for pairing
+                # purposes; otherwise a later recovery could be matched with
+                # an interruption that had already ended.
+                open_alerts.pop(name, None)
         items: list[dict[str, Any]] = []
         count = 0
         for event in events:
@@ -624,6 +648,8 @@ class DailyReportBuilder:
                 start = open_alerts.pop(name, None)
                 if start:
                     duration_text = format_duration(int(event.get("ts") or 0) - start)
+                    if start < window_start_ts:
+                        duration_text += "（窗口前开始）"
             elif status == "alert":
                 if resolved_ts:
                     duration_text = format_duration(
@@ -642,6 +668,7 @@ class DailyReportBuilder:
                         int(event.get("ts") or 0), self.tz
                     ).strftime(time_format),
                     "kind": self._kind_text(str(event.get("kind") or "")),
+                    "kind_slug": str(event.get("kind") or ""),
                     "name": name or "--",
                     "status": self._status_text(status),
                     "status_key": status,
@@ -653,10 +680,6 @@ class DailyReportBuilder:
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
         # would otherwise read as "no anomalies". Surface it explicitly, but
         # skip names that already show a recovery inside the window.
-        window_start_dt = datetime.combine(
-            day - timedelta(days=span - 1), time.min, tzinfo=self.tz
-        )
-        window_start_ts = int(window_start_dt.timestamp())
         recovered_names = {
             str(event.get("name") or "")
             for event in events
@@ -679,6 +702,7 @@ class DailyReportBuilder:
                 {
                     "time": started.strftime("%m-%d %H:%M"),
                     "kind": self._kind_text(str(alert.get("kind") or "")),
+                    "kind_slug": str(alert.get("kind") or ""),
                     "name": str(alert.get("name") or "--"),
                     "status": "未恢复",
                     "status_key": "alert",

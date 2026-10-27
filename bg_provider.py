@@ -25,6 +25,21 @@ def _detect_image_mime(data: bytes) -> str:
         return "image/webp"
     if data.startswith((b"GIF87a", b"GIF89a")):
         return "image/gif"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    # Unknown magic: let Pillow identify the format instead of handing the
+    # browser an application/octet-stream payload it refuses to render.
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            fmt = (image.format or "").lower()
+        if fmt:
+            return "image/jpeg" if fmt == "jpg" else f"image/{fmt}"
+    except Exception:
+        pass
     return "application/octet-stream"
 
 

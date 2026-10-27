@@ -401,8 +401,17 @@ class PageApi:
                 start, end + 60, "mem", limit=half + 1
             )
             truncated = len(cpu_rows) > half or len(mem_rows) > half
-            rows = cpu_rows[:half]
-            rows += mem_rows[:half]
+            rows = [dict(row) for row in cpu_rows[:half]]
+            rows += [dict(row) for row in mem_rows[:half]]
+            # process_samples stores the per-core percentage; the dashboard
+            # shows whole-machine percentages. Export both so a CSV consumer
+            # can tell which one it is looking at.
+            cores = psutil.cpu_count(logical=True) or 1
+            for row in rows:
+                cpu = row.get("cpu")
+                row["cpu_pct_total"] = (
+                    round(float(cpu) / cores, 1) if cpu is not None else None
+                )
             if "process" in self._redact():
                 rows = [dict(row, name="已隐藏", pid=None) for row in rows]
         elif kind == "websites":
@@ -582,7 +591,6 @@ class PageApi:
         if cached and not fresh and now_ts - cached[0] < self._reports_cache_seconds:
             return jsonify(cached[1])
         view: dict[str, Any] = {}
-        build_failed = False
         try:
             builder = DailyReportBuilder(
                 plugin.report_store, plugin.config, redact=self._redactor().rules
@@ -600,7 +608,15 @@ class PageApi:
             )
         except Exception:
             logger.exception("插件页面聚合日报失败")
-            build_failed = True
+            # An empty payload used to render as a blank report page with no
+            # explanation. Tell the page explicitly so it can offer a retry.
+            return jsonify(
+                {
+                    "ok": False,
+                    "error_code": "report_build_failed",
+                    "error": "日报数据构建失败，请稍后重试",
+                }
+            )
         payload = {
             "ok": True,
             "day": view.get("day"),
@@ -615,8 +631,5 @@ class PageApi:
             "runs": plugin.report_store.list_report_runs(limit=30),
             "snapshots": self._snapshots_for_page(plugin),
         }
-        # Do not cache a failed build: a transient SQLite hiccup would pin
-        # an empty page for the whole cache window and block recovery.
-        if not build_failed:
-            self._reports_cache = (now_ts, payload)
+        self._reports_cache = (now_ts, payload)
         return jsonify(payload)
