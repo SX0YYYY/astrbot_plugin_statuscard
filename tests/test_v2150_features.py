@@ -150,8 +150,12 @@ def test_detect_resource_gaps_threshold() -> None:
 
 
 def test_daily_resource_section_reports_gaps(tmp_path: Path) -> None:
+    from zoneinfo import ZoneInfo
+
     store = ReportStore(tmp_path / "report.db")
-    day = datetime(2026, 10, 28, 12, 0, 0)
+    # Pin the display timezone: a naive timestamp shifts by the host offset
+    # and on a UTC CI box the samples would fall outside the report window.
+    day = datetime(2026, 10, 28, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     first = int(day.timestamp())
     store.add_resource(first, 1.0, 10.0, 0.0, None, None)
     store.add_resource(first + 20000, 2.0, 20.0, 0.0, None, None)
