@@ -261,7 +261,7 @@ def test_provider_quality_section_with_data(tmp_path: Path) -> None:
         [
             (_utc_text(), "completed", "m-a", "11111111-x", 10.0, 12.0, 0.5),
             (_utc_text(), "completed", "m-a", "11111111-x", 10.0, 11.0, 0.4),
-            (_utc_text(), "error", "m-b", "22222222-x", 0, 0, 0),
+            (_utc_text(), "error", "m-a", "11111111-x", 0, 0, 0),
             (_utc_text(), "aborted", "m-b", "22222222-x", 0, 0, 0),
         ],
     )
@@ -274,6 +274,9 @@ def test_provider_quality_section_with_data(tmp_path: Path) -> None:
     assert stats["aborted_text"] == "1"
     assert stats["avg_latency_text"] == "1.50s"
     assert stats["avg_ttft_text"] == "0.45s"
+    # m-a has 3 calls, m-b has 1: an unequal order keeps the top-model
+    # table deterministic even when SQLite returns equal created_at rows
+    # in an arbitrary order.
     names = [model["name"] for model in section["top_models"]]
     assert names == ["m-a", "m-b"]
     convs = [conv["conversation"] for conv in section["top_conversations"]]
