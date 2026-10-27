@@ -53,10 +53,17 @@ def now_in_timezone(config: Any = None) -> datetime:
     return datetime.now(get_timezone(config))
 
 
-BOOT_TIME = datetime.fromtimestamp(psutil.boot_time(), tz=UTC).astimezone()
-PROCESS_START_TIME = datetime.fromtimestamp(
-    psutil.Process(os.getpid()).create_time(), tz=UTC
-).astimezone()
+try:
+    BOOT_TIME = datetime.fromtimestamp(psutil.boot_time(), tz=UTC).astimezone()
+except Exception:
+    # A sandboxed container may hide /proc/stat; the plugin must still load.
+    BOOT_TIME = datetime.now(UTC)
+try:
+    PROCESS_START_TIME = datetime.fromtimestamp(
+        psutil.Process(os.getpid()).create_time(), tz=UTC
+    ).astimezone()
+except Exception:
+    PROCESS_START_TIME = datetime.now(UTC)
 
 
 def format_bytes(value: float | None, digits: int = 2) -> str:
@@ -278,7 +285,14 @@ class DiskIO:
     write: float
 
 
-_last_disk_io = (time.time(), psutil.disk_io_counters(perdisk=True))
+def _disk_io_baseline() -> tuple[float, Any]:
+    try:
+        return (time.monotonic(), psutil.disk_io_counters(perdisk=True) or {})
+    except Exception:
+        return (time.monotonic(), {})
+
+
+_last_disk_io = _disk_io_baseline()
 _disk_io_primed = False
 
 
@@ -292,14 +306,16 @@ def disk_io() -> list[DiskIO]:
 
     global _last_disk_io, _disk_io_primed
     try:
-        now = time.time()
+        now = time.monotonic()
         past_t, past = _last_disk_io
         now_c = psutil.disk_io_counters(perdisk=True) or {}
         if not _disk_io_primed:
             _disk_io_primed = True
             _last_disk_io = (now, now_c)
             return []
-        dt = max(1e-6, now - past_t)
+        # One second floor: two cards opened in the same second used to divide
+        # a tiny byte delta by a microsecond and show GB/s.
+        dt = max(1.0, now - past_t)
         ret: list[DiskIO] = []
         for name, now_one in now_c.items():
             if name not in past:
@@ -511,7 +527,7 @@ def prime_process_cpu() -> None:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
         except Exception as exc:
-            logger.debug("读取进程 CPU 快照失败 %s: %s", key, exc)
+            logger.debug("读取进程 CPU 快照失败: %s", exc)
             continue
     with _PROC_CPU_LOCK:
         _PROC_CPU_PREV.clear()
@@ -578,7 +594,7 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
         except Exception as exc:
-            logger.debug("读取进程信息失败 %s: %s", name, exc)
+            logger.debug("读取进程信息失败: %s", exc)
             continue
 
     procs.sort(key=lambda x: (x.cpu, x.mem), reverse=True)
@@ -678,8 +694,15 @@ def _run_command(args: list[str], timeout: float = 4.0) -> str | None:
         return None
 
 
-_pkg_cache: dict[str, Any] = {"ts": 0.0, "dpkg": None, "pip": None, "gpu": None}
+_pkg_cache: dict[str, Any] = {}
 _SYSINFO_CACHE_TTL = 24 * 3600
+
+
+def _cache_time(cache: dict[str, Any], key: str) -> float:
+    try:
+        return float(cache.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _load_sysinfo_cache(state: Any = None) -> dict[str, Any]:
@@ -720,12 +743,22 @@ def _package_counts(
 ) -> tuple[int | None, int | None]:
     now = time.time()
     persisted = _load_sysinfo_cache(state)
-    cache_ts = float(_pkg_cache.get("ts") or persisted.get("ts") or 0)
+    # Package counts and the GPU name age independently: a GPU probe used to
+    # refresh the shared timestamp, which kept the package cache "fresh"
+    # forever while its memory values were still empty after a reload.
+    cache_ts = (
+        _cache_time(_pkg_cache, "pkg_ts")
+        or _cache_time(persisted, "pkg_ts")
+        or _cache_time(persisted, "ts")
+    )
     if now - cache_ts < _SYSINFO_CACHE_TTL:
-        return (
-            _pkg_cache.get("dpkg", persisted.get("dpkg")),
-            _pkg_cache.get("pip", persisted.get("pip")),
-        )
+        dpkg = _pkg_cache.get("dpkg")
+        if dpkg is None:
+            dpkg = persisted.get("dpkg")
+        pip = _pkg_cache.get("pip")
+        if pip is None:
+            pip = persisted.get("pip")
+        return dpkg, pip
 
     dpkg: int | None = None
     pip: int | None = None
@@ -741,8 +774,8 @@ def _package_counts(
             pip = len([line for line in out.splitlines() if line.strip()])
     except Exception:
         pass
-    _pkg_cache.update(ts=now, dpkg=dpkg, pip=pip)
-    _save_sysinfo_cache(state, {"ts": now, "dpkg": dpkg, "pip": pip})
+    _pkg_cache.update(pkg_ts=now, dpkg=dpkg, pip=pip)
+    _save_sysinfo_cache(state, {"pkg_ts": now, "dpkg": dpkg, "pip": pip})
     return dpkg, pip
 
 
@@ -750,8 +783,12 @@ def _gpu_name(state: Any = None) -> str:
     now = time.time()
     persisted = _load_sysinfo_cache(state)
     cached = _pkg_cache.get("gpu") or persisted.get("gpu")
-    cache_ts = float(_pkg_cache.get("ts") or persisted.get("ts") or 0)
-    if now - cache_ts < _SYSINFO_CACHE_TTL and cached and cached != "--":
+    cache_ts = (
+        _cache_time(_pkg_cache, "gpu_ts")
+        or _cache_time(persisted, "gpu_ts")
+        or _cache_time(persisted, "ts")
+    )
+    if now - cache_ts < _SYSINFO_CACHE_TTL and cached:
         return str(cached)
     gpu = "--"
     if shutil.which("lspci"):
@@ -775,7 +812,8 @@ def _gpu_name(state: Any = None) -> str:
         if out and out.strip():
             gpu = out.strip()
     _pkg_cache["gpu"] = gpu
-    _save_sysinfo_cache(state, {"ts": now, "gpu": gpu})
+    _pkg_cache["gpu_ts"] = now
+    _save_sysinfo_cache(state, {"gpu_ts": now, "gpu": gpu})
     return gpu
 
 
@@ -929,7 +967,15 @@ async def collect_bot_info(
         if not item:
             return False, None
         ts, value = item
-        ttl = _BOT_CACHE_SUCCESS_TTL if value is not None else _BOT_CACHE_FAILURE_TTL
+        if name == "online" and value is not None:
+            # A NapCat restart must not leave "在线" on the card for ten
+            # minutes; the connection state changes much faster than the
+            # friend/group lists.
+            ttl = 30.0
+        else:
+            ttl = (
+                _BOT_CACHE_SUCCESS_TTL if value is not None else _BOT_CACHE_FAILURE_TTL
+            )
         return (now - ts < ttl), value
 
     def store(name: str, value: Any) -> None:
@@ -1521,15 +1567,30 @@ async def collect_all(
     tz = get_timezone(config)
     now = now_in_timezone(config)
     cpu_pct = await asyncio.to_thread(cpu_percent)
-    mem = memory_stat()
-    swap = swap_stat()
     disk_paths = cfg_get(config, "display.disk_paths", None)
     if not isinstance(disk_paths, list) or not disk_paths:
         disk_paths = _default_disk_paths()
-    disks = disk_usage([str(x) for x in disk_paths])
-    if disks and all(d.exception for d in disks):
-        disks = disk_usage(_default_disk_paths())
-    net_interface = _pick_network_interface()
+
+    def _local_snapshot() -> tuple[Any, Any, list[Any], str, Any]:
+        # statvfs on a hung network mount blocks the whole event loop, which
+        # would freeze every platform task and web request, not just this
+        # card. Keep all local system calls in one worker-thread pass.
+        memory = memory_stat()
+        swap_value = swap_stat()
+        usage = disk_usage([str(x) for x in disk_paths])
+        if usage and all(item.exception for item in usage):
+            usage = disk_usage(_default_disk_paths())
+        return (
+            memory,
+            swap_value,
+            usage,
+            _pick_network_interface(),
+            psutil.net_io_counters(),
+        )
+
+    mem, swap, disks, net_interface, net_counters = await asyncio.to_thread(
+        _local_snapshot
+    )
 
     sites_cfg = cfg_get(config, "display.website_targets", None)
     cache_seconds = cfg_int(config, "display.website_cache_seconds", 60)
@@ -1553,7 +1614,6 @@ async def collect_all(
 
     bot = await collect_bot_info(context, event, config, recv_state)
 
-    net_counters = psutil.net_io_counters()
     history = net_state.get("history") if isinstance(net_state, dict) else []
     chart_interval = net_state.get("interval") if isinstance(net_state, dict) else None
     chart = build_network_chart(history, tz, interval=int(chart_interval or 60))

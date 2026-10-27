@@ -27,6 +27,7 @@ from .collectors import (
     now_in_timezone,
     swap_stat,
 )
+from .delivery import DeliveryResult
 from .redactor import HIDDEN, read_rules
 from .state import StateStore
 from .utils import clamp_config, normalize_targets, retry_delay, truncate_text
@@ -72,17 +73,29 @@ class AlertEngine:
         )
         self.recover_notify = cfg_bool(config, "alerts.recover_notify", True)
         self.offline_notify = cfg_bool(config, "alerts.offline_notify", True)
-        self.cpu_threshold = max(
-            0.0, min(100.0, cfg_float(config, "alerts.cpu_threshold", 85.0))
+        self.cpu_threshold = clamp_config(
+            cfg_float(config, "alerts.cpu_threshold", 85.0),
+            0.0,
+            100.0,
+            "alerts.cpu_threshold",
         )
-        self.mem_threshold = max(
-            0.0, min(100.0, cfg_float(config, "alerts.mem_threshold", 90.0))
+        self.mem_threshold = clamp_config(
+            cfg_float(config, "alerts.mem_threshold", 90.0),
+            0.0,
+            100.0,
+            "alerts.mem_threshold",
         )
-        self.swap_threshold = max(
-            0.0, min(100.0, cfg_float(config, "alerts.swap_threshold", 90.0))
+        self.swap_threshold = clamp_config(
+            cfg_float(config, "alerts.swap_threshold", 90.0),
+            0.0,
+            100.0,
+            "alerts.swap_threshold",
         )
-        self.disk_threshold = max(
-            0.0, min(100.0, cfg_float(config, "alerts.disk_threshold", 85.0))
+        self.disk_threshold = clamp_config(
+            cfg_float(config, "alerts.disk_threshold", 85.0),
+            0.0,
+            100.0,
+            "alerts.disk_threshold",
         )
         self.load_threshold = clamp_config(
             cfg_float(config, "alerts.load_per_core_threshold", 2.0),
@@ -252,14 +265,32 @@ class AlertEngine:
     # targets / sending
     # ------------------------------------------------------------------
 
-    async def _send(self, text: str, source: str = "alert") -> bool:
+    async def _send(self, text: str, source: str = "alert") -> DeliveryResult:
         if not self.targets:
             logger.warning("告警目标为空，跳过发送")
-            return False
-        if not await self.plugin.send_text(self.targets, text, source=source):
+            return DeliveryResult(ok=False)
+        value = await self.plugin.send_text(self.targets, text, source=source)
+        result = (
+            value
+            if isinstance(value, DeliveryResult)
+            else DeliveryResult(ok=bool(value))
+        )
+        if not result.ok:
             logger.warning("告警发送失败：%s", text.splitlines()[0] if text else "")
-            return False
-        return True
+        return result
+
+    @staticmethod
+    def _delivered(result: Any) -> bool:
+        """A message that may have arrived counts as delivered.
+
+        Retrying a timeout or a lost acknowledgement would show the alert
+        twice in the chat, so only a provably unsent message is retried.
+        Plain booleans keep test doubles and third-party callers working.
+        """
+
+        if isinstance(result, DeliveryResult):
+            return result.ok or bool(result.uncertain_targets)
+        return bool(result)
 
     def _record_event(
         self,
@@ -292,11 +323,12 @@ class AlertEngine:
         text = (
             "🔔 测试通知\n"
             "──────────────\n"
-            f"主机: {os.uname().nodename if hasattr(os, 'uname') else os.environ.get('COMPUTERNAME', '--')}\n"
+            f"主机: {self._hostname()}\n"
             f"时间: {_now_text(self.config)}\n"
             "如果你收到这条消息，说明主动推送链路正常。"
         )
-        return await self.plugin.send_text(targets, text, source="test")
+        result = await self.plugin.send_text(targets, text, source="test")
+        return self._delivered(result)
 
     # ------------------------------------------------------------------
     # monitor loop
@@ -429,10 +461,11 @@ class AlertEngine:
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.sustain} 个采样周期超过阈值。"
                     )
-                    ok = await self._send(text)
+                    result = await self._send(text)
+                    delivered = self._delivered(result)
                     st["last_attempt"] = now
-                    st["last_error"] = "" if ok else "send_failed"
-                    if ok:
+                    st["last_error"] = "" if delivered else "send_failed"
+                    if delivered:
                         st["alerting"] = True
                         st["alert_since"] = now
                         st["count"] = 0
@@ -477,12 +510,17 @@ class AlertEngine:
                                 )
         else:
             st["count"] = 0
+            # A new episode starts with a clean retry budget. Leaving the
+            # counter behind meant a later failure could give up on its first
+            # attempt and never deliver any alert at all.
+            st["retry_count"] = 0
+            st["next_attempt"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
-                    sent = await self._send(str(pending_text))
-                    if sent:
+                    result = await self._send(str(pending_text))
+                    if self._delivered(result):
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
@@ -495,8 +533,18 @@ class AlertEngine:
                 st["alerting"] = False
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
+                st["last_error"] = ""
                 duration = now - float(st.get("alert_since") or now)
                 st["alert_since"] = 0
+                # The event log is the source of truth for interruption
+                # durations and the daily report's unresolved list, so it must
+                # not depend on whether the recovery notice is enabled.
+                self._record_event(
+                    "resource",
+                    name,
+                    f"持续 {format_duration(duration)}",
+                    "recovery",
+                )
                 if self.recover_notify:
                     text = (
                         f"✅ 已恢复 · {name}\n"
@@ -505,18 +553,11 @@ class AlertEngine:
                         f"告警持续: {format_duration(duration)}\n"
                         f"时间: {_now_text(self.config)}"
                     )
-                    sent = await self._send(text)
-                    if not sent:
+                    result = await self._send(text)
+                    if not self._delivered(result):
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
-                    else:
-                        self._record_event(
-                            "resource",
-                            name,
-                            f"持续 {format_duration(duration)}",
-                            "recovery",
-                        )
 
     async def _check_offline(self) -> None:
         # Without a self_id filter a multi-bot instance could probe another
@@ -538,12 +579,19 @@ class AlertEngine:
             else:
                 online = True
         except Exception as exc:
-            # The status call failed. That is not the same as OneBot
-            # reporting the bot as offline: a restarting NapCat container or a
-            # half-open socket also raises here. Only an explicit
-            # ``online: false`` counts as a confirmed offline state.
-            online = None
-            logger.debug("OneBot get_status 调用失败: %s", exc)
+            # Distinguish "nothing is connected" from "we cannot tell".
+            # aiocqhttp raises ApiNotAvailable when no reverse-WS client is
+            # registered: that is a confirmed offline bot, not an unknown
+            # state. A timeout or a closed socket stays unknown so a
+            # restarting NapCat does not raise a false alarm.
+            name = exc.__class__.__name__
+            if name in ("ApiNotAvailable", "InvalidURL"):
+                online = False
+            elif name == "ActionFailed":
+                online = True
+            else:
+                online = None
+            logger.debug("OneBot get_status 调用失败（%s）: %s", name, exc)
 
         alerts = self.state.setdefault("alerts", {})
         st = alerts.setdefault("offline", {})
@@ -554,12 +602,13 @@ class AlertEngine:
         if online:
             st["count"] = 0
             st["unreachable"] = 0
+            st["unreachable_warned"] = False
             pending_text = st.get("pending_recovery")
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
-                    sent = await self._send(str(pending_text))
-                    if sent:
+                    result = await self._send(str(pending_text))
+                    if self._delivered(result):
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
@@ -589,19 +638,20 @@ class AlertEngine:
                         text += "\n（离线期间有一条告警未能送达，现已恢复）"
                     parts.append(text)
                 st["pending_alert"] = False
+                # The event log does not depend on the notification pref.
+                self._record_event(
+                    "offline",
+                    "Bot 连接",
+                    f"离线时长 {format_duration(duration)}",
+                    "recovery",
+                )
                 if parts:
                     text = "\n\n".join(parts)
-                    sent = await self._send(text)
-                    if sent:
+                    result = await self._send(text)
+                    if self._delivered(result):
                         logger.info(
                             "Bot 连接恢复通知已发送%s",
                             "（含离线补发）" if queued else "",
-                        )
-                        self._record_event(
-                            "offline",
-                            "Bot 连接",
-                            f"离线时长 {format_duration(duration)}",
-                            "recovery",
                         )
                     else:
                         st["pending_recovery"] = text
@@ -619,7 +669,8 @@ class AlertEngine:
             # bot, which would raise a false alarm.
             st["unreachable"] = unreachable + 1
             st["count"] = 0
-            if unreachable + 1 >= self.sustain * 3:
+            if unreachable + 1 >= self.sustain * 3 and not st.get("unreachable_warned"):
+                st["unreachable_warned"] = True
                 logger.warning(
                     "OneBot 状态查询连续 %d 次失败，暂时无法确认 Bot 在线状态",
                     unreachable + 1,
@@ -627,6 +678,7 @@ class AlertEngine:
             return
 
         st["unreachable"] = 0
+        st["unreachable_warned"] = False
         count += 1
         st["count"] = count
         if not st.get("alerting") and count >= self.sustain:
@@ -640,9 +692,10 @@ class AlertEngine:
                 f"时间: {_now_text(self.config)}\n"
                 "离线告警会先排队，连接恢复后补发。"
             )
-            ok = await self._send(text)
-            st["pending_alert"] = not ok
-            if ok:
+            result = await self._send(text)
+            delivered = self._delivered(result)
+            st["pending_alert"] = not delivered
+            if delivered:
                 st.pop("pending_alert_text", None)
                 logger.info("Bot 连接离线告警已发送")
                 self._record_event("offline", "Bot 连接", "连接离线", "alert")
@@ -785,19 +838,19 @@ class AlertEngine:
                 logger.exception("每日定时状态图渲染失败")
                 image_url = None
             if image_url:
-                ok = await self.plugin.send_image(
+                result = await self.plugin.send_image(
                     self.targets, image_url, source="daily_summary"
                 )
-                if ok:
+                if self._delivered(result):
                     self._mark_daily_sent(today)
                     logger.info("每日定时状态图已发送（图片）：%s", self.targets)
                     return True
         summary = await self.plugin.build_summary_text()
-        ok = await self._send(
+        result = await self._send(
             "📅 每日定时状态图\n──────────────\n" + summary,
             source="daily_summary",
         )
-        if ok:
+        if self._delivered(result):
             self._mark_daily_sent(today)
             logger.info("每日定时状态图已发送（文字）：%s", self.targets)
             return True
@@ -880,8 +933,8 @@ class AlertEngine:
             except Exception:
                 data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
             text = self._format_komari(data)
-            ok = await self._send(text, source="webhook")
-            if not ok:
+            result = await self._send(text, source="webhook")
+            if not self._delivered(result):
                 return web.json_response(
                     {"status": "error", "message": "delivery failed"},
                     status=503,

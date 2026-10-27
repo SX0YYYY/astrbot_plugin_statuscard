@@ -147,8 +147,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             )
         )
     if alerts_on:
-        # A threshold of 0 makes "value >= threshold" true for every sample:
-        # the rule fires once and then stays stuck in alerting forever.
+        # A threshold of 0 disables the rule (see AlertEngine._evaluate); the
+        # audit only needs to make that silent behaviour discoverable.
         for key, label in (
             ("alerts.cpu_threshold", "CPU 使用率"),
             ("alerts.mem_threshold", "内存使用率"),
@@ -162,8 +162,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                         AuditIssue(
                             "warning",
                             "alert_threshold_zero",
-                            f"告警阈值「{label}」为 0：该规则会对每次采样告警并卡在告警态"
-                            "无法恢复。如需关闭该规则，请调高阈值而不是设为 0。",
+                            f"告警阈值「{label}」为 0：该规则不生效（视为关闭）。"
+                            "如需关闭请保持 0；如需告警请设为大于 0 的值。",
                         )
                     )
             except (TypeError, ValueError):

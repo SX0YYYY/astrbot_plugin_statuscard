@@ -45,7 +45,7 @@ def _fmt_num(value: Any) -> str:
         return "--"
     try:
         return f"{round(float(value)):,}"
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "--"
 
 
@@ -83,7 +83,7 @@ def _delta_pct(current: Any, previous: Any) -> float | None:
 
 
 def _nice_ceil(value: float) -> float:
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         return 1.0
     exp = math.floor(math.log10(value))
     base = value / (10**exp)
@@ -406,7 +406,7 @@ class DailyReportBuilder:
     def _resource_section(
         self, day: date, previous: date, history_days: int
     ) -> dict[str, Any]:
-        start_day = day - timedelta(days=history_days - 1)
+        start_day = min(day - timedelta(days=history_days - 1), previous)
         start_ts = int(
             datetime.combine(start_day, time.min, tzinfo=self.tz).timestamp()
         )
@@ -430,11 +430,11 @@ class DailyReportBuilder:
         prev_rows = by_day.get(previous.isoformat(), [])
         available = len(yesterday_rows) >= 2
         if not rows:
-            earliest = self.store.list_resources(0, limit=1)
-            if earliest:
-                first_day = datetime.fromtimestamp(
-                    int(earliest[0]["ts"]), self.tz
-                ).strftime("%Y-%m-%d")
+            first_ts = self.store.first_resource_ts()
+            if first_ts is not None:
+                first_day = datetime.fromtimestamp(first_ts, self.tz).strftime(
+                    "%Y-%m-%d"
+                )
                 empty_reason = (
                     f"资源采样从 {first_day} 开始，暂无 {day.isoformat()} 数据"
                 )
@@ -553,7 +553,18 @@ class DailyReportBuilder:
     def _metric_stats(
         rows: list[dict[str, Any]], key: str, unit: str = "%"
     ) -> dict[str, Any]:
-        values = [float(row[key]) for row in rows if row.get(key) is not None]
+        values = []
+        for row in rows:
+            raw = row.get(key)
+            if raw is None:
+                continue
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(number):
+                continue
+            values.append(number)
         if not values:
             return {
                 "avg": None,
@@ -762,15 +773,18 @@ class DailyReportBuilder:
         recv_values: list[int | None] = []
         reset_days: list[str] = []
         for item in days:
+            # snapshot(D) is captured just after D 00:00, so the value that
+            # covers day D is snap(D+1) - snap(D). Using snap(D)-snap(D-1)
+            # shifted every receive number one day into the past.
             current = snapshots.get(item.isoformat())
-            previous = snapshots.get((item - timedelta(days=1)).isoformat())
+            following = snapshots.get((item + timedelta(days=1)).isoformat())
             if (
                 current
-                and previous
+                and following
                 and current.get("recv_total") is not None
-                and previous.get("recv_total") is not None
+                and following.get("recv_total") is not None
             ):
-                delta = int(current["recv_total"]) - int(previous["recv_total"])
+                delta = int(following["recv_total"]) - int(current["recv_total"])
                 if delta < 0:
                     delta = 0
                     reset_days.append(item.isoformat())
@@ -804,11 +818,12 @@ class DailyReportBuilder:
         # The recv delta assumes both snapshots were captured around 00:05.
         # If OneBot was down at capture time the day's snapshot can be hours
         # late, in which case the delta silently covers extra hours.
+        next_day = snapshots.get((day + timedelta(days=1)).isoformat(), {})
         recv_skewed = False
         try:
             cur_ts = float(yesterday.get("captured_at") or 0)
-            prev_ts = float(previous.get("captured_at") or 0)
-            gap_hours = abs(cur_ts - prev_ts) / 3600.0 if cur_ts and prev_ts else 24.0
+            next_ts = float(next_day.get("captured_at") or 0)
+            gap_hours = abs(next_ts - cur_ts) / 3600.0 if cur_ts and next_ts else 24.0
             recv_skewed = not (23.0 <= gap_hours <= 25.0)
         except (TypeError, ValueError):
             recv_skewed = False

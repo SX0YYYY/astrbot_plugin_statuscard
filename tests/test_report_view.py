@@ -93,6 +93,9 @@ def test_qq_and_token_sections_use_astrbot_history(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     store.record_snapshot("2026-10-19", 10, 2, 100, 1000, True, 1)
     store.record_snapshot("2026-10-20", 12, 3, 120, 1050, True, 2)
+    # A day's receive total is snap(D+1) - snap(D): snapshots are captured
+    # just after midnight, so the 10-21 snapshot closes out 10-20.
+    store.record_snapshot("2026-10-21", 12, 3, 120, 1100, True, 3)
 
     db = tmp_path / "data_v4.db"
     con = _stats_db(db)
@@ -790,19 +793,20 @@ def test_token_section_notes_truncated_window(tmp_path: Path) -> None:
 def test_qq_section_notes_skewed_snapshot_capture(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     day = datetime(2026, 10, 20, 0, 0, tzinfo=TZ)
-    prev = day - timedelta(days=1)
+    next_day = day + timedelta(days=1)
     store.record_snapshot(
-        prev.date().isoformat(), 20, 5, 100, 1000, True, int(prev.timestamp())
+        day.date().isoformat(), 21, 5, 101, 1500, True, int(day.timestamp())
     )
-    # Second snapshot captured 30 hours later instead of ~24.
+    # The next snapshot (which supplies the day's receive delta) was captured
+    # 30 hours later instead of ~24.
     store.record_snapshot(
-        day.date().isoformat(),
+        next_day.date().isoformat(),
         21,
         5,
         101,
-        1500,
+        1600,
         True,
-        int(day.timestamp()) + 6 * 3600,
+        int(next_day.timestamp()) + 6 * 3600,
     )
     builder = _builder(tmp_path, store)
     section = builder._qq_section(day.date(), 7)

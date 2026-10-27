@@ -27,7 +27,7 @@ from .collectors import (
     fetch_avatar_bytes,
     uploaded_file_path,
 )
-from .delivery import Delivery, DeliveryService
+from .delivery import Delivery, DeliveryResult, DeliveryService
 from .i18n import tr
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
@@ -611,22 +611,20 @@ class StatusCardPlugin(Star):
         targets: list[str],
         text: str,
         source: str = "unknown",
-    ) -> bool:
-        result = await self._delivery_service().send(
+    ) -> DeliveryResult:
+        return await self._delivery_service().send(
             targets, {"text": text}, kind="text", source=source
         )
-        return result.ok
 
     async def send_image(
         self,
         targets: list[str],
         image_url: str,
         source: str = "unknown",
-    ) -> bool:
-        result = await self._delivery_service().send(
+    ) -> DeliveryResult:
+        return await self._delivery_service().send(
             targets, {"image": image_url}, kind="image", source=source
         )
-        return result.ok
 
     async def queue_delivery(
         self,

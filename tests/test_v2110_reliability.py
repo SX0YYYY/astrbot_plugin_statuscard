@@ -74,7 +74,7 @@ def test_lost_receipt_marks_send_as_attempted() -> None:
     receipt = asyncio.run(
         send_direct(
             client,
-            "default:GroupMessage:461961169",
+            "default:GroupMessage:123456789",
             [{"type": "text", "data": {"text": "hi"}}],
             timeout=0.05,
         )
@@ -92,7 +92,7 @@ def test_unreachable_endpoint_is_not_attempted() -> None:
     receipt = asyncio.run(
         send_direct(
             client,
-            "default:GroupMessage:461961169",
+            "default:GroupMessage:123456789",
             [{"type": "text", "data": {"text": "hi"}}],
             timeout=0.05,
         )
@@ -107,7 +107,7 @@ def test_network_error_is_not_definitely_not_sent() -> None:
     receipt = asyncio.run(
         send_direct(
             _NetworkErrorClient(),
-            "default:GroupMessage:461961169",
+            "default:GroupMessage:123456789",
             [{"type": "text", "data": {"text": "hi"}}],
             timeout=0.05,
         )

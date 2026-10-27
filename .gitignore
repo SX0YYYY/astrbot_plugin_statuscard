@@ -13,3 +13,9 @@ Thumbs.db
 
 # 本地 AstrBot 运行数据（含 dashboard 凭据），绝不能提交到公开仓库
 data/
+
+# 凭据类文件（预防性保护）
+.env
+*.pem
+*.key
+*.db

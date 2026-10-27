@@ -21,6 +21,7 @@ from .collectors import (
     now_in_timezone,
     swap_stat,
 )
+from .delivery import DeliveryResult
 from .i18n import tr
 from .report_store import ReportStore
 from .report_view import (
@@ -33,6 +34,29 @@ from .sampler import read_message_stats_total
 from .state import StateStore
 from .utils import normalize_targets
 from .version import resolve_astrbot_version
+
+
+def _delivered(result: Any) -> bool:
+    """A message that may have arrived counts as delivered.
+
+    Retrying a timeout or a lost acknowledgement would show the report
+    twice, so only a provably unsent message is retried. Plain booleans keep
+    test doubles working.
+    """
+
+    if isinstance(result, DeliveryResult):
+        return result.ok or bool(result.uncertain_targets)
+    return bool(result)
+
+
+def _uncertain(result: Any) -> bool:
+    """True when a send may have reached the chat without confirmation."""
+
+    return (
+        isinstance(result, DeliveryResult)
+        and not result.ok
+        and bool(result.uncertain_targets)
+    )
 
 
 def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
@@ -53,7 +77,7 @@ def _collect_process_samples(top_n: int) -> dict[str, list[dict[str, Any]]]:
         try:
             info = proc.info
             pid = int(info.get("pid") or 0)
-            name = str(info.get("name") or f"pid {pid}")[:80]
+            name = str(info.get("name") or f"(pid {pid})")[:80]
             cpu = float(proc.cpu_percent(None) or 0.0)
             mem_mb = float(proc.memory_info().rss or 0) / 1048576.0
             items.append({"pid": pid, "name": name, "cpu": cpu, "mem_mb": mem_mb})
@@ -115,6 +139,7 @@ class ReportCollector:
         self._last_process = 0.0
         self._last_prune = 0.0
         self._last_snapshot_attempt = 0.0
+        self._snapshot_attempts: dict[str, int] = {}
 
     def start(self) -> None:
         if not cfg_bool(self.config, "daily_report.collect", True):
@@ -258,11 +283,19 @@ class ReportCollector:
         day = now.strftime("%Y-%m-%d")
         if now.hour == 0 and now.minute < 5:
             return
-        if self.store.snapshot_complete(day):
+        # Keep retrying when the OneBot counts are complete but recv_total is
+        # still missing: the two sources fail independently, and the backfill
+        # branch in record_snapshot is only reachable from this path.
+        if self.store.snapshot_ready(day):
+            return
+        attempts = self._snapshot_attempts.get(day, 0)
+        if attempts >= 12:
             return
         if time.time() - self._last_snapshot_attempt < 300:
             return
         self._last_snapshot_attempt = time.time()
+        # One key per day: the dict must not grow across a long uptime.
+        self._snapshot_attempts = {day: attempts + 1}
 
         recv_total, _ = await asyncio.to_thread(read_message_stats_total)
         recv_state = self.state.get("recv", {}) or {}
@@ -532,6 +565,9 @@ class DailyReporter:
             logger.error("日报定时任务异常退出: %r", exc, exc_info=exc)
 
     def start(self) -> None:
+        # Weekly dispatch has its own switch and must not depend on the daily
+        # report being enabled: "weekly only" is a supported configuration.
+        self._start_weekly()
         if not self._enabled():
             logger.info("日报定时发送未启用（daily_report.enabled=false）")
             return
@@ -551,7 +587,6 @@ class DailyReporter:
             self._sections() or [],
             self._history_days(),
         )
-        self._start_weekly()
 
     def _start_weekly(self) -> None:
         if not self._weekly_enabled():
@@ -612,7 +647,14 @@ class DailyReporter:
                     if not self._disabled_logged:
                         logger.warning("日报定时任务暂停：daily_report.enabled=false")
                         self._disabled_logged = True
-                    self._clear_retry()
+                        # A disabled report must not resurrect a stale retry
+                        # when the user enables it again hours later.
+                        self._pending_image_retry = None
+                        self._image_retry_attempts = 0
+                        self._weekly_pending = None
+                        self._weekly_image_pending = None
+                        self._weekly_image_attempts = 0
+                        self._clear_retry()
                     await asyncio.sleep(60)
                     continue
                 self._disabled_logged = False
@@ -699,6 +741,8 @@ class DailyReporter:
                 # retry counter of a previous evening must not carry over.
                 self._pending_retry_count = 0
                 self._pending_retry_day = self._today()
+                self._image_retry_attempts = 0
+                self._pending_image_retry = None
                 self._save_delivery_state()
                 await self._send_scheduled()
                 last_logged = None
@@ -796,6 +840,8 @@ class DailyReporter:
                     != tz_name
                 ):
                     continue
+                self._weekly_image_attempts = 0
+                self._weekly_image_pending = None
                 await self._send_weekly_scheduled()
                 last_logged = None
             except asyncio.CancelledError:
@@ -861,21 +907,36 @@ class DailyReporter:
                     self._weekly_image_attempts,
                 )
                 return
-            if image_url and await self.plugin.send_image(
-                targets, image_url, source="weekly_report"
-            ):
-                self._weekly_last_sent_week = week_key
-                self._record(day, True, "weekly-image")
-                self._weekly_pending = None
-                self._weekly_retry_count = 0
-                self._weekly_image_attempts = 0
-                self._weekly_image_pending = None
-                self._save_delivery_state()
-                logger.info("周报已发送（图片）：%s", targets)
-                return
-        if await self.plugin.send_text(
+            if image_url:
+                result = await self.plugin.send_image(
+                    targets, image_url, source="weekly_report"
+                )
+                if _delivered(result):
+                    self._weekly_last_sent_week = week_key
+                    self._record(day, True, "weekly-image")
+                    self._weekly_pending = None
+                    self._weekly_retry_count = 0
+                    self._weekly_image_attempts = 0
+                    self._weekly_image_pending = None
+                    self._save_delivery_state()
+                    logger.info("周报已发送（图片）：%s", targets)
+                    return
+                if _uncertain(result):
+                    logger.warning(
+                        "周报图片发送未确认（可能已送达），不再补发文字以免重复"
+                    )
+                    self._weekly_last_sent_week = week_key
+                    self._record(day, True, "weekly-image unconfirmed")
+                    self._weekly_pending = None
+                    self._weekly_retry_count = 0
+                    self._weekly_image_attempts = 0
+                    self._weekly_image_pending = None
+                    self._save_delivery_state()
+                    return
+        result = await self.plugin.send_text(
             targets, build_report_text(view), source="weekly_report"
-        ):
+        )
+        if _delivered(result):
             self._weekly_last_sent_week = week_key
             self._record(day, True, "weekly-text")
             self._weekly_pending = None
@@ -884,6 +945,15 @@ class DailyReporter:
             self._weekly_image_pending = None
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
+        elif _uncertain(result):
+            logger.warning("周报文字发送未确认（可能已送达），不再重试")
+            self._weekly_last_sent_week = week_key
+            self._record(day, True, "weekly-text unconfirmed")
+            self._weekly_pending = None
+            self._weekly_retry_count = 0
+            self._weekly_image_attempts = 0
+            self._weekly_image_pending = None
+            self._save_delivery_state()
         else:
             self._record(day, False, "weekly send failed")
             logger.warning("周报发送失败：%s", targets)
@@ -943,10 +1013,16 @@ class DailyReporter:
         return True
 
     def _clear_retry(self) -> None:
+        changed = (
+            self._pending_retry is not None
+            or bool(self._pending_retry_count)
+            or self._pending_retry_day is not None
+        )
         self._pending_retry = None
         self._pending_retry_count = 0
         self._pending_retry_day = None
-        self._save_delivery_state()
+        if changed:
+            self._save_delivery_state()
 
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
@@ -995,20 +1071,36 @@ class DailyReporter:
                     self._image_retry_attempts,
                 )
                 return
-            if image_url and await self.plugin.send_image(
-                targets, image_url, source="report"
-            ):
-                self._last_sent_day = day
-                self._record(day, True, "image")
-                self._image_retry_attempts = 0
-                self._pending_image_retry = None
-                self._clear_retry()
-                self._save_delivery_state()
-                logger.info("日报已发送（图片）：%s", targets)
-                return
-        if await self.plugin.send_text(
+            if image_url:
+                result = await self.plugin.send_image(
+                    targets, image_url, source="report"
+                )
+                if _delivered(result):
+                    self._last_sent_day = day
+                    self._record(day, True, "image")
+                    self._image_retry_attempts = 0
+                    self._pending_image_retry = None
+                    self._clear_retry()
+                    self._save_delivery_state()
+                    logger.info("日报已发送（图片）：%s", targets)
+                    return
+                if _uncertain(result):
+                    # The image may already be in the chat; a text copy would
+                    # deliver the same report twice.
+                    logger.warning(
+                        "日报图片发送未确认（可能已送达），不再补发文字以免重复"
+                    )
+                    self._last_sent_day = day
+                    self._record(day, True, "image unconfirmed")
+                    self._image_retry_attempts = 0
+                    self._pending_image_retry = None
+                    self._clear_retry()
+                    self._save_delivery_state()
+                    return
+        result = await self.plugin.send_text(
             targets, build_report_text(view), source="report"
-        ):
+        )
+        if _delivered(result):
             self._last_sent_day = day
             self._record(day, True, "text")
             self._image_retry_attempts = 0
@@ -1016,6 +1108,14 @@ class DailyReporter:
             self._clear_retry()
             self._save_delivery_state()
             logger.info("日报已发送（文字）：%s", targets)
+        elif _uncertain(result):
+            logger.warning("日报文字发送未确认（可能已送达），不再重试")
+            self._last_sent_day = day
+            self._record(day, True, "text unconfirmed")
+            self._image_retry_attempts = 0
+            self._pending_image_retry = None
+            self._clear_retry()
+            self._save_delivery_state()
         else:
             self._record(day, False, "send failed")
             logger.warning("日报发送失败：%s", targets)
@@ -1041,13 +1141,16 @@ class DailyReporter:
                 image_url = await self.plugin.render_report_image(view)
             except Exception:
                 logger.exception("日报预览渲染失败，回退文字摘要")
-            if image_url and await self.plugin.send_image(
-                [target_umo], image_url, source=source
-            ):
-                return True, tr(self.config, f"{prefix}_preview_sent")
-        if await self.plugin.send_text(
+            if image_url:
+                result = await self.plugin.send_image(
+                    [target_umo], image_url, source=source
+                )
+                if _delivered(result):
+                    return True, tr(self.config, f"{prefix}_preview_sent")
+        result = await self.plugin.send_text(
             [target_umo], build_report_text(view), source=source
-        ):
+        )
+        if _delivered(result):
             return True, tr(self.config, f"{prefix}_preview_sent_text")
         return False, tr(self.config, f"{prefix}_preview_send_failed")
 

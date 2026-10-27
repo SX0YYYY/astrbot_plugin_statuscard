@@ -50,8 +50,11 @@ def test_fallback_send_timeout_not_retried(tmp_path: Path) -> None:
         get_client=lambda: None,
         build_chain=lambda payload: payload,
     )
-    ok = asyncio.run(service._send_via_astrbot("default:GroupMessage:1", {"text": "x"}))
-    assert ok is False
+    sent, uncertain = asyncio.run(
+        service._send_via_astrbot("default:GroupMessage:1", {"text": "x"})
+    )
+    assert sent is False
+    assert uncertain is True  # may have arrived; callers must not retry
     assert context.calls == 1  # a timeout may have delivered; never resend
 
 

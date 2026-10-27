@@ -26,6 +26,7 @@ from .collectors import (
     cfg_int,
     format_bytes,
     format_duration,
+    get_timezone,
     memory_stat,
     now_in_timezone,
     process_info,
@@ -45,6 +46,20 @@ def jsonify(payload: Any) -> Any:
     if _json_response is None:
         raise RuntimeError("当前 AstrBot 不支持 astrbot.api.web，插件页面 API 不可用")
     return _json_response(payload)
+
+
+def _timezone_name(config: Any) -> str:
+    """The IANA zone the plugin actually uses, or "" when it falls back.
+
+    ``get_timezone`` returns a fixed-offset tzinfo when the configured name is
+    invalid; that has no ``key`` and browsers reject it in ``Intl`` options.
+    An empty string lets the dashboard use the browser's local zone.
+    """
+
+    try:
+        return str(getattr(get_timezone(config), "key", "") or "")
+    except Exception:
+        return ""
 
 
 def _query_value(name: str, default: Any = None) -> Any:
@@ -197,11 +212,27 @@ class PageApi:
                 {
                     "rank": index,
                     "name": "已隐藏" if redact else str(row.get("name") or ""),
+                    "pid": int(row.get("pid") or 0),
                     "cpu": round(float(row.get("cpu_raw") or 0.0), 1),
                     "mem_mb": round(float(row.get("mem_mb") or 0.0), 1),
                 }
             )
         return items
+
+    def _snapshots_for_page(self, plugin: Any) -> list[dict[str, Any]]:
+        """Raw snapshots, with the QQ counts removed under qq_stats redaction."""
+
+        snapshots = plugin.report_store.list_snapshots(30)
+        if "qq_stats" not in self._redact():
+            return snapshots
+        return [
+            {
+                "day": row.get("day"),
+                "complete": row.get("complete"),
+                "captured_at": row.get("captured_at"),
+            }
+            for row in snapshots
+        ]
 
     @staticmethod
     def _downsample(
@@ -270,15 +301,13 @@ class PageApi:
             {
                 "ok": True,
                 "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "timezone": str(
-                    cfg_get(plugin.config, "display.timezone", "Asia/Shanghai")
-                    or "Asia/Shanghai"
-                ),
+                "timezone": _timezone_name(plugin.config),
                 "host": self._host(),
                 "platform": self._platform(),
                 "astrbot_version": self._astrbot_version(),
                 "plugin_version": PLUGIN_VERSION,
                 "uptime": format_duration(time.time() - psutil.boot_time()),
+                "uptime_seconds": int(max(0, time.time() - psutil.boot_time())),
                 "cpu": {
                     "percent": round(cached_cpu_percent(), 1),
                     "count": psutil.cpu_count(logical=True) or 1,
@@ -350,6 +379,17 @@ class PageApi:
             fetched = store.list_resources(start, limit=limit + 1)
             truncated = len(fetched) > limit
             rows = [row for row in fetched[:limit] if int(row.get("ts") or 0) <= end]
+            if "network" in self._redact():
+                # The overview and history honour the network rule; the CSV
+                # export is a file people forward, so it must not leak the
+                # exact up/down rates around it.
+                rows = [
+                    {
+                        key: (None if key in ("net_up", "net_down") else value)
+                        for key, value in row.items()
+                    }
+                    for row in rows
+                ]
         elif kind == "processes":
             # cpu and mem are two independent tables; truncating after the
             # merge used to drop the whole mem half once cpu filled the cap.
@@ -364,9 +404,11 @@ class PageApi:
             rows = cpu_rows[:half]
             rows += mem_rows[:half]
             if "process" in self._redact():
-                rows = [dict(row, name="已隐藏") for row in rows]
+                rows = [dict(row, name="已隐藏", pid=None) for row in rows]
         elif kind == "websites":
-            rows = store.list_website_samples(start, end + 60)
+            fetched = store.list_website_samples(start, end + 60, limit=limit + 1)
+            truncated = len(fetched) > limit
+            rows = fetched[-limit:]
         elif kind == "events":
             # One range query instead of one connection per day.
             fetched = store.list_events_range(start, end, limit=limit + 1)
@@ -391,7 +433,10 @@ class PageApi:
 
     async def history(self):
         key = str(_query_value("range", "24h")).lower()
-        seconds = RANGE_SECONDS.get(key, 86400)
+        # Echo the range that was actually used, never an unvalidated input.
+        if key not in RANGE_SECONDS:
+            key = "24h"
+        seconds = RANGE_SECONDS[key]
         end = int(time.time())
         start = end - seconds
         fetched = self.plugin.report_store.list_resources(start, limit=20001)
@@ -484,13 +529,14 @@ class PageApi:
         for item in items:
             key = str(item.get("status") or "unknown")
             counts[key] = counts.get(key, 0) + 1
+        page_size = 200
         return jsonify(
             {
                 "ok": True,
                 "days": days,
-                "items": items[:200],
+                "items": items[:page_size],
                 "counts": counts,
-                "truncated": len(items) >= 2000,
+                "truncated": len(items) > page_size,
             }
         )
 
@@ -501,8 +547,9 @@ class PageApi:
     async def reports(self):
         plugin = self.plugin
         now_ts = time.time()
+        fresh = str(_query_value("fresh", "0")) == "1"
         cached = self._reports_cache
-        if cached and now_ts - cached[0] < self._reports_cache_seconds:
+        if cached and not fresh and now_ts - cached[0] < self._reports_cache_seconds:
             return jsonify(cached[1])
         view: dict[str, Any] = {}
         build_failed = False
@@ -536,7 +583,7 @@ class PageApi:
             "website": view.get("website"),
             "process": view.get("process"),
             "runs": plugin.report_store.list_report_runs(limit=30),
-            "snapshots": plugin.report_store.list_snapshots(30),
+            "snapshots": self._snapshots_for_page(plugin),
         }
         # Do not cache a failed build: a transient SQLite hiccup would pin
         # an empty page for the whole cache window and block recovery.

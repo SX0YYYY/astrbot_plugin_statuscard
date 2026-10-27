@@ -11,6 +11,7 @@ import psutil
 from astrbot.api import logger
 
 from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
+from .delivery import DeliveryResult
 from .state import StateStore
 from .utils import clamp_config, normalize_targets, redact_url, retry_delay
 
@@ -411,13 +412,14 @@ class ServiceMonitor:
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.fail_threshold} 次检测失败。"
                     )
-                    sent = await self._send(text)
+                    result = await self._send(text)
+                    delivered = self._delivered(result)
                     st["alerting"] = True
                     st["since"] = now
                     st["last_attempt"] = now
                     st["fails"] = 0
-                    st["pending"] = not sent
-                    if sent:
+                    st["pending"] = not delivered
+                    if delivered:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
@@ -438,9 +440,9 @@ class ServiceMonitor:
                         f"原因: {detail}\n"
                         f"时间: {_now_text(self.config)}"
                     )
-                    sent = await self._send(text)
+                    result = await self._send(text)
                     st["last_attempt"] = now
-                    if sent:
+                    if self._delivered(result):
                         st["pending"] = False
                         st["last_sent"] = now
                         st["retry_count"] = 0
@@ -459,8 +461,8 @@ class ServiceMonitor:
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
-                    sent = await self._send(str(pending_text))
-                    if sent:
+                    result = await self._send(str(pending_text))
+                    if self._delivered(result):
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
@@ -475,6 +477,10 @@ class ServiceMonitor:
                 st["since"] = 0
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
+                # The event log does not depend on the notification pref: the
+                # daily report's interruption durations and unresolved list
+                # rely on resolved_ts being written on every recovery.
+                self._record_event(name, target_text, detail, "recovery")
                 if self.recover_notify:
                     extra = "\n（异常告警此前未能送达）" if pending else ""
                     text = (
@@ -485,13 +491,11 @@ class ServiceMonitor:
                         f"中断时长: {format_duration(duration)}\n"
                         f"时间: {_now_text(self.config)}{extra}"
                     )
-                    sent = await self._send(text)
-                    if not sent:
+                    result = await self._send(text)
+                    if not self._delivered(result):
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
-                    else:
-                        self._record_event(name, target_text, detail, "recovery")
                 st["pending"] = False
         states[key] = st
 
@@ -662,17 +666,32 @@ class ServiceMonitor:
             target = str(item.get("unit") or "")
         else:
             target = ""
-        return f"{kind}:{name}:{target}"
+        # Keep credentials out of state.json: the key is persisted and also
+        # returned by status(); probe/event paths already redact the URL.
+        return f"{kind}:{name}:{redact_url(target)}"
 
-    async def _send(self, text: str) -> bool:
+    async def _send(self, text: str) -> DeliveryResult:
         if not self.targets:
             logger.warning("服务监测推送目标为空")
-            return False
+            return DeliveryResult(ok=False)
         try:
-            return await self.plugin.send_text(self.targets, text, source="monitor")
+            value = await self.plugin.send_text(self.targets, text, source="monitor")
+            return (
+                value
+                if isinstance(value, DeliveryResult)
+                else DeliveryResult(ok=bool(value))
+            )
         except Exception:
             logger.exception("服务监测推送失败")
-            return False
+            return DeliveryResult(ok=False)
+
+    @staticmethod
+    def _delivered(result: Any) -> bool:
+        """Count a possibly-delivered message as delivered (no duplicates)."""
+
+        if isinstance(result, DeliveryResult):
+            return result.ok or bool(result.uncertain_targets)
+        return bool(result)
 
     async def test_all(self) -> list[dict[str, Any]]:
         async def one(item: dict[str, Any]) -> dict[str, Any]:

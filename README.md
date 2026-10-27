@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.13.0-blue)
+![Version](https://img.shields.io/badge/version-2.13.2-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -194,6 +194,7 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览、历史趋
 - **告警冷却**：同一规则成功告警后 1800 秒内不重复提醒。
 - **恢复时发送通知**、**Bot 掉线/恢复通知**：默认开启。
 - **平台实例 ID**：多机器人时指定平台实例，默认 `default`。
+- **机器人 QQ 号（`alerts.self_id`）**：多机器人时进一步指定 QQ 号；留空表示按平台实例选择。掉线检测和卡片数据都会按这个组合选择客户端。
 - **Komari Webhook**：见下方“接入 Komari Webhook”。
 
 > 每日定时状态图和服务监测默认复用“推送目标”，通常只需要在这里填一次。
@@ -374,6 +375,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 
 - **发**：读取 AstrBot 数据库 `platform_stats` 的累计值。AstrBot 只在发送路径累加该表，因此是真实的“发”
 - **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON，只覆盖该插件跟踪的群，图上会标注口径
+- **日报接收**：用 `daily_snapshots.recv_total` 的**次日快照差值**（`snap(D+1) − snap(D)`）计算 D 日接收量。快照在每天 00:05 后记录，所以“昨日接收”取的是今天凌晨快照减去昨天凌晨快照
 - **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数
 - **月流量/网络折线**：插件定期采样 `psutil.net_io_counters`，月流量**按自然月累计、每月 1 日重置**（不是从装机起累计），采样历史保存在 `state.json`，重启不丢
 - **网络折线**：图上绘制最近 60 个采样点（默认约 1 小时），采样历史最多保留 180 个点；纯 SVG 绘制，不依赖 JS
@@ -555,7 +557,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 - 主动推送走 AstrBot 发送路径时，单次调用最多等待 60 秒；超时按「可能已送达」处理、不再重发（避免群里出现两条）。
 - 资源告警发送连续失败 3 次后停止重试（恢复通知照常发送）；一次故障期间只会记录一条「推送失败」事件，不会每次重试都记。
 - 日报/周报图片渲染失败时不会立刻发文字版：先隔 10 分钟重试渲染，最多 2 次（重试计划写入 `state.json`，重启不丢）；仍未成功才回退文字。T2I 服务整点偶发故障时，通常 21:10 左右能拿到图片版。
-- 每日定时状态图的「今日已发送 / 已尝试」标记写入 `state.json`：20:00 前 60 秒内重启导致错过发送时，启动后会补发一次；发送失败重试 3 次后当天不再自动补发。
+- 每日定时状态图的「今日已发送 / 已尝试」标记写入 `state.json`：20:00 前 60 秒内重启导致错过发送时，启动后会补发一次；发送失败重试 3 次后当天不再自动补发。**首次安装或从旧版本升级当天（`state.json` 里还没有发送标记）不会补发**，避免升级时重复发出一张。
 
 **关于重复发送**
 

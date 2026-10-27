@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.13.2 — 2026-10-26
+
+Web 实测与 P2/P3 优化批（Web 8 项 + 告警/报表 8 项 + 采集 6 项 + 文档 8 项）。
+
+### Web 看板
+
+- 语言切换后，`onContext`/`visibilitychange` 会重新应用文案并刷新当前标签；框架重建 iframe 的路径仍需整页刷新。
+- 日报页刷新带 `fresh=1` 绕过 60 秒缓存；summary 新增「未恢复 N 项 / 近 30 天」。
+- 英文界面：运行时长按 locale 格式化（`6d 14:36:49`），发送记录方式映射为图片/文字等 i18n 文案。
+- 切回已加载标签超过 5 秒会重新拉取；`/history` 非法 range 归一化为 24h；`/overview` 进程补 `pid`；窄屏 body 最小宽度 320px。
+- 日报未知进程名显示为 `(pid N)`。
+
+### 告警与报表
+
+- `audit` 阈值 0 文案改为「不生效（视为关闭）」；`测试通知` 使用主机名脱敏；恢复后清空 `last_error`；监测 key 对 URL 做 `redact_url`；四个阈值项改走 `clamp_config`。
+- 图片重试次数在计划发送时重置；日报禁用时只在状态变化时落盘并清理图片重试字段。
+- 资源起始日用 `MIN(ts)`；网站采样保留最新并支持 `truncated`；未恢复告警保留最早 50 条；周报「较前日」取数窗口包含窗口前一天；`_fmt_num`/`_nice_ceil`/`_metric_stats` 防御 inf/nan。
+
+### 采集
+
+- `disk_io` 改用 `time.monotonic()` 且 dt 下限 1 秒；导入期 `boot_time`/`disk_io_counters` 加回退；进程异常日志不再引用未绑定变量；`online` 独立 30 秒缓存；降级卡字体检查中文字形，全失败时 warning。
+
+### 文档与配置
+
+- AGENTS 过期项（显示名/命令数/API 数/版本/仓库可见性/ignore_version_check 矛盾）；兼容性验证 4→5 路由并去掉硬编码路径；SECURITY 支持版本表；schema 文案；README 补 `alerts.self_id`、补发边界、接收口径；requirements 补 markupsafe；测试群号替换；.gitignore 补凭据类；CI 增加 schema/i18n 校验。
+
+## v2.13.1 — 2026-10-26
+
+体检修复批：14 个 P1（数据正确性、消息去重语义、告警事件链、看板隐私与健壮性、部署流程）。
+
+### 修复（数据与消息）
+
+- **超时不重发真正闭环**。`DeliveryResult` 新增 `uncertain_targets`：超时/回执丢失的目标标记为「可能已送达」，告警、监测、日报、每日状态图把它按已送达处理、不再排重试；只有确定没发出去才重试。此前 A1 只在投递层不重发，调用方 30 秒后仍会重发同一段文本。
+- **`report.db` 不再把锁/只读当损坏**。`_init_db_with_recovery` 先过 `_is_corruption`，`database is locked`/`readonly` 直接抛错、不动原文件；写入连续失败的重建移到连接关闭之后（Windows rename 不再必然失败），且只重建 schema、不改名。
+- **接收日差按次日快照计算**。快照在每天 00:05 记录，`snap(D)-snap(D-1)` 实际是前一天；改为 `snap(D+1)-snap(D)`，日报/周报/看板的「昨日接收」不再整体左移一天。同步修正测试里被固化的期望。
+- **A6 接收补写可达**。新增 `snapshot_ready`（complete 且 recv_total 非空），`_maybe_snapshot` 用它做 gate，每天最多尝试 12 次；message_stats 后装或当天异常时能真正补写。
+- **周报独立启动**。`DailyReporter.start()` 先启动周报调度，再判断日报开关；只开周报、不开日报的配置不再静默失效。
+
+### 修复（告警与监测）
+
+- **`recover_notify=false` 不再切断恢复事件**。资源告警、服务监测、掉线恢复都无条件写 recovery 事件并回写 `resolved_ts`，只把发送动作交给开关；日报「未恢复」不再把已恢复的告警算进去。
+- **A4 重试预算按故障周期复位**。`retry_count`/`next_attempt` 在值回落到阈值以下时清零，下一次故障第一次失败不会直接放弃。
+- **硬断连重新告警**。`ApiNotAvailable`/无可用客户端视为确认离线，走 sustain 累计；超时/连接关闭保持「未知」；`ActionFailed` 视为在线。`unreachable` 警告只报一次。
+
+### 修复（采集与看板）
+
+- **重启后 `Packages` 不再长期 `--`**。`_package_counts` 的内存值缺失时回落 persisted；`dpkg/pip` 与 `gpu` 使用独立时间戳（`pkg_ts`/`gpu_ts`），GPU 探测不再续期包缓存。
+- **`collect_all` 的本地系统调用移入工作线程**。mem/swap/disk/网卡/net_io 一次 `to_thread`，网络挂载点挂起不会再冻结事件循环。
+- **CSV 导出遵守网络脱敏**。`/export?kind=resources` 在 `network` 规则下清空 `net_up/net_down`；进程导出同时清空 `pid`。
+- **事件页截断可见**。`/events` 的 `truncated` 按实际 200 条上限计算，前端在统计行提示「仅显示最近 200 条」。
+- **非法时区不再让看板崩溃**。overview 返回实际生效的 IANA 时区（回退时为空），前端 `Intl` 调用加 try/catch，非法值回退浏览器本地时区。
+
+### 修复（流程）
+
+- **`deploy.sh` 防呆**。`rm -rf` 前校验解压目录含 `astrbot_plugin_statuscard/version.py`；`report.db` 改用 SQLite `backup()` 一致性备份（含 WAL 中未 checkpoint 的事务）。
+
+### 测试
+
+- 新增 `tests/test_v2131_fixes.py` 13 个用例；173 → 186 passed。ruff check/format 全绿。
+
+### 兼容性
+
+- 配置与数据格式不变；`state.json` 的 `sysinfo_cache` 增加 `pkg_ts`/`gpu_ts`（旧 `ts` 仍可读）；`state.delivery` 增加 `uncertain_targets`。
+
 ## v2.13.0 — 2026-10-26
 
 可靠性收口 + 体验打磨（A 组 8 项 + B 组 3 项）。

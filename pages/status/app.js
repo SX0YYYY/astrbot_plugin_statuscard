@@ -6,6 +6,8 @@
     historyRange: "24h",
     eventDays: "1",
     loaded: new Set(),
+    loadedAt: new Map(),
+    locale: "",
     timezone: "",
     historySeq: 0,
     eventsSeq: 0,
@@ -137,9 +139,68 @@
     return formatBytes(value) + "/s";
   }
 
+  function formatDuration(seconds) {
+    const total = Number(seconds);
+    if (!Number.isFinite(total) || total < 0) return "--";
+    const days = Math.floor(total / 86400);
+    const rest = Math.floor(total % 86400);
+    const clock =
+      String(Math.floor(rest / 3600)).padStart(2, "0") +
+      ":" +
+      String(Math.floor((rest % 3600) / 60)).padStart(2, "0") +
+      ":" +
+      String(rest % 60).padStart(2, "0");
+    if (!days) return clock;
+    return currentLocale().toLowerCase().startsWith("zh")
+      ? days + "天" + clock
+      : days + "d " + clock;
+  }
+
+  function methodText(detail) {
+    const key = String(detail || "");
+    const map = {
+      image: ["method_image", "图片"],
+      "image unconfirmed": ["method_image_unconfirmed", "图片（未确认）"],
+      text: ["method_text", "文字"],
+      "text unconfirmed": ["method_text_unconfirmed", "文字（未确认）"],
+      "weekly-image": ["method_weekly_image", "周报图片"],
+      "weekly-image unconfirmed": [
+        "method_weekly_image_unconfirmed",
+        "周报图片（未确认）",
+      ],
+      "weekly-text": ["method_weekly_text", "周报文字"],
+      "weekly-text unconfirmed": [
+        "method_weekly_text_unconfirmed",
+        "周报文字（未确认）",
+      ],
+      "sections empty": ["method_sections_empty", "未配置内容"],
+      "build failed": ["method_build_failed", "聚合失败"],
+      "targets empty": ["method_targets_empty", "目标为空"],
+      "send failed": ["method_send_failed", "发送失败"],
+      "weekly send failed": ["method_weekly_send_failed", "周报发送失败"],
+    };
+    const entry = map[key];
+    return entry ? t(entry[0], entry[1]) : key || "--";
+  }
+
   function safeDate(ts) {
     const number = Number(ts);
     return Number.isFinite(number) ? new Date(number * 1000) : null;
+  }
+
+  // Intl throws RangeError for an invalid IANA name; the backend validates
+  // the configured zone, but a stale page or a hand-edited config must never
+  // break every timestamp on the dashboard.
+  function tzName() {
+    const value = state.timezone;
+    if (!value) return undefined;
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch (error) {
+      state.timezone = "";
+      return undefined;
+    }
   }
 
   function formatTime(ts) {
@@ -149,7 +210,7 @@
       hour12: false,
       hour: "2-digit",
       minute: "2-digit",
-      timeZone: state.timezone || undefined,
+      timeZone: tzName(),
     });
   }
 
@@ -162,7 +223,7 @@
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
-      timeZone: state.timezone || undefined,
+      timeZone: tzName(),
     });
   }
 
@@ -174,13 +235,13 @@
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
-        timeZone: state.timezone || undefined,
+        timeZone: tzName(),
       });
     }
     return date.toLocaleDateString(currentLocale(), {
       month: "2-digit",
       day: "2-digit",
-      timeZone: state.timezone || undefined,
+      timeZone: tzName(),
     });
   }
 
@@ -440,7 +501,9 @@
       ),
       metric(
         t("metric_uptime", "运行时间"),
-        data.uptime || "--",
+        data.uptime_seconds !== undefined && data.uptime_seconds !== null
+          ? formatDuration(data.uptime_seconds)
+          : data.uptime || "--",
         t("label_astrbot", "AstrBot {version}", {
           version: data.astrbot_version || "--",
         }),
@@ -734,9 +797,13 @@
     if (seq !== state.eventsSeq) return;
     const items = data.items || [];
     const counts = data.counts || {};
-    const summary = ["alert", "recovery", "failed"]
-      .map((key) => statusText(key) + " " + (counts[key] ?? 0))
-      .join(" · ");
+    const summary =
+      ["alert", "recovery", "failed"]
+        .map((key) => statusText(key) + " " + (counts[key] ?? 0))
+        .join(" · ") +
+      (data.truncated
+        ? " · " + t("events_truncated", "仅显示最近 200 条")
+        : "");
     const summaryBox = $("event-summary");
     if (summaryBox) summaryBox.textContent = summary;
     $("event-list").innerHTML = items.length
@@ -938,8 +1005,8 @@
     return blocks.join("");
   }
 
-  async function loadReports() {
-    const data = await apiGet("reports");
+  async function loadReports(force) {
+    const data = await apiGet("reports", force ? { fresh: 1 } : undefined);
     $("report-day").textContent = data.day
       ? t("report_data_day", "数据日 {day}", { day: data.day })
       : t("report_no_data", "暂无数据");
@@ -969,6 +1036,12 @@
         t("report_yesterday", "昨日"),
         null,
       ),
+      metric(
+        t("report_unresolved", "未恢复"),
+        summary.unresolved_count || 0,
+        t("report_recent30", "近 30 天"),
+        null,
+      ),
     ].join("");
     $("report-details").innerHTML = reportDetails(data);
 
@@ -987,7 +1060,7 @@
                 ? t("result_ok", "成功")
                 : t("result_fail", "失败")) +
               "</td><td>" +
-              esc(run.detail || "--") +
+              esc(methodText(run.detail)) +
               "</td></tr>",
           )
           .join("")
@@ -1000,11 +1073,11 @@
   // tabs
   // ------------------------------------------------------------------
 
-  async function loadTab(name) {
+  async function loadTab(name, force) {
     if (name === "overview") return loadOverview();
     if (name === "history") return loadHistory();
     if (name === "events") return loadEvents();
-    if (name === "reports") return loadReports();
+    if (name === "reports") return loadReports(force);
     return undefined;
   }
 
@@ -1019,10 +1092,18 @@
     document.querySelectorAll(".panel").forEach((panel) => {
       panel.classList.toggle("active", panel.id === "panel-" + name);
     });
-    if (!force && state.loaded.has(name)) return;
+    const lastLoaded = state.loadedAt.get(name) || 0;
+    if (
+      !force &&
+      state.loaded.has(name) &&
+      Date.now() - lastLoaded < 5000
+    ) {
+      return;
+    }
     try {
-      await loadTab(name);
+      await loadTab(name, force);
       state.loaded.add(name);
+      state.loadedAt.set(name, Date.now());
     } catch (error) {
       if (force) throw error;
       toast(error.message || t("error_load", "加载失败"));
@@ -1127,6 +1208,18 @@
 
   }
 
+  function refreshLocale() {
+    const next = currentLocale();
+    if (!state.locale) {
+      state.locale = next;
+      return;
+    }
+    if (next === state.locale) return;
+    state.locale = next;
+    applyStaticI18n();
+    activateTab(state.tab, true).catch(() => {});
+  }
+
   function bindTheme() {
     const bridge = getBridge();
     if (!bridge || typeof bridge.onContext !== "function") return;
@@ -1135,6 +1228,7 @@
       document.documentElement.dataset.theme = context.isDark
         ? "dark"
         : "light";
+      refreshLocale();
     });
   }
 
@@ -1158,7 +1252,11 @@
         // The page still works if the initial context is delayed.
       }
     }
+    state.locale = currentLocale();
     applyStaticI18n();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshLocale();
+    });
     await activateTab("overview");
   }
 

@@ -40,15 +40,18 @@ class ReportStore:
 
         A half-written database (power loss, full disk) raises
         ``sqlite3.DatabaseError`` on every query, and the old behaviour left
-        the plugin silently dropping all samples forever. Only that error
-        class triggers the destructive path (rename aside, then rebuild);
-        permission or I/O errors keep the file untouched.
+        the plugin silently dropping all samples forever. Only a message that
+        proves the file is damaged triggers the destructive path (rename
+        aside, then rebuild); a transient lock or a read-only filesystem is
+        re-raised so the healthy history stays where it is.
         """
 
         try:
             self._init_db()
             return
         except sqlite3.DatabaseError as exc:
+            if not self._is_corruption(exc):
+                raise
             logger.warning("日报数据库疑似损坏（%s），尝试改名重建", exc)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         backup = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
@@ -210,6 +213,8 @@ class ReportStore:
         if not self.available:
             return False
         con: sqlite3.Connection | None = None
+        rebuild = False
+        corrupt = False
         with self._lock:
             try:
                 con = self._connect()
@@ -225,20 +230,28 @@ class ReportStore:
                         pass
                 logger.exception("日报数据库写入失败")
                 self._write_failures += 1
-                if self._is_corruption(exc) or self._write_failures >= 3:
-                    # A run of failures (or a provably corrupt file) gets one
-                    # rebuild attempt instead of silently dropping data until
-                    # an operator restarts the plugin.
+                corrupt = self._is_corruption(exc)
+                rebuild = corrupt or self._write_failures >= 3
+                return False
+            finally:
+                # Close first: on Windows a rename of a file that still has an
+                # open connection fails with PermissionError, which used to
+                # leave the recovery path permanently ineffective.
+                if con is not None:
+                    con.close()
+                if rebuild:
+                    # A provably corrupt file is renamed aside; a plain run of
+                    # lock/IO failures only re-checks the schema, because
+                    # moving a healthy history away would lose every sample.
                     try:
-                        self._init_db_with_recovery()
+                        if corrupt:
+                            self._init_db_with_recovery()
+                        else:
+                            self._init_db()
                         self._write_failures = 0
                         logger.warning("日报数据库已重建，后续写入将重试")
                     except Exception:
                         logger.exception("日报数据库重建失败")
-                return False
-            finally:
-                if con is not None:
-                    con.close()
 
     def _write_many(self, sql: str, rows: list[tuple[Any, ...]]) -> bool:
         if not self.available or not rows:
@@ -437,11 +450,10 @@ class ReportStore:
             FROM events
             WHERE status = 'alert' AND resolved_ts IS NULL
               AND ts >= ? AND ts < ?
-            ORDER BY ts DESC LIMIT ?
+            ORDER BY ts ASC LIMIT ?
             """,
             (int(since_ts), int(before_ts), max(1, min(500, limit))),
         )
-        rows = list(reversed(rows or []))
         keys = (
             "id",
             "ts",
@@ -594,6 +606,23 @@ class ReportStore:
         rows = self._query("SELECT complete FROM daily_snapshots WHERE day = ?", (day,))
         return bool(rows and rows[0][0])
 
+    def snapshot_ready(self, day: str) -> bool:
+        """True only when the snapshot has both OneBot counts and recv_total.
+
+        ``snapshot_complete`` deliberately ignores ``recv_total`` because the
+        two sources fail independently. The collector must therefore keep
+        retrying a complete snapshot whose ``recv_total`` is still NULL,
+        otherwise the late-backfill branch in ``record_snapshot`` is dead
+        code and that day's receive trend stays empty forever.
+        """
+
+        rows = self._query(
+            "SELECT complete, recv_total FROM daily_snapshots WHERE day = ?", (day,)
+        )
+        if not rows:
+            return False
+        return bool(rows[0][0]) and rows[0][1] is not None
+
     def get_snapshot(self, day: str) -> dict[str, Any] | None:
         rows = self._query(
             """
@@ -664,12 +693,14 @@ class ReportStore:
     def list_website_samples(
         self, start_ts: int, end_ts: int, limit: int = 100000
     ) -> list[dict[str, Any]]:
+        # DESC + reverse keeps the NEWEST rows when the window exceeds the
+        # limit; ASC silently dropped the most recent samples instead.
         rows = self._query(
             """
             SELECT ts, name, ok, latency_ms, status
             FROM website_samples
             WHERE ts >= ? AND ts < ?
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts DESC LIMIT ?
             """,
             (
                 int(start_ts),
@@ -677,8 +708,17 @@ class ReportStore:
                 max(1, min(200000, limit)),
             ),
         )
+        rows = list(reversed(rows or []))
         keys = ("ts", "name", "ok", "latency_ms", "status")
         return [dict(zip(keys, row)) for row in rows]
+
+    def first_resource_ts(self) -> int | None:
+        """Earliest resource sample, used for the 'data starts on' note."""
+
+        rows = self._query("SELECT MIN(ts) FROM resource_samples")
+        if not rows or rows[0][0] is None:
+            return None
+        return int(rows[0][0])
 
     def list_process_samples(
         self,

@@ -47,6 +47,10 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
+  /* In a very narrow iframe (mobile panel with the sidebar open) a 320px
+     floor keeps the cards readable and scrolls sideways instead of stacking
+     every title character vertically. */
+  min-width: 320px;
 }
 
 body {

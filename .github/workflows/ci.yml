@@ -33,5 +33,25 @@ jobs:
           )
           print("version consistent:", version_py)
           PY
+      - name: Check schema and i18n
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          root = pathlib.Path(".")
+          json.loads((root / "_conf_schema.json").read_text(encoding="utf-8-sig"))
+          zh = json.loads((root / ".astrbot-plugin/i18n/zh-CN.json").read_text(encoding="utf-8"))
+          en = json.loads((root / ".astrbot-plugin/i18n/en-US.json").read_text(encoding="utf-8"))
+          def keys(node, prefix=""):
+              out = set()
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      out.add(prefix + key)
+                      out |= keys(value, prefix + key + ".")
+              return out
+          missing_en = keys(zh) - keys(en)
+          missing_zh = keys(en) - keys(zh)
+          assert not missing_en and not missing_zh, (missing_en, missing_zh)
+          print("schema/i18n consistent")
+          PY
       - name: Run tests
         run: python -m pytest -q

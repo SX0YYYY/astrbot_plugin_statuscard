@@ -61,7 +61,7 @@
         "hint": "首次出图通常需要数秒到数十秒；关闭后不再发送“生成中”提示。"
       },
       "show_advanced": {
-        "description": "显示高级显示选项",
+        "description": "显示高级选项",
         "type": "bool",
         "default": false,
         "hint": "冷却、网站测试、磁盘路径、时区、隐私与权限等；通常不需要改。"
@@ -709,7 +709,7 @@
         "description": "监测目标列表",
         "type": "template_list",
         "default": [],
-        "hint": "支持 HTTP、TCP、Docker、进程、systemd 五种模板；每项可单独设置超时和期望状态。",
+        "hint": "支持 HTTP、TCP、Docker、进程、systemd 五种模板；HTTP/TCP/Docker/systemd 可单独设置超时，HTTP 可设期望状态码。",
         "templates": {
           "http": {
             "name": "网站 / 接口",

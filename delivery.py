@@ -28,13 +28,31 @@ from .onebot_receipt import send_direct, should_retry_send
 
 @dataclass
 class DeliveryResult:
-    """Per-target outcome of one logical delivery."""
+    """Per-target outcome of one logical delivery.
+
+    ``uncertain_targets`` are the targets whose message may have reached the
+    chat even though no success was confirmed (a timeout, or a OneBot error
+    after the request was already sent). Callers must treat them as delivered
+    and must not retry, otherwise the chat shows the message twice.
+    """
 
     ok: bool = False
     ok_targets: list[str] = field(default_factory=list)
     failed_targets: list[str] = field(default_factory=list)
+    uncertain_targets: list[str] = field(default_factory=list)
     receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     retcodes: dict[str, int | None] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        """Truthy when at least one target definitely accepted the message."""
+
+        return self.ok
+
+    @property
+    def retryable(self) -> bool:
+        """False when a target may already have received the message."""
+
+        return not self.ok and not self.uncertain_targets
 
     def as_state(self) -> dict[str, Any]:
         """The shape stored in ``state.json`` for the diagnostics command."""
@@ -43,6 +61,7 @@ class DeliveryResult:
             "ok": self.ok,
             "ok_targets": list(self.ok_targets),
             "failed_targets": list(self.failed_targets),
+            "uncertain_targets": list(self.uncertain_targets),
             "receipts": dict(self.receipts),
             "retcodes": dict(self.retcodes),
         }
@@ -141,18 +160,28 @@ class DeliveryService:
                         receipt.error or "未知错误",
                     )
                     result.failed_targets.append(target)
+                    result.uncertain_targets.append(target)
                     continue
-            sent = await self._send_via_astrbot(target, payload)
+            sent, uncertain = await self._send_via_astrbot(target, payload)
             if sent:
                 result.ok_targets.append(target)
             else:
                 result.failed_targets.append(target)
+                if uncertain:
+                    result.uncertain_targets.append(target)
         result.ok = bool(result.ok_targets)
         self.record(kind, targets, result, source=source)
         return result
 
-    async def _send_via_astrbot(self, target: str, payload: dict[str, Any]) -> bool:
-        """Send through the normal AstrBot path, retrying only safe cases.
+    async def _send_via_astrbot(
+        self, target: str, payload: dict[str, Any]
+    ) -> tuple[bool, bool]:
+        """Send through the normal AstrBot path.
+
+        Returns ``(sent, uncertain)``. ``uncertain`` is True when the message
+        may have reached the chat without an acknowledgement (timeout or a
+        non-retryable transport error); the caller must then treat it as
+        delivered and must not repeat it.
 
         A transport error can also mean the message arrived and only the
         acknowledgement was lost, so the send is repeated only when the
@@ -169,16 +198,16 @@ class DeliveryService:
                     timeout=60,
                 )
                 if sent:
-                    return True
+                    return True, False
                 logger.warning("主动%s未找到匹配平台: %s", label, target)
-                return False
+                return False, False
             except TimeoutError:
                 logger.warning(
                     "主动发送%s到 %s 超时（60 秒，可能已送达，不再重发以免重复）",
                     label,
                     target,
                 )
-                return False
+                return False, True
             except Exception as exc:
                 detail = str(exc) or exc.__class__.__name__
                 if not should_retry_send(exc):
@@ -188,7 +217,7 @@ class DeliveryService:
                         target,
                         detail,
                     )
-                    return False
+                    return False, True
                 if attempt >= 2:
                     logger.warning(
                         "主动发送%s到 %s 失败（已重试 %d 次）: %s",
@@ -197,7 +226,7 @@ class DeliveryService:
                         attempt,
                         detail,
                     )
-                    return False
+                    return False, False
                 logger.warning(
                     "主动发送%s到 %s 失败（第 %d 次），%.0f 秒后重试: %s",
                     label,
@@ -207,7 +236,7 @@ class DeliveryService:
                     detail,
                 )
                 await asyncio.sleep(attempt + 1)
-        return False
+        return False, False
 
     def _safe_client(self) -> Any:
         try:

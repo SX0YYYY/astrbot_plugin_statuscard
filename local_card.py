@@ -42,6 +42,7 @@ BAD = (239, 68, 68)
 TRACK = (51, 65, 85)  # ring background
 
 _FONT_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+_FONT_WARNED = False
 
 # Discovery order matches AstrBot's own local T2I strategy: a user-provided
 # font first (AstrBot data dir), then the common CJK system fonts, then
@@ -71,7 +72,26 @@ def _custom_font_path() -> str | None:
         return None
 
 
+def _has_cjk(font: Any) -> bool:
+    """Whether the font actually carries a common Chinese glyph.
+
+    A font object that cannot answer the probe (some test doubles, unusual
+    FreeType builds) is accepted instead of rejected: refusing every font
+    would make the card fall back to the bitmap default for no reason.
+    """
+
+    try:
+        mask = font.getmask("中")
+    except Exception:
+        return True
+    try:
+        return bool(mask.getbbox())
+    except Exception:
+        return True
+
+
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    global _FONT_WARNED
     cached = _FONT_CACHE.get(size)
     if cached is not None:
         return cached
@@ -81,11 +101,16 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for name in attempts:
         try:
             font = ImageFont.truetype(name, size)
-            _FONT_CACHE[size] = font
-            return font
         except Exception:
             logger.debug("本地简化卡字体 %s 不可用，尝试下一个候选", name)
             continue
+        if not _has_cjk(font):
+            # A user-supplied Latin font (or an icon font) would render every
+            # Chinese label as tofu; keep looking for a CJK face.
+            logger.debug("本地简化卡字体 %s 缺少中文字形，尝试下一个候选", name)
+            continue
+        _FONT_CACHE[size] = font
+        return font
     try:
         # Pillow >= 10.1 supports sized default fonts; older bitmapped
         # fallbacks reject the argument, so fall back to the plain call.
@@ -93,6 +118,9 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     except TypeError:
         font = ImageFont.load_default()
     _FONT_CACHE[size] = font
+    if not _FONT_WARNED:
+        logger.warning("本地简化卡未找到含中文字形的字体，中文可能显示为方框")
+        _FONT_WARNED = True
     return font
 
 
