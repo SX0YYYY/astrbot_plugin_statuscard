@@ -68,6 +68,10 @@
       </section>
 
       <section class="panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history">
+        <div class="chart-loading" id="history-loading" hidden>
+          <span class="chart-spinner" aria-hidden="true"></span>
+          <span data-i18n="history_loading">加载中…</span>
+        </div>
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_resources">资源趋势</h2>
@@ -78,6 +82,7 @@
             </div>
             <button type="button" id="export-csv" class="ghost" data-i18n="export_csv">导出 CSV</button>
           </div>
+          <div class="card-note" id="history-range-note"></div>
           <div class="legend" id="history-legend"></div>
           <div class="chart" id="history-chart"></div>
         </div>

@@ -844,13 +844,29 @@ class StatusCardPlugin(Star):
         delivery = self.state.get("delivery", {})
         if isinstance(delivery, dict) and delivery.get("ts"):
             age = max(0, int(time.time() - float(delivery["ts"])))
+            uncertain_targets = delivery.get("uncertain_targets") or []
+            if delivery.get("ok"):
+                push_state = "成功"
+            elif uncertain_targets:
+                push_state = "未确认（可能未送达）"
+            else:
+                push_state = "失败"
             lines.append(
                 "最近主动推送: "
-                + ("成功" if delivery.get("ok") else "失败")
+                + push_state
                 + f"（{delivery.get('kind', '?')}，"
                 + f"来源 {delivery.get('source', '未知')}，{age}s 前）"
             )
-            failed_targets = delivery.get("failed_targets") or []
+            if uncertain_targets:
+                lines.append(
+                    "未确认目标: "
+                    + "、".join(str(item) for item in uncertain_targets[:3])
+                )
+            failed_targets = [
+                item
+                for item in (delivery.get("failed_targets") or [])
+                if item not in uncertain_targets
+            ]
             if failed_targets:
                 lines.append(
                     "失败目标: " + "、".join(str(item) for item in failed_targets[:3])
@@ -863,11 +879,16 @@ class StatusCardPlugin(Star):
                         continue
                     retcode = receipt.get("retcode")
                     message_id = receipt.get("message_id")
-                    state = "成功" if receipt.get("ok") else "失败"
+                    if receipt.get("ok"):
+                        receipt_state = "成功"
+                    elif target in uncertain_targets:
+                        receipt_state = "未确认"
+                    else:
+                        receipt_state = "失败"
                     detail = f"retcode={retcode}"
                     if message_id is not None:
                         detail += f"，message_id={message_id}"
-                    parts.append(f"{target}（{state}，{detail}）")
+                    parts.append(f"{target}（{receipt_state}，{detail}）")
                 if parts:
                     lines.append("OneBot 回执: " + "；".join(parts))
         else:

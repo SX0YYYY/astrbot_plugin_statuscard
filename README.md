@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.13.2-blue)
+![Version](https://img.shields.io/badge/version-2.13.3-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -47,7 +47,7 @@
 - **事件**：最近 1 / 7 / 30 天的告警、恢复和推送失败记录
 - **日报**：昨日日报摘要、关键数据和发送记录
 
-右上角“刷新”会显示加载状态，完成后提示“已刷新”，失败会提示“刷新失败”。页面只读取聚合数值，不展示聊天内容或用户 ID；文案跟随 WebUI 语言，主题跟随明暗模式，接口由 AstrBot dashboard 鉴权保护。
+右上角“刷新”会显示加载状态，完成后提示“已刷新”，失败会提示“刷新失败”。资源趋势和网络速率曲线支持鼠标悬停（触摸、键盘左右键也可以）查看具体时刻的数值；切换 24 小时 / 7 天 / 30 天时会显示加载反馈，并标注当前实际覆盖的数据范围。页面只读取聚合数值，不展示聊天内容或用户 ID；文案跟随 WebUI 语言，主题跟随明暗模式，接口由 AstrBot dashboard 鉴权保护。
 
 两点容易混淆，展开说明：
 
@@ -376,8 +376,8 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 - **收**：读取 `astrbot_plugin_message_stats` 的群统计 JSON，只覆盖该插件跟踪的群，图上会标注口径
 - **日报接收**：用 `daily_snapshots.recv_total` 的**次日快照差值**（`snap(D+1) − snap(D)`）计算 D 日接收量。快照在每天 00:05 后记录，所以“昨日接收”取的是今天凌晨快照减去昨天凌晨快照
 - **群员**：`get_group_list` 返回的各群 `member_count` 之和；同一用户跨群会重复计数
-- **月流量/网络折线**：插件定期采样 `psutil.net_io_counters`，月流量**按自然月累计、每月 1 日重置**（不是从装机起累计），采样历史保存在 `state.json`，重启不丢
-- **网络折线**：图上绘制最近 60 个采样点（默认约 1 小时），采样历史最多保留 180 个点；纯 SVG 绘制，不依赖 JS
+- **月流量**：插件定期采样 `psutil.net_io_counters`，**按自然月累计、每月 1 日重置**（不是从装机起累计），当月累计值保存在 `state.json`，重启不丢
+- **网络折线**：看板与日报共用 `report.db` 的资源采样（默认每 5 分钟一条，由 `daily_report.resource_sample_seconds` 决定），因此 24 小时 / 7 天 / 30 天都按所选窗口显示；关闭「记录日报历史数据」或尚无采样时，回退到 `state.json` 的最近约 2 小时并在图注中注明。曲线支持悬停查看具体数值
 - **网站延迟**：每 5 分钟探测一次“网站测试目标”，记录请求耗时和状态；可用率按“没有网络错误”统计，平均/峰值只统计成功请求
 - **Top 进程**：每 5 分钟记录 CPU 和内存各自的 Top 进程；日报按进程名聚合昨日采样峰值，同一程序的多进程会合并显示
 
@@ -478,7 +478,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `daily_report.history_days` | `7` | 趋势天数，7–30 天 |
 | `daily_report.render_timeout` | `180` | 日报渲染超时（秒） |
 | `daily_report.collect` | `true` | 记录日报历史数据 |
-| `daily_report.resource_sample_seconds` | `300` | 资源/网站/进程采样间隔（秒） |
+| `daily_report.resource_sample_seconds` | `300` | 资源/网站/进程采样间隔（秒）；也决定看板网络折线的粒度 |
 | `daily_report.process_top_n` | `5` | 日报展示的 CPU/内存 Top 进程数量 |
 | `daily_report.retention_days` | `30` | 资源/网站/进程数据保留天数 |
 | `daily_report.event_retention_days` | `90` | 异常事件保留天数 |
@@ -553,7 +553,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 **发送与容错**：
 
-- 单次发送最多等待 60 秒，超时按「可能已送达」处理
+- 单次发送最多等待：OneBot 直发 20 秒、回退到 AstrBot 发送路径 60 秒；超时按「可能已送达」处理，不重发
 - 资源告警连续失败 3 次后停止重试（恢复通知照常发送），一次故障只记一条失败事件
 - 日报/周报图片渲染失败会隔 10 分钟重试，最多 2 次；仍未成功才回退文字
 - 每日定时状态图会把「今日已发送 / 已尝试」写入 `state.json`：20:00 前 60 秒内重启导致错过时，启动后补发一次；首次安装或升级当天没有标记时不补发，避免重复发送
@@ -616,6 +616,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.13.3**：看板曲线悬停查看数值、范围切换加载反馈、网络趋势支持 7/30 天；日报回执超时不再误记为「已发送」
 - **v2.13.2**：看板语言切换、日报刷新、未恢复告警显示、英文界面格式、窄屏布局等体验修复
 - **v2.13.1**：消息不重复发送闭环、日报「接收」口径修正、周报可独立开启、CSV 导出遵守脱敏
 - **v2.13.0**：发送超时不重发、日报新增「未恢复」事件、图片渲染失败延迟重试、每日状态图补发

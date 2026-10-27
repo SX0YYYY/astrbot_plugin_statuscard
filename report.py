@@ -37,20 +37,25 @@ from .version import resolve_astrbot_version
 
 
 def _delivered(result: Any) -> bool:
-    """A message that may have arrived counts as delivered.
+    """True only when the platform confirmed delivery.
 
-    Retrying a timeout or a lost acknowledgement would show the report
-    twice, so only a provably unsent message is retried. Plain booleans keep
-    test doubles working.
+    A timeout or a lost acknowledgement means the message may or may not be in
+    the chat. Callers must handle that with ``_uncertain`` and record it as
+    unconfirmed instead of reporting a clean success. Plain booleans keep test
+    doubles working.
     """
 
     if isinstance(result, DeliveryResult):
-        return result.ok or bool(result.uncertain_targets)
+        return result.ok
     return bool(result)
 
 
 def _uncertain(result: Any) -> bool:
-    """True when a send may have reached the chat without confirmation."""
+    """True when a send may have reached the chat without confirmation.
+
+    The message is not retried (that could post it twice), but it must not be
+    logged or recorded as a confirmed delivery either.
+    """
 
     return (
         isinstance(result, DeliveryResult)
@@ -923,7 +928,7 @@ class DailyReporter:
                     return
                 if _uncertain(result):
                     logger.warning(
-                        "周报图片发送未确认（可能已送达），不再补发文字以免重复"
+                        "周报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._weekly_last_sent_week = week_key
                     self._record(day, True, "weekly-image unconfirmed")
@@ -946,7 +951,7 @@ class DailyReporter:
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         elif _uncertain(result):
-            logger.warning("周报文字发送未确认（可能已送达），不再重试")
+            logger.warning("周报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._weekly_last_sent_week = week_key
             self._record(day, True, "weekly-text unconfirmed")
             self._weekly_pending = None
@@ -1085,10 +1090,8 @@ class DailyReporter:
                     logger.info("日报已发送（图片）：%s", targets)
                     return
                 if _uncertain(result):
-                    # The image may already be in the chat; a text copy would
-                    # deliver the same report twice.
                     logger.warning(
-                        "日报图片发送未确认（可能已送达），不再补发文字以免重复"
+                        "日报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._last_sent_day = day
                     self._record(day, True, "image unconfirmed")
@@ -1109,7 +1112,7 @@ class DailyReporter:
             self._save_delivery_state()
             logger.info("日报已发送（文字）：%s", targets)
         elif _uncertain(result):
-            logger.warning("日报文字发送未确认（可能已送达），不再重试")
+            logger.warning("日报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._last_sent_day = day
             self._record(day, True, "text unconfirmed")
             self._image_retry_attempts = 0
@@ -1147,11 +1150,15 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     return True, tr(self.config, f"{prefix}_preview_sent")
+                if _uncertain(result):
+                    return True, tr(self.config, f"{prefix}_preview_unconfirmed")
         result = await self.plugin.send_text(
             [target_umo], build_report_text(view), source=source
         )
         if _delivered(result):
             return True, tr(self.config, f"{prefix}_preview_sent_text")
+        if _uncertain(result):
+            return True, tr(self.config, f"{prefix}_preview_unconfirmed")
         return False, tr(self.config, f"{prefix}_preview_send_failed")
 
     def _record(self, day: str, ok: bool, detail: str) -> None:

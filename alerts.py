@@ -276,16 +276,24 @@ class AlertEngine:
             else DeliveryResult(ok=bool(value))
         )
         if not result.ok:
-            logger.warning("告警发送失败：%s", text.splitlines()[0] if text else "")
+            headline = text.splitlines()[0] if text else ""
+            if result.uncertain_targets:
+                logger.warning(
+                    "告警发送未确认（可能已送达，按不重发处理）：%s", headline
+                )
+            else:
+                logger.warning("告警发送失败：%s", headline)
         return result
 
     @staticmethod
     def _delivered(result: Any) -> bool:
-        """A message that may have arrived counts as delivered.
+        """Treat "may have arrived" as done for retry purposes.
 
         Retrying a timeout or a lost acknowledgement would show the alert
-        twice in the chat, so only a provably unsent message is retried.
-        Plain booleans keep test doubles and third-party callers working.
+        twice in the chat, so only a provably unsent message is retried. This
+        is not a delivery confirmation: ``_send`` logs the unconfirmed case
+        separately. Plain booleans keep test doubles and third-party callers
+        working.
         """
 
         if isinstance(result, DeliveryResult):

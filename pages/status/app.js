@@ -245,6 +245,69 @@
     });
   }
 
+  function rangeLabel(range) {
+    return (
+      {
+        "24h": t("range_24h", "24 小时"),
+        "7d": t("range_7d", "7 天"),
+        "30d": t("range_30d", "30 天"),
+      }[range] || range
+    );
+  }
+
+  // Say out loud how much history the selected window actually contains:
+  // with only a few days of samples, 7d and 30d look identical and users
+  // assume the button did nothing.
+  function historyRangeNote(points, range) {
+    if (!points.length) return "";
+    const first = Number(points[0].ts);
+    const last = Number(points[points.length - 1].ts);
+    if (!Number.isFinite(first) || !Number.isFinite(last)) return "";
+    const days = Math.max(0, (last - first) / 86400);
+    const shownDays = Math.max(1, Math.round(days));
+    const text = t(
+      "history_range_note",
+      "数据范围 {from} – {to}（{days} 天）",
+      {
+        from: labelForTs(first, range),
+        to: labelForTs(last, range),
+        days: shownDays,
+      },
+    );
+    const wanted = { "24h": 1, "7d": 7, "30d": 30 }[range] || 1;
+    if (range !== "24h" && days + 0.5 < wanted) {
+      return (
+        text +
+        " · " +
+        t("history_range_short", "数据仅 {days} 天，{range} 视图不完整", {
+          days: shownDays,
+          range: rangeLabel(range),
+        })
+      );
+    }
+    return text;
+  }
+
+  function setHistoryLoading(loading) {
+    const panel = $("panel-history");
+    if (panel) panel.classList.toggle("is-loading", loading);
+    const box = $("history-loading");
+    if (box) box.hidden = !loading;
+    document.querySelectorAll("#range-switch button").forEach((button) => {
+      button.disabled = loading;
+      button.setAttribute("aria-busy", loading ? "true" : "false");
+    });
+  }
+
+  function setRangeActive() {
+    document.querySelectorAll("#range-switch button").forEach((button) => {
+      button.classList.toggle(
+        "active",
+        button.dataset.range === state.historyRange,
+      );
+    });
+  }
+
   function pctText(value) {
     if (value === null || value === undefined || !Number.isFinite(Number(value))) {
       return "--";
@@ -425,8 +488,147 @@
         }
       }
     });
+    svg +=
+      '<line class="hover-line" x1="0" y1="' +
+      top +
+      '" x2="0" y2="' +
+      (top + plotH) +
+      '" style="display:none" />';
+    series.forEach((item, seriesIndex) => {
+      svg +=
+        '<circle class="hover-dot" data-series="' +
+        seriesIndex +
+        '" cx="0" cy="0" r="3.5" fill="' +
+        item.color +
+        '" style="display:none" />';
+    });
     svg += "</svg>";
     container.innerHTML = svg;
+    attachChartTip(container, {
+      width,
+      left,
+      plotW,
+      count,
+      x,
+      y,
+      series,
+      formatter,
+      labels,
+      titleFor: options.titleFor,
+    });
+  }
+
+  // Adds a hover/keyboard readout to a rendered chart. The SVG itself stays
+  // static: one reference line and one dot per series are moved around, and
+  // an HTML tooltip shows the exact values for the nearest sample.
+  function attachChartTip(container, ctx) {
+    const svg = container.querySelector("svg");
+    if (!svg) return;
+    const line = svg.querySelector(".hover-line");
+    const dots = Array.from(svg.querySelectorAll(".hover-dot"));
+    let tip = container.querySelector(".chart-tip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "chart-tip";
+      container.appendChild(tip);
+    }
+    tip.style.display = "none";
+    container.tabIndex = 0;
+    const titleFor =
+      ctx.titleFor || ((index) => (ctx.labels || [])[index] || "");
+
+    function indexAt(clientX) {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width) return -1;
+      const localX = ((clientX - rect.left) * ctx.width) / rect.width;
+      const ratio = (localX - ctx.left) / ctx.plotW;
+      return Math.max(
+        0,
+        Math.min(ctx.count - 1, Math.round(ratio * (ctx.count - 1))),
+      );
+    }
+
+    function hide() {
+      if (line) line.style.display = "none";
+      dots.forEach((dot) => {
+        dot.style.display = "none";
+      });
+      tip.style.display = "none";
+      container.removeAttribute("data-active-index");
+    }
+
+    function show(index) {
+      if (index < 0 || index >= ctx.count) return;
+      container.setAttribute("data-active-index", String(index));
+      const px = ctx.x(index);
+      if (line) {
+        line.setAttribute("x1", px);
+        line.setAttribute("x2", px);
+        line.style.display = "";
+      }
+      let rows = "";
+      ctx.series.forEach((item, seriesIndex) => {
+        const value = item.values[index];
+        const dot = dots[seriesIndex];
+        if (value === null || !Number.isFinite(value)) {
+          if (dot) dot.style.display = "none";
+          return;
+        }
+        if (dot) {
+          dot.setAttribute("cx", px);
+          dot.setAttribute("cy", ctx.y(value));
+          dot.style.display = "";
+        }
+        rows +=
+          '<div class="chart-tip-row"><i style="background:' +
+          item.color +
+          '"></i><span>' +
+          esc(item.name) +
+          "</span><b>" +
+          esc(ctx.formatter(value)) +
+          "</b></div>";
+      });
+      tip.innerHTML =
+        '<div class="chart-tip-title">' +
+        esc(titleFor(index)) +
+        "</div>" +
+        rows;
+      tip.style.display = "";
+      const box = container.getBoundingClientRect();
+      const svgBox = svg.getBoundingClientRect();
+      const pointX = (px / ctx.width) * svgBox.width + (svgBox.left - box.left);
+      const tipWidth = tip.offsetWidth || 150;
+      let leftPx = pointX + 12;
+      if (leftPx + tipWidth > box.width - 6) {
+        leftPx = pointX - tipWidth - 12;
+      }
+      tip.style.left = Math.max(6, leftPx) + "px";
+      tip.style.top = Math.max(6, svgBox.top - box.top + 8) + "px";
+    }
+
+    svg.addEventListener("pointermove", (event) => {
+      show(indexAt(event.clientX));
+    });
+    svg.addEventListener("pointerleave", hide);
+    svg.addEventListener("pointercancel", hide);
+    container.addEventListener("pointerup", () => {
+      setTimeout(hide, 1400);
+    });
+    container.addEventListener("focus", () => {
+      show(0);
+    });
+    container.addEventListener("blur", hide);
+    container.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const raw = container.getAttribute("data-active-index");
+      const current = raw === null ? -1 : Number(raw);
+      const next =
+        event.key === "ArrowRight"
+          ? Math.min(ctx.count - 1, current < 0 ? 0 : current + 1)
+          : Math.max(0, current < 0 ? ctx.count - 1 : current - 1);
+      show(next);
+    });
   }
 
   function renderLegend(container, series) {
@@ -691,25 +893,36 @@
 
   async function loadHistory() {
     const seq = ++state.historySeq;
-    const data = await apiGet("history", { range: state.historyRange });
+    const range = state.historyRange;
+    setHistoryLoading(true);
+    let data;
+    try {
+      data = await apiGet("history", { range });
+    } finally {
+      if (seq === state.historySeq) setHistoryLoading(false);
+    }
     if (seq !== state.historySeq) return;
     const noteKind = data.network_note_kind;
     $("network-note").textContent =
       noteKind === "redacted"
         ? t("network_note_redacted", "已按脱敏配置隐藏网络数据。")
-        : noteKind === "state"
+        : noteKind === "db"
           ? t(
-              "network_note_state",
-              "网络折线来自插件 state.json，最多保留最近 180 个采样点。",
+              "network_note_db",
+              "网络折线来自日报采样，与资源趋势同一时间窗口。",
             )
-          : data.network_note || "";
+          : noteKind === "state"
+            ? t(
+                "network_note_state",
+                "网络折线来自插件 state.json（仅最近约 2 小时）。",
+              )
+            : data.network_note || "";
     if (data.truncated) {
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
     }
     const points = data.points || [];
-    const labels = points.map((point) =>
-      labelForTs(point.ts, state.historyRange),
-    );
+    $("history-range-note").textContent = historyRangeNote(points, range);
+    const labels = points.map((point) => labelForTs(point.ts, range));
     const series = [
       {
         name: "CPU",
@@ -732,6 +945,7 @@
       labels,
       max: 100,
       format: (value) => Math.round(value) + "%",
+      titleFor: (index) => formatDateTime(points[index] && points[index].ts),
     });
 
     const network = data.network || [];
@@ -743,7 +957,7 @@
         "</p>";
       return;
     }
-    const networkLabels = network.map((point) => formatTime(point.ts));
+    const networkLabels = network.map((point) => labelForTs(point.ts, range));
     const networkSeries = [
       {
         name: t("network_up", "上行"),
@@ -761,6 +975,8 @@
       labels: networkLabels,
       height: 170,
       format: formatRate,
+      titleFor: (index) =>
+        formatDateTime(network[index] && network[index].ts),
     });
   }
 
@@ -1183,13 +1399,17 @@
 
     document.querySelectorAll("#range-switch button").forEach((button) => {
       button.addEventListener("click", () => {
-        state.historyRange = button.dataset.range;
-        document
-          .querySelectorAll("#range-switch button")
-          .forEach((item) => item.classList.toggle("active", item === button));
-        loadHistory().catch((error) =>
-          toast(error.message || t("error_load", "加载失败")),
-        );
+        const requested = button.dataset.range;
+        if (!requested || requested === state.historyRange) return;
+        const previous = state.historyRange;
+        state.historyRange = requested;
+        setRangeActive();
+        loadHistory().catch((error) => {
+          if (state.historyRange !== requested) return;
+          state.historyRange = previous;
+          setRangeActive();
+          toast(error.message || t("error_load", "加载失败"));
+        });
       });
     });
 

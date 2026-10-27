@@ -172,11 +172,17 @@ def should_retry_send(exc: BaseException) -> bool:
     return is_definitely_not_sent(exc)
 
 
+# The QQ side can queue a send for several seconds during busy hours: a 21:00
+# report timed out at 10s while NapCat was still busy with other groups and
+# never delivered. 20s covers that without blocking a failed send for long.
+DIRECT_SEND_TIMEOUT = 20.0
+
+
 async def send_direct(
     client: Any,
     target: str,
     segments: list[dict[str, Any]],
-    timeout: float = 10.0,
+    timeout: float = DIRECT_SEND_TIMEOUT,
 ) -> OnebotReceipt:
     """Send raw OneBot segments to one target and return the receipt.
 

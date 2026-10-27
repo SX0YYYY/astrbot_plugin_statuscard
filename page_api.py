@@ -439,9 +439,15 @@ class PageApi:
         seconds = RANGE_SECONDS[key]
         end = int(time.time())
         start = end - seconds
-        fetched = self.plugin.report_store.list_resources(start, limit=20001)
+        # A 30-day window can materialise thousands of rows; keep the
+        # synchronous SQLite scan off the event loop so the WebUI (and the
+        # plugin's own background loops) stay responsive.
+        fetched = await asyncio.to_thread(
+            self.plugin.report_store.list_resources, start, 20001
+        )
         truncated = len(fetched) > 20000
         rows = [row for row in fetched[:20000] if int(row.get("ts") or 0) <= end]
+        sampled = self._downsample(rows)
         points = [
             {
                 "ts": int(row["ts"]),
@@ -451,27 +457,49 @@ class PageApi:
                 "disk": row.get("disk"),
                 "load1": row.get("load1"),
             }
-            for row in self._downsample(rows)
+            for row in sampled
         ]
-        net = self.plugin.state.get("net", {}) or {}
-        history = net.get("history") or []
         network_redacted = "network" in self._redact()
         if network_redacted:
             net_points: list[dict[str, Any]] = []
             network_note = "已按脱敏配置隐藏网络数据。"
             network_note_kind = "redacted"
         else:
-            net_points = [
+            # Resource samples already carry the sampler's net rates, so reuse
+            # the same rows: the network chart then follows the selected
+            # 24h/7d/30d window instead of only the last ~2h in state.json.
+            from_db = [
                 {
-                    "ts": int(item[0]),
-                    "up": float(item[1]),
-                    "down": float(item[2]),
+                    "ts": int(row["ts"]),
+                    "up": row.get("net_up"),
+                    "down": row.get("net_down"),
                 }
-                for item in history[-120:]
-                if isinstance(item, (list, tuple)) and len(item) >= 3
+                for row in sampled
+                if row.get("net_up") is not None or row.get("net_down") is not None
             ]
-            network_note = "网络折线来自插件 state.json，最多保留最近 180 个采样点。"
-            network_note_kind = "state"
+            if from_db:
+                net_points = from_db
+                network_note = (
+                    "网络折线来自日报采样（默认 5 分钟一条），与资源趋势同一时间窗口。"
+                )
+                network_note_kind = "db"
+            else:
+                net = self.plugin.state.get("net", {}) or {}
+                history = net.get("history") or []
+                net_points = [
+                    {
+                        "ts": int(item[0]),
+                        "up": float(item[1]),
+                        "down": float(item[2]),
+                    }
+                    for item in history[-120:]
+                    if isinstance(item, (list, tuple)) and len(item) >= 3
+                ]
+                network_note = (
+                    "网络折线来自插件 state.json（仅最近约 2 小时）；"
+                    "开启「记录日报历史数据」后可按所选范围显示。"
+                )
+                network_note_kind = "state"
         return jsonify(
             {
                 "ok": True,
