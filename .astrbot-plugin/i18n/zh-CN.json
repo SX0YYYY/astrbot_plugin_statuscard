@@ -146,7 +146,25 @@
         "error_retry": "重试",
         "exporting": "导出中…",
         "monitor_disabled": "服务监测已关闭",
-        "monitor_disabled_hint": "在配置页开启「服务可用性监测」后，这里会显示探测结果。"
+        "monitor_disabled_hint": "在配置页开启「服务可用性监测」后，这里会显示探测结果。",
+        "history_gaps": "检测到 {count} 段停机盲区（灰色区域）：期间插件或 Bot 停机，无采样数据。",
+        "report_gaps": "停机盲区 {count} 段：期间插件或 Bot 停机，无采样数据。",
+        "verify_title": "立即验证",
+        "verify_hint_short": "保存配置后可在这里验证",
+        "verify_hint": "「推送目标」会真实发送一条验证消息并回报回执；「监测项」只探测一次、不影响告警状态；「Webhook」向本插件监听端口发送模拟事件，走通接收→解析→推送整条链路。",
+        "verify_targets": "验证推送目标",
+        "verify_monitors": "验证监测项",
+        "verify_webhook": "验证 Webhook",
+        "verify_confirm_targets": "将向所有配置的推送目标真实发送一条验证消息，继续？",
+        "verifying": "验证中…",
+        "verify_failed": "验证失败",
+        "verify_state_ok": "成功",
+        "verify_state_uncertain": "未确认（可能未送达）",
+        "verify_state_failed": "失败",
+        "verify_webhook_not_listening": "Webhook 未在监听",
+        "verify_webhook_ok": "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
+        "verify_webhook_bad": "HTTP {status}：请检查 Token 与目标配置。",
+        "verify_none": "没有可验证的项"
       }
     }
   }

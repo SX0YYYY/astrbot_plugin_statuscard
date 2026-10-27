@@ -10,7 +10,15 @@ import httpx
 import psutil
 from astrbot.api import logger
 
-from .collectors import cfg_bool, cfg_get, cfg_int, format_duration, now_in_timezone
+from .aggregator import AlertAggregator
+from .collectors import (
+    cfg_bool,
+    cfg_get,
+    cfg_int,
+    format_duration,
+    now_in_timezone,
+    resolve_targets,
+)
 from .delivery import DeliveryResult
 from .state import StateStore
 from .utils import clamp_config, normalize_targets, redact_url, retry_delay
@@ -38,6 +46,15 @@ def _now_text(config: Any = None) -> str:
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _fmt_ts(ts: float, config: Any = None) -> str:
+    try:
+        return datetime.fromtimestamp(
+            float(ts), now_in_timezone(config).tzinfo
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "--"
+
+
 class ServiceMonitor:
     """Uptime-Kuma-like probes for HTTP, TCP, Docker, processes and systemd.
 
@@ -50,11 +67,13 @@ class ServiceMonitor:
         state: StateStore,
         config: Any,
         report_store: Any = None,
+        aggregator: AlertAggregator | None = None,
     ):
         self.plugin = plugin
         self.state = state
         self.config = config
         self.report_store = report_store
+        self._aggregator = aggregator
         self.enabled = cfg_bool(config, "monitors.enabled", False)
         self.interval = clamp_config(
             cfg_int(config, "monitors.interval_seconds", 60),
@@ -450,13 +469,18 @@ class ServiceMonitor:
                     )
                     if pending_recovery:
                         text += "\n（上次恢复通知未送达，已合并到本次告警）"
-                    result = await self._send(text)
-                    delivered = self._delivered(result)
+                    result = await self._push_alert(name, detail, text, target_text)
+                    buffered = result is None
+                    delivered = (not buffered) and self._delivered(result)
                     st["alerting"] = True
                     st["since"] = now
                     st["last_attempt"] = now
                     st["fails"] = 0
-                    st["pending"] = not delivered
+                    st["pending"] = not delivered and not buffered
+                    if buffered:
+                        # Covered by the aggregator summary; still a real
+                        # alert episode, so the event log stays complete.
+                        self._record_event(name, target_text, detail, "alert")
                     if delivered:
                         st["last_sent"] = now
                         st["retry_count"] = 0
@@ -527,8 +551,9 @@ class ServiceMonitor:
                         "──────────────\n"
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
-                        f"中断时长: {format_duration(duration)}\n"
-                        f"时间: {_now_text(self.config)}{extra}"
+                        f"故障开始: {_fmt_ts(now - duration, self.config)}\n"
+                        f"恢复时间: {_now_text(self.config)}\n"
+                        f"中断时长: {format_duration(duration)}{extra}"
                     )
                     result = await self._send(text)
                     if not self._delivered(result):
@@ -709,12 +734,17 @@ class ServiceMonitor:
         # returned by status(); probe/event paths already redact the URL.
         return f"{kind}:{name}:{redact_url(target)}"
 
+    def _targets_for(self, kind: str = "service") -> list[str]:
+        picked = resolve_targets(self.config, kind)
+        return self.targets if picked is None else picked
+
     async def _send(self, text: str) -> DeliveryResult:
-        if not self.targets:
+        targets = self._targets_for("service")
+        if not targets:
             logger.warning("服务监测推送目标为空")
             return DeliveryResult(ok=False)
         try:
-            value = await self.plugin.send_text(self.targets, text, source="monitor")
+            value = await self.plugin.send_text(targets, text, source="monitor")
             return (
                 value
                 if isinstance(value, DeliveryResult)
@@ -723,6 +753,24 @@ class ServiceMonitor:
         except Exception:
             logger.exception("服务监测推送失败")
             return DeliveryResult(ok=False)
+
+    async def _push_alert(
+        self, name: str, detail: str, text: str, target_text: str
+    ) -> Any | None:
+        """Send the first alert of an episode, or buffer it in the window.
+
+        Returns ``None`` when the aggregator buffered the item; the summary
+        covers it and no per-item retry is needed.
+        """
+
+        if self._aggregator is None:
+            return await self._send(text)
+        return await self._aggregator.push(
+            label=name,
+            reason=detail,
+            text=text,
+            send=self._send,
+        )
 
     @staticmethod
     def _delivered(result: Any) -> bool:

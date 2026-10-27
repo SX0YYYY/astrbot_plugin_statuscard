@@ -294,6 +294,19 @@ class ReportStore:
     # writes
     # ------------------------------------------------------------------
 
+    def latest_resource_ts(self) -> int | None:
+        """Newest ``resource_samples`` timestamp, or None when empty."""
+
+        if not self.available:
+            return None
+        rows = self._query("SELECT MAX(ts) FROM resource_samples")
+        if not rows or rows[0][0] is None:
+            return None
+        try:
+            return int(rows[0][0])
+        except (TypeError, ValueError):
+            return None
+
     def add_resource(
         self,
         ts: int,

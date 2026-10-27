@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
+import httpx
 import psutil
 from astrbot.api import logger
 
@@ -22,6 +23,7 @@ except Exception:  # pragma: no cover - very old AstrBot builds
 
 from .collectors import (
     cached_cpu_percent,
+    cfg_bool,
     cfg_get,
     cfg_int,
     format_bytes,
@@ -33,7 +35,8 @@ from .collectors import (
     swap_stat,
 )
 from .redactor import Redactor, read_rules
-from .report_view import DailyReportBuilder
+from .report_view import DailyReportBuilder, detect_resource_gaps
+from .utils import normalize_targets
 from .version import __version__, resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
@@ -111,6 +114,7 @@ class PageApi:
             ("events", self.events, ["GET"], "异常事件"),
             ("reports", self.reports, ["GET"], "日报摘要"),
             ("export", self.export, ["GET"], "导出历史数据"),
+            ("verify", self.verify, ["GET"], "立即验证"),
         )
         for name, handler, methods, desc in routes:
             register(f"/{PLUGIN_NAME}/{name}", handler, methods, desc)
@@ -355,6 +359,149 @@ class PageApi:
             }
         )
 
+    async def verify(self):
+        """One-click checks triggered from the dashboard.
+
+        ``kind=targets`` really sends a short message to every configured
+        push target and reports the per-target receipt; ``kind=monitors``
+        probes every monitor once without touching the alerting state
+        machine; ``kind=webhook`` posts a simulated Komari event to the
+        plugin's own listener so the receive -> parse -> push chain is
+        exercised end to end.
+        """
+
+        kind = str(_query_value("kind", "targets")).lower()
+        plugin = self.plugin
+        if kind == "targets":
+            platform_id = str(
+                cfg_get(plugin.config, "alerts.platform_id", "default") or "default"
+            )
+            merged: list[str] = []
+            for key in (
+                "alerts.targets",
+                "monitors.targets",
+                "daily_report.targets",
+            ):
+                raw = cfg_get(plugin.config, key, [])
+                if isinstance(raw, str):
+                    raw = [raw]
+                for item in raw or []:
+                    for one in normalize_targets([item], platform_id):
+                        if one not in merged:
+                            merged.append(one)
+            if not merged:
+                return jsonify({"ok": False, "error": "未配置任何推送目标"})
+            text = (
+                "🔔 状态卡验证消息：这是从看板触发的推送目标验证，"
+                "收到即说明该目标配置正确。"
+            )
+            result = await plugin.send_text(merged, text, source="verify_targets")
+            per_target = []
+            for target in merged:
+                receipt = (result.receipts or {}).get(target) or {}
+                if target in (result.ok_targets or []):
+                    state = "ok"
+                elif target in (result.uncertain_targets or []):
+                    state = "uncertain"
+                else:
+                    state = "failed"
+                per_target.append(
+                    {
+                        "target": target,
+                        "state": state,
+                        "retcode": receipt.get("retcode"),
+                        "message_id": receipt.get("message_id"),
+                        "error": receipt.get("error") or "",
+                    }
+                )
+            return jsonify({"ok": True, "kind": kind, "results": per_target})
+        if kind == "monitors":
+            monitor = getattr(plugin, "monitor", None)
+            items = [
+                item
+                for item in (getattr(monitor, "items", None) or [])
+                if not item.get("config_error")
+            ]
+            if not items:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "kind": kind,
+                        "results": [],
+                        "note": "没有已启用的监测项",
+                    }
+                )
+
+            async def probe_one(item: dict[str, Any]) -> dict[str, Any]:
+                started = time.perf_counter()
+                try:
+                    ok, detail, _target = await monitor._probe(item)
+                except Exception as exc:
+                    ok, detail = False, f"探测异常: {exc.__class__.__name__}"
+                return {
+                    "name": item.get("name"),
+                    "ok": bool(ok),
+                    "detail": detail,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+
+            results = await asyncio.gather(*(probe_one(item) for item in items))
+            return jsonify({"ok": True, "kind": kind, "results": list(results)})
+        if kind == "webhook":
+            cfg = cfg_get(plugin.config, "alerts.komari_webhook", {}) or {}
+            if not cfg_bool(cfg, "enabled", False):
+                return jsonify(
+                    {
+                        "ok": True,
+                        "kind": kind,
+                        "listening": False,
+                        "message": "Komari Webhook 未启用",
+                    }
+                )
+            running = getattr(plugin.alerts, "_webhook_runner", None) is not None
+            if not running:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "kind": kind,
+                        "listening": False,
+                        "message": "Webhook 未在监听（可能启动失败，详见日志）",
+                    }
+                )
+            port = max(1, min(65535, cfg_int(cfg, "port", 9968)))
+            path = str(cfg_get(cfg, "path", "/webhook") or "/webhook")
+            if not path.startswith("/"):
+                path = "/" + path
+            token = str(cfg_get(cfg, "token", "") or "")
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(
+                        f"http://127.0.0.1:{port}{path}",
+                        json={"message": "🔔 Komari Webhook 链路验证（看板模拟事件）"},
+                        headers=headers,
+                    )
+                status = resp.status_code
+            except Exception as exc:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "kind": kind,
+                        "listening": True,
+                        "http_status": 0,
+                        "message": f"请求失败: {exc.__class__.__name__}",
+                    }
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "listening": True,
+                    "http_status": status,
+                }
+            )
+        return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+
     # ------------------------------------------------------------------
     # GET /export
     # ------------------------------------------------------------------
@@ -509,6 +656,24 @@ class PageApi:
                     "开启「记录日报历史数据」后可按所选范围显示。"
                 )
                 network_note_kind = "state"
+        sample_interval = max(
+            60,
+            min(
+                1800,
+                cfg_int(
+                    self.plugin.config,
+                    "daily_report.resource_sample_seconds",
+                    300,
+                ),
+            ),
+        )
+        gaps = [
+            gap
+            for gap in detect_resource_gaps(
+                [int(point.get("ts") or 0) for point in points], sample_interval
+            )
+            if gap["end"] > start and gap["start"] < end
+        ]
         return jsonify(
             {
                 "ok": True,
@@ -516,6 +681,7 @@ class PageApi:
                 "window_start": start,
                 "window_end": end,
                 "points": points,
+                "gaps": gaps,
                 "network": net_points,
                 "network_redacted": network_redacted,
                 "network_note": network_note,

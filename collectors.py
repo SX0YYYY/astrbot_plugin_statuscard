@@ -28,7 +28,7 @@ import psutil
 from astrbot.api import logger
 
 from .redactor import Redactor, read_rules
-from .utils import CpuFreq, cfg_get, readable_python_version
+from .utils import CpuFreq, cfg_get, normalize_targets, readable_python_version
 from .version import resolve_astrbot_version
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -1213,6 +1213,58 @@ def effective_media_source(
         if uploaded_file_path(config, upload_key, data_dir) is not None
         else "default"
     )
+
+
+def resolve_targets(config: Any, kind: str) -> list[str] | None:
+    """Push targets for one notification kind, or None for the legacy path.
+
+    The notification center (``notify.rules``) takes over all push targets
+    once at least one enabled rule matches ``kind``; returning ``None`` lets
+    the caller keep its legacy behaviour (the three per-module target lists
+    that fall back to ``alerts.targets``).
+    """
+
+    cfg = cfg_get(config, "notify.rules", None)
+    rules = cfg if isinstance(cfg, list) else []
+    active: list[dict[str, Any]] = []
+    for rule in rules:
+        if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
+            continue
+        target = str(cfg_get(rule, "target", "") or "").strip()
+        if not target:
+            continue
+        kinds = cfg_get(rule, "kinds", []) or []
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if kind in kinds:
+            active.append(rule)
+    if not active:
+        return None
+    platform_id = str(cfg_get(config, "alerts.platform_id", "default") or "default")
+    picked: list[str] = []
+    for rule in active:
+        target = str(cfg_get(rule, "target", "") or "").strip()
+        for one in normalize_targets([target], platform_id):
+            if one not in picked:
+                picked.append(one)
+    return picked
+
+
+def notify_rules_active(config: Any) -> int:
+    """Number of enabled notification-center rules with a target and kinds."""
+
+    cfg = cfg_get(config, "notify.rules", None)
+    rules = cfg if isinstance(cfg, list) else []
+    count = 0
+    for rule in rules:
+        if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
+            continue
+        if not str(cfg_get(rule, "target", "") or "").strip():
+            continue
+        if not (cfg_get(rule, "kinds", []) or []):
+            continue
+        count += 1
+    return count
 
 
 def cgroup_memory_limit() -> int | None:

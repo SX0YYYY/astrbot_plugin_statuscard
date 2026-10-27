@@ -146,7 +146,25 @@
         "error_retry": "Retry",
         "exporting": "Exporting…",
         "monitor_disabled": "Service monitoring is off",
-        "monitor_disabled_hint": "Enable Service Monitoring in the plugin settings to see probe results here."
+        "monitor_disabled_hint": "Enable Service Monitoring in the plugin settings to see probe results here.",
+        "history_gaps": "{count} downtime gap(s) (gray bands): the plugin or AstrBot was down and nothing was sampled.",
+        "report_gaps": "{count} downtime gap(s): the plugin or AstrBot was down, so nothing was sampled.",
+        "verify_title": "Instant check",
+        "verify_hint_short": "Verify right after saving",
+        "verify_hint": "「Push targets」really sends a short message and reports per-target receipts; 「Monitors」probes once without touching the alerting state; 「Webhook」posts a simulated event to the plugin's own listener to exercise receive → parse → push.",
+        "verify_targets": "Check push targets",
+        "verify_monitors": "Check monitors",
+        "verify_webhook": "Check webhook",
+        "verify_confirm_targets": "A verification message will really be sent to every configured push target. Continue?",
+        "verifying": "Checking…",
+        "verify_failed": "Check failed",
+        "verify_state_ok": "delivered",
+        "verify_state_uncertain": "unconfirmed (may have arrived)",
+        "verify_state_failed": "failed",
+        "verify_webhook_not_listening": "Webhook is not listening",
+        "verify_webhook_ok": "Chain verified (HTTP 200): listen → parse → push all fine.",
+        "verify_webhook_bad": "HTTP {status}: check the token and target settings.",
+        "verify_none": "Nothing to check"
       }
     }
   }

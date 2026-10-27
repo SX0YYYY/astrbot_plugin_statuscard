@@ -19,6 +19,7 @@ from .collectors import (
     connection_test,
     memory_stat,
     now_in_timezone,
+    resolve_targets,
     swap_stat,
 )
 from .delivery import DeliveryResult
@@ -178,6 +179,7 @@ class ReportCollector:
         # Sampler seeds the system CPU snapshot asynchronously; a short wait
         # avoids recording a misleading 0% first resource sample.
         await asyncio.sleep(2)
+        await asyncio.to_thread(self._backfill_from_cache)
         while self._running:
             try:
                 await self._tick()
@@ -243,6 +245,89 @@ class ReportCollector:
             float(disk_io.get("read_rate") or 0.0),
             float(disk_io.get("write_rate") or 0.0),
         )
+        self._cache_resource_point(
+            now,
+            {
+                "cpu": float(cpu),
+                "ram": float(mem.percent),
+                "swap": float(swap.percent),
+                "disk": disk_pct,
+                "load1": load1,
+                "net_up": float(net.get("up_rate") or 0.0),
+                "net_down": float(net.get("down_rate") or 0.0),
+                "disk_read": float(disk_io.get("read_rate") or 0.0),
+                "disk_write": float(disk_io.get("write_rate") or 0.0),
+            },
+        )
+
+    RESOURCE_CACHE_MAX = 200
+    RESOURCE_CACHE_TTL = 86400
+
+    def _cache_resource_point(self, now: float, point: dict[str, Any]) -> None:
+        """Persist recent samples in state.json so a reload can refill them.
+
+        A config save reloads the plugin and drops the collector's in-memory
+        schedule; without this cache the report database has a hole from the
+        reload until the next sample. The process-death case cannot be
+        refilled (no data exists) and is surfaced as a monitoring gap instead.
+        """
+
+        try:
+            with self.state.section("resource_cache") as cache:
+                if not isinstance(cache, dict):
+                    return
+                rows = cache.get("points")
+                if not isinstance(rows, list):
+                    rows = []
+                rows = [row for row in rows if isinstance(row, dict)]
+                rows.append({"ts": int(now), **point})
+                cutoff = now - self.RESOURCE_CACHE_TTL
+                rows = [
+                    row
+                    for row in rows[-self.RESOURCE_CACHE_MAX :]
+                    if int(row.get("ts") or 0) >= cutoff
+                ]
+                cache["points"] = rows
+            self.state.save()
+        except Exception:
+            logger.debug("写入采样缓存失败", exc_info=True)
+
+    def _backfill_from_cache(self) -> None:
+        """Upsert cached samples the report database is missing."""
+
+        try:
+            cache = self.state.get("resource_cache", {})
+            rows = cache.get("points") if isinstance(cache, dict) else None
+            if not rows:
+                return
+            latest = self.store.latest_resource_ts() or 0
+            cutoff = time.time() - self.RESOURCE_CACHE_TTL
+            pending = [
+                row
+                for row in rows
+                if int(row.get("ts") or 0) > latest
+                and int(row.get("ts") or 0) >= cutoff
+            ]
+            if not pending:
+                return
+            for row in pending:
+                self.store.add_resource(
+                    int(row["ts"]),
+                    row.get("cpu"),
+                    row.get("ram"),
+                    row.get("swap"),
+                    row.get("disk"),
+                    row.get("load1"),
+                    row.get("net_up"),
+                    row.get("net_down"),
+                    row.get("disk_read"),
+                    row.get("disk_write"),
+                )
+            logger.info(
+                "已从采样缓存回填 %d 个采样点（补齐重载期间的缺口）", len(pending)
+            )
+        except Exception:
+            logger.debug("采样回填失败", exc_info=True)
 
     async def _sample_websites(self, now: float) -> None:
         try:
@@ -538,7 +623,21 @@ class DailyReporter:
         allowed = {str(item) for item in raw if isinstance(item, str)}
         return [item for item in VALID_SECTIONS if item in allowed]
 
-    def _targets(self) -> list[str]:
+    def _weekly_sections(self) -> list[str] | None:
+        """Weekly report content; unset/empty means "follow the daily one"."""
+        raw = cfg_get(self.config, "daily_report.weekly_sections", None)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            return self._sections()
+        allowed = {str(item) for item in raw if isinstance(item, str)}
+        weekly = [item for item in VALID_SECTIONS if item in allowed]
+        return weekly or self._sections()
+
+    def _targets(self, kind: str = "daily") -> list[str]:
+        picked = resolve_targets(self.config, kind)
+        if picked is not None:
+            return picked
         raw = cfg_get(self.config, "daily_report.targets", [])
         if not raw:
             raw = cfg_get(self.config, "alerts.targets", [])
@@ -547,7 +646,9 @@ class DailyReporter:
         )
         return normalize_targets(raw, platform_id)
 
-    def _build_view(self, day=None, span_days: int = 1) -> dict[str, Any]:
+    def _build_view(
+        self, day=None, span_days: int = 1, sections: list[str] | None = None
+    ) -> dict[str, Any]:
         meta = {
             "host": socket.gethostname(),
             "astrbot_version": resolve_astrbot_version(
@@ -557,7 +658,7 @@ class DailyReporter:
         return self.builder.build(
             day=day,
             history_days=self._history_days(),
-            sections=self._sections(),
+            sections=sections if sections is not None else self._sections(),
             meta=meta,
             span_days=span_days,
         )
@@ -953,7 +1054,9 @@ class DailyReporter:
             await self._notify_store_unavailable(self._targets())
             return
         try:
-            view = await asyncio.to_thread(self._build_view, day, 7)
+            view = await asyncio.to_thread(
+                self._build_view, day, 7, self._weekly_sections()
+            )
         except Exception:
             logger.exception("周报数据聚合失败")
             if not self._schedule_weekly_retry():
@@ -970,7 +1073,7 @@ class DailyReporter:
         if self._weekly_last_sent_week == week_key:
             logger.info("周报 %s 已发送过，跳过重复发送", week_key)
             return
-        targets = self._targets()
+        targets = self._targets("weekly")
         if not targets:
             logger.warning("周报推送目标为空，跳过发送")
             self._schedule_weekly_retry()
@@ -1290,7 +1393,12 @@ class DailyReporter:
         prefix = "report" if span == 1 else "weekly"
         source = "report_preview" if span == 1 else "weekly_preview"
         try:
-            view = await asyncio.to_thread(self._build_view, span_days=span)
+            preview_sections = (
+                self._sections() if span == 1 else self._weekly_sections()
+            )
+            view = await asyncio.to_thread(
+                self._build_view, span_days=span, sections=preview_sections
+            )
         except Exception:
             logger.exception("日报预览数据聚合失败")
             return False, tr(self.config, f"{prefix}_preview_failed")
@@ -1334,6 +1442,7 @@ class DailyReporter:
             "time": self._time_text(),
             "targets": self._targets(),
             "sections": self._sections(),
+            "weekly_sections": self._weekly_sections(),
             "with_image": self._with_image(),
             "history_days": self._history_days(),
             "next_run": self._next_run_text,

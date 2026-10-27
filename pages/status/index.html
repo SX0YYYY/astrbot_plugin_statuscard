@@ -48,6 +48,21 @@
           </div>
           <div class="monitor-list" id="monitors"></div>
         </div>
+        <div class="card" id="verify-card">
+          <div class="card-head">
+            <h2 data-i18n="verify_title">立即验证</h2>
+            <span data-i18n="verify_hint_short">保存配置后可在这里验证</span>
+          </div>
+          <p class="card-note" data-i18n="verify_hint">
+            「推送目标」会真实发送一条验证消息并回报回执；「监测项」只探测一次、不影响告警状态；「Webhook」向本插件监听端口发送模拟事件，走通接收→解析→推送整条链路。
+          </p>
+          <div class="segmented" id="verify-buttons">
+            <button type="button" id="verify-targets" data-i18n="verify_targets">验证推送目标</button>
+            <button type="button" id="verify-monitors" data-i18n="verify_monitors">验证监测项</button>
+            <button type="button" id="verify-webhook" data-i18n="verify_webhook">验证 Webhook</button>
+          </div>
+          <div id="verify-result"></div>
+        </div>
         <div class="card">
           <div class="card-head">
             <h2 data-i18n="section_processes">Top 进程</h2>
@@ -83,6 +98,7 @@
             <button type="button" id="export-csv" class="ghost" data-i18n="export_csv">导出 CSV</button>
           </div>
           <div class="card-note" id="history-range-note"></div>
+          <p class="card-note" id="history-gap-note" hidden></p>
           <div class="legend" id="history-legend"></div>
           <div class="chart" id="history-chart"></div>
         </div>

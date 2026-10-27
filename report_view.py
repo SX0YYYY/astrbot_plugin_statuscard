@@ -4,6 +4,7 @@ import math
 import socket
 import sqlite3
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -534,10 +535,21 @@ class DailyReportBuilder:
         )
         expected = max(1, 86400 // interval)
         coverage = len(yesterday_rows) / expected
+        gaps = detect_resource_gaps(
+            [int(row.get("ts") or 0) for row in yesterday_rows], interval
+        )
+        gaps_text = None
+        if gaps:
+            total_minutes = sum((gap["end"] - gap["start"]) for gap in gaps) // 60
+            gaps_text = (
+                f"{len(gaps)} 段共约 {total_minutes} 分钟"
+                "（采样缺失，期间插件或 Bot 停机、无法监测）"
+            )
         coverage_note = (
             f"昨日资源采样 {len(yesterday_rows)} 个点（约覆盖 {coverage * 100:.0f}%），"
             "均值和峰值为已有数据口径。"
-            if available and coverage < 0.9
+            + (f"停机盲区：{gaps_text}。" if gaps_text else "")
+            if available and (coverage < 0.9 or gaps)
             else None
         )
 
@@ -547,6 +559,8 @@ class DailyReportBuilder:
             "first_day": first_day,
             "history_note": history_note,
             "coverage_note": coverage_note,
+            "gaps": gaps,
+            "gaps_text": gaps_text,
             "yesterday": yesterday,
             "previous": prev,
             "charts": {"hourly": hourly_chart, "daily": daily_chart},
@@ -1343,6 +1357,26 @@ class DailyReportBuilder:
         return rows, min_created, True, truncated
 
 
+def detect_resource_gaps(
+    timestamps: list[int], interval_seconds: int
+) -> list[dict[str, int]]:
+    """Sampling holes: the plugin or AstrBot itself was down.
+
+    A spacing longer than two sampling intervals (or ten minutes, whichever
+    is larger) means no sample could be taken at all, so aggregates for that
+    window silently miss real incidents. Surfacing the window keeps an
+    otherwise quiet report honest.
+    """
+
+    threshold = max(2 * max(60, interval_seconds), 600)
+    ordered = sorted({int(ts) for ts in timestamps if ts})
+    return [
+        {"start": prev, "end": cur}
+        for prev, cur in pairwise(ordered)
+        if cur - prev > threshold
+    ]
+
+
 def build_report_text(view: dict[str, Any]) -> str:
     """Short text fallback used when the report image cannot be sent."""
 
@@ -1362,6 +1396,9 @@ def build_report_text(view: dict[str, Any]) -> str:
     if "resource" in sections:
         if resources.get("available") and resources.get("yesterday"):
             yesterday = resources["yesterday"]
+            gaps_text = resources.get("gaps_text")
+            if gaps_text:
+                lines.append(f"停机盲区: {gaps_text}")
             lines.append(
                 "资源({}): CPU {} / 峰值 {}；RAM {} / 峰值 {}".format(
                     day_label,

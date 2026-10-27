@@ -12,7 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .collectors import cfg_bool, cfg_float, cfg_get
+from .collectors import (
+    cfg_bool,
+    cfg_float,
+    cfg_get,
+    notify_rules_active,
+)
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
 from .redactor import RULES as REDACT_RULES
 from .utils import normalize_targets
@@ -169,6 +174,32 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
             except (TypeError, ValueError):
                 continue
+    active_rules = notify_rules_active(config)
+    if active_rules:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "notify_center_active",
+                f"通知中心已启用（{active_rules} 条有效规则）：alerts / monitors / "
+                "daily_report 三处的「推送目标」不再生效，所有通知按通知规则分发。",
+            )
+        )
+    else:
+        raw_rules = cfg_get(config, "notify.rules", []) or []
+        for rule in raw_rules:
+            if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
+                continue
+            if not str(cfg_get(rule, "target", "") or "").strip() or not (
+                cfg_get(rule, "kinds", []) or []
+            ):
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "notify_rule_invalid",
+                        "通知中心存在未生效的规则：缺少推送目标或未勾选任何通知类型。",
+                    )
+                )
+                break
     # normalize_rules silently drops unknown values; a typo such as
     # "hostnames" therefore looks like redaction is on while nothing is
     # hidden. Make the ignored values visible.

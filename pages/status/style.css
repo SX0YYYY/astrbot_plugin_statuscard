@@ -907,3 +907,21 @@ main.is-refreshing::after {
   color: var(--muted);
   font-size: 12px;
 }
+
+.chart-gap {
+  fill: color-mix(in srgb, var(--faint) 22%, transparent);
+}
+
+.verify-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.verify-list .verify-bad {
+  color: var(--bad);
+}

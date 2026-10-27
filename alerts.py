@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import psutil
 from astrbot.api import logger
 
+from .aggregator import AlertAggregator
 from .collectors import (
     _call_action,
     _get_aiocqhttp_client,
@@ -25,6 +26,7 @@ from .collectors import (
     format_duration,
     memory_stat,
     now_in_timezone,
+    resolve_targets,
     swap_stat,
 )
 from .delivery import DeliveryResult
@@ -39,6 +41,25 @@ def _now_text(config: Any = None) -> str:
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
+BROADCAST_TEMPLATE_DEFAULT = (
+    "✅ Bot 已恢复上线\n"
+    "掉线时间: {offline_time}\n"
+    "恢复时间: {recover_time}\n"
+    "离线时长: {duration}"
+)
+
+
+def _fmt_ts(ts: float, config: Any = None) -> str:
+    """Format a Unix timestamp in the display timezone."""
+
+    try:
+        return datetime.fromtimestamp(
+            float(ts), now_in_timezone(config).tzinfo
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "--"
+
+
 class AlertEngine:
     """Threshold, offline, daily-summary and Komari webhook alerts.
 
@@ -51,11 +72,13 @@ class AlertEngine:
         state: StateStore,
         config: Any,
         report_store: Any = None,
+        aggregator: AlertAggregator | None = None,
     ):
         self.plugin = plugin
         self.state = state
         self.config = config
         self.report_store = report_store
+        self._aggregator = aggregator
         self.interval = clamp_config(
             cfg_int(config, "alerts.interval_seconds", 60),
             15,
@@ -297,11 +320,20 @@ class AlertEngine:
     # targets / sending
     # ------------------------------------------------------------------
 
-    async def _send(self, text: str, source: str = "alert") -> DeliveryResult:
-        if not self.targets:
+    def _targets_for(self, kind: str) -> list[str]:
+        """Push targets for one kind; None from the center means legacy."""
+
+        picked = resolve_targets(self.config, kind)
+        return self.targets if picked is None else picked
+
+    async def _send(
+        self, text: str, source: str = "alert", kind: str = "resource"
+    ) -> DeliveryResult:
+        targets = self._targets_for(kind)
+        if not targets:
             logger.warning("告警目标为空，跳过发送")
             return DeliveryResult(ok=False)
-        value = await self.plugin.send_text(self.targets, text, source=source)
+        value = await self.plugin.send_text(targets, text, source=source)
         result = (
             value
             if isinstance(value, DeliveryResult)
@@ -316,6 +348,18 @@ class AlertEngine:
             else:
                 logger.warning("告警发送失败：%s", headline)
         return result
+
+    async def _push_alert(self, name: str, reason: str, text: str) -> Any | None:
+        """Send the first alert of an episode, or buffer it in the window."""
+
+        if self._aggregator is None:
+            return await self._send(text)
+        return await self._aggregator.push(
+            label=name,
+            reason=reason,
+            text=text,
+            send=lambda text: self._send(text, kind="resource"),
+        )
 
     @staticmethod
     def _delivered(result: Any) -> bool:
@@ -504,11 +548,26 @@ class AlertEngine:
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.sustain} 个采样周期超过阈值。"
                     )
-                    result = await self._send(text)
-                    delivered = self._delivered(result)
+                    result = await self._push_alert(
+                        name, f"{value_text}（阈值 {threshold:.1f}{unit}）", text
+                    )
+                    buffered = result is None
+                    delivered = (not buffered) and self._delivered(result)
                     st["last_attempt"] = now
-                    st["last_error"] = "" if delivered else "send_failed"
-                    if delivered:
+                    st["last_error"] = "" if delivered or buffered else "send_failed"
+                    if buffered:
+                        # Covered by the aggregator summary; the rule is in
+                        # alerting and the event log stays complete.
+                        st["alerting"] = True
+                        st["alert_since"] = now
+                        st["count"] = 0
+                        self._record_event(
+                            "resource",
+                            name,
+                            f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                            "alert",
+                        )
+                    elif delivered:
                         st["alerting"] = True
                         st["alert_since"] = now
                         st["count"] = 0
@@ -603,6 +662,85 @@ class AlertEngine:
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
 
+    async def _broadcast_recovery(self, offline_ts: float, duration_text: str) -> None:
+        """Announce the recovery to every group the bot has joined.
+
+        The bot cannot post while it is offline, so this is necessarily a
+        recovery-time action. Off by default: most bots sit in groups whose
+        members never asked for status updates, and posting to dozens of
+        groups in a loop is exactly the behaviour QQ risk control punishes.
+        """
+
+        cfg = cfg_get(self.config, "alerts.offline_broadcast", {}) or {}
+        if not isinstance(cfg, dict) or not cfg_bool(cfg, "enabled", False):
+            return
+        self_id = str(cfg_get(self.config, "alerts.self_id", "") or "").strip()
+        client = _get_aiocqhttp_client(
+            self.plugin.context, self.platform_id, self_id or None
+        )
+        if client is None:
+            logger.warning("掉线广播：未找到 OneBot 客户端，跳过")
+            return
+        try:
+            raw = await _call_action(client, "get_group_list", timeout=15)
+        except Exception as exc:
+            logger.warning("掉线广播：获取群列表失败（%s）", exc)
+            return
+        groups = _normalize_object(raw) or []
+        if isinstance(groups, dict):
+            groups = groups.get("data") or groups.get("groups") or []
+        exclude = {
+            str(item).strip()
+            for item in (cfg.get("exclude_groups") or [])
+            if str(item).strip()
+        }
+        interval = max(1, min(30, cfg_int(cfg, "interval_seconds", 3)))
+        max_groups = max(0, cfg_int(cfg, "max_groups", 100))
+        template = str(cfg.get("template") or BROADCAST_TEMPLATE_DEFAULT)
+        offline_text = _fmt_ts(offline_ts, self.config)
+        recover_text = _now_text(self.config)
+        sent = failed = considered = 0
+        for group in groups:
+            group_id = (
+                str(group.get("group_id") or "") if isinstance(group, dict) else ""
+            )
+            if not group_id or group_id in exclude:
+                continue
+            considered += 1
+            if max_groups and considered > max_groups:
+                logger.warning("掉线广播：群数超过上限 %d，剩余群未发送", max_groups)
+                break
+            try:
+                text = template.format(
+                    offline_time=offline_text,
+                    recover_time=recover_text,
+                    duration=duration_text,
+                )
+            except (KeyError, IndexError, ValueError):
+                text = template
+            if sent or failed:
+                await asyncio.sleep(interval)
+            target = f"{self.platform_id}:GroupMessage:{group_id}"
+            try:
+                result = await self.plugin.send_text(
+                    [target], text, source="offline_broadcast"
+                )
+            except Exception:
+                failed += 1
+                logger.debug("掉线广播群 %s 发送异常", group_id, exc_info=True)
+                continue
+            if self._delivered(result):
+                sent += 1
+            else:
+                failed += 1
+        logger.info(
+            "掉线恢复广播完成：成功 %d / 失败 %d（扫描 %d 个群，排除 %d 个）",
+            sent,
+            failed,
+            len(groups),
+            max(0, len(groups) - considered),
+        )
+
     async def _check_offline(self) -> None:
         # Without a self_id filter a multi-bot instance could probe another
         # bot's connection and report the wrong one as offline.
@@ -651,7 +789,7 @@ class AlertEngine:
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
-                    result = await self._send(str(pending_text))
+                    result = await self._send(str(pending_text), kind="offline")
                     if self._delivered(result):
                         st.pop("pending_recovery", None)
                         st.pop("recovery_attempt", None)
@@ -676,8 +814,9 @@ class AlertEngine:
                     text = (
                         "✅ Bot 连接已恢复\n"
                         "──────────────\n"
-                        f"离线时长: {format_duration(duration)}\n"
-                        f"时间: {_now_text(self.config)}"
+                        f"掉线时间: {_fmt_ts(now - duration, self.config)}\n"
+                        f"恢复时间: {_now_text(self.config)}\n"
+                        f"离线时长: {format_duration(duration)}"
                     )
                     if st.get("pending_alert") and not queued:
                         text += "\n（离线期间有一条告警未能送达，现已恢复）"
@@ -690,9 +829,13 @@ class AlertEngine:
                     f"离线时长 {format_duration(duration)}",
                     "recovery",
                 )
+                if not stale:
+                    await self._broadcast_recovery(
+                        now - duration, format_duration(duration)
+                    )
                 if parts:
                     text = "\n\n".join(parts)
-                    result = await self._send(text)
+                    result = await self._send(text, kind="offline")
                     if self._delivered(result):
                         logger.info(
                             "Bot 连接恢复通知已发送%s",
@@ -737,7 +880,7 @@ class AlertEngine:
                 f"时间: {_now_text(self.config)}\n"
                 "离线告警会先排队，连接恢复后补发。"
             )
-            result = await self._send(text)
+            result = await self._send(text, kind="offline")
             delivered = self._delivered(result)
             st["pending_alert"] = not delivered
             if delivered:
@@ -884,7 +1027,9 @@ class AlertEngine:
                 image_url = None
             if image_url:
                 result = await self.plugin.send_image(
-                    self.targets, image_url, source="daily_summary"
+                    self._targets_for("daily_image"),
+                    image_url,
+                    source="daily_summary",
                 )
                 if self._delivered(result):
                     self._mark_daily_sent(today)
@@ -894,6 +1039,7 @@ class AlertEngine:
         result = await self._send(
             "📅 每日定时状态图\n──────────────\n" + summary,
             source="daily_summary",
+            kind="daily_image",
         )
         if self._delivered(result):
             self._mark_daily_sent(today)
@@ -978,7 +1124,7 @@ class AlertEngine:
             except Exception:
                 data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
             text = self._format_komari(data)
-            result = await self._send(text, source="webhook")
+            result = await self._send(text, source="webhook", kind="service")
             if not self._delivered(result):
                 return web.json_response(
                     {"status": "error", "message": "delivery failed"},

@@ -439,6 +439,24 @@
       '" height="' +
       plotH +
       '" rx="8" />';
+    (options.gaps || []).forEach((gap) => {
+      if (!useTimeAxis) return;
+      const gapStart = Math.max(Number(gap.start), windowStart);
+      const gapEnd = Math.min(Number(gap.end), windowEnd);
+      if (!(gapEnd > gapStart)) return;
+      const gapX = left + plotW * ((gapStart - windowStart) / span);
+      const gapW = plotW * ((gapEnd - gapStart) / span);
+      svg +=
+        '<rect class="chart-gap" x="' +
+        gapX.toFixed(1) +
+        '" y="' +
+        top +
+        '" width="' +
+        Math.max(2, gapW).toFixed(1) +
+        '" height="' +
+        plotH +
+        '" rx="4" />';
+    });
     for (let index = 0; index <= 4; index += 1) {
       const lineY = top + plotH * (1 - index / 4);
       svg +=
@@ -1052,9 +1070,22 @@
       timestamps: points.map((point) => point.ts),
       windowStart: data.window_start,
       windowEnd: data.window_end,
+      gaps: data.gaps || [],
       labelForTime: (ts) => labelForTs(ts, range),
       titleFor: (index) => formatDateTime(points[index] && points[index].ts),
     });
+    const gapNote = $("history-gap-note");
+    if (gapNote) {
+      const gaps = data.gaps || [];
+      gapNote.hidden = gaps.length === 0;
+      gapNote.textContent = gaps.length
+        ? t(
+            "history_gaps",
+            "检测到 {count} 段停机盲区（灰色区域）：期间插件或 Bot 停机，无采样数据。",
+            { count: gaps.length },
+          )
+        : "";
+    }
 
     const network = data.network || [];
     if (data.network_redacted) {
@@ -1193,7 +1224,19 @@
                 "</strong></div>",
             )
             .join("") +
-          "</div></div>",
+          "</div>" +
+          (resources.gaps && resources.gaps.length
+            ? '<p class="muted">' +
+              esc(
+                t(
+                  "report_gaps",
+                  "停机盲区 {count} 段：期间插件或 Bot 停机，无采样数据。",
+                  { count: resources.gaps.length },
+                ),
+              ) +
+              "</p>"
+            : "") +
+          "</div>",
       );
     }
     const qq = data.qq || {};
@@ -1505,6 +1548,126 @@
     }
   }
 
+  const VERIFY_LABEL = {
+    ok: ["verify_state_ok", "成功"],
+    uncertain: ["verify_state_uncertain", "未确认（可能未送达）"],
+    failed: ["verify_state_failed", "失败"],
+  };
+
+  function verifyRow(text, bad) {
+    return '<li class="' + (bad ? "verify-bad" : "") + '">' + esc(text) + "</li>";
+  }
+
+  function renderVerifyResult(kind, data) {
+    const box = $("verify-result");
+    if (!box) return;
+    if (!data || data.ok === false) {
+      box.innerHTML =
+        '<div class="error-state"><p>' +
+        esc((data && data.error) || t("verify_failed", "验证失败")) +
+        "</p></div>";
+      return;
+    }
+    if (kind === "webhook") {
+      if (!data.listening) {
+        box.innerHTML =
+          '<ul class="verify-list">' +
+          verifyRow(
+            data.message ||
+              t("verify_webhook_not_listening", "Webhook 未在监听"),
+            true,
+          ) +
+          "</ul>";
+        return;
+      }
+      const good = Number(data.http_status) === 200;
+      const text = good
+        ? t(
+            "verify_webhook_ok",
+            "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
+          )
+        : (data.message || "") +
+          " " +
+          t("verify_webhook_bad", "HTTP {status}：请检查 Token 与目标配置。", {
+            status: data.http_status,
+          });
+      box.innerHTML = '<ul class="verify-list">' + verifyRow(text, !good) + "</ul>";
+      return;
+    }
+    const results = data.results || [];
+    if (!results.length) {
+      box.innerHTML =
+        '<ul class="verify-list">' +
+        verifyRow(data.note || t("verify_none", "没有可验证的项"), false) +
+        "</ul>";
+      return;
+    }
+    const rows = results
+      .map((item) => {
+        if (kind === "targets") {
+          const entry = VERIFY_LABEL[item.state] || VERIFY_LABEL.failed;
+          const extra = item.error ? "（" + item.error + "）" : "";
+          const retcode =
+            item.retcode !== null && item.retcode !== undefined
+              ? " · retcode " + item.retcode
+              : "";
+          return verifyRow(
+            item.target + "：" + t(entry[0], entry[1]) + retcode + extra,
+            item.state !== "ok",
+          );
+        }
+        return verifyRow(
+          (item.name || "--") +
+            "：" +
+            (item.ok ? "✅" : "❌") +
+            " " +
+            (item.detail || "") +
+            "（" +
+            item.elapsed_ms +
+            "ms）",
+          !item.ok,
+        );
+      })
+      .join("");
+    box.innerHTML = '<ul class="verify-list">' + rows + "</ul>";
+  }
+
+  async function runVerify(kind, button) {
+    if (!button || button.disabled) return;
+    if (
+      kind === "targets" &&
+      !window.confirm(
+        t(
+          "verify_confirm_targets",
+          "将向所有配置的推送目标真实发送一条验证消息，继续？",
+        ),
+      )
+    ) {
+      return;
+    }
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = t("verifying", "验证中…");
+    const box = $("verify-result");
+    if (box) {
+      box.innerHTML = '<p class="muted">' + esc(t("verifying", "验证中…")) + "</p>";
+    }
+    try {
+      const data = await apiGet("verify", { kind });
+      renderVerifyResult(kind, data);
+    } catch (error) {
+      if (box) {
+        box.innerHTML =
+          '<div class="error-state"><p>' +
+          esc(error.message || t("error_load", "加载失败")) +
+          "</p></div>";
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
   async function refreshCurrent() {
     const button = $("refresh");
     if (button && button.classList.contains("refreshing")) return;
@@ -1571,6 +1734,16 @@
       });
     });
     $("refresh").addEventListener("click", refreshCurrent);
+    [
+      ["verify-targets", "targets"],
+      ["verify-monitors", "monitors"],
+      ["verify-webhook", "webhook"],
+    ].forEach(([id, kind]) => {
+      const button = $(id);
+      if (button) {
+        button.addEventListener("click", () => runVerify(kind, button));
+      }
+    });
     $("export-csv").addEventListener("click", () => {
       exportCsv().catch((error) =>
         toast(error.message || t("error_load", "加载失败")),

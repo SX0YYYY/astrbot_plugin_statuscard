@@ -13,6 +13,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.message_event_result import MessageChain
 
+from .aggregator import AlertAggregator
 from .alerts import AlertEngine
 from .audit import AuditIssue, run_audit
 from .bg_provider import MAX_IMAGE_BYTES, resolve_background
@@ -27,6 +28,7 @@ from .collectors import (
     collect_all,
     effective_media_source,
     fetch_avatar_bytes,
+    notify_rules_active,
     uploaded_file_path,
 )
 from .delivery import DeliveryResult, DeliveryService
@@ -72,17 +74,23 @@ class StatusCardPlugin(Star):
         )
         self.report = ReportCollector(self, self.state, self.config, self.report_store)
         self.daily_report = DailyReporter(self, self.report_store, self.config)
+        self._alert_aggregator = AlertAggregator(
+            cfg_int(self.config, "alerts.aggregate_seconds", 120),
+            cfg_int(self.config, "alerts.aggregate_max_items", 8),
+        )
         self.alerts = AlertEngine(
             self,
             self.state,
             self.config,
             report_store=self.report_store,
+            aggregator=self._alert_aggregator,
         )
         self.monitor = ServiceMonitor(
             self,
             self.state,
             self.config,
             report_store=self.report_store,
+            aggregator=self._alert_aggregator,
         )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
@@ -780,6 +788,15 @@ class StatusCardPlugin(Star):
                 f"开启（{daily_time}）"
                 if cfg_bool(self.config, "alerts.daily_summary.enabled", False)
                 else "关闭"
+            )
+        )
+        active_rules = notify_rules_active(self.config)
+        lines.append(
+            "通知中心: "
+            + (
+                f"启用（{active_rules} 条有效规则，三处旧推送目标不再生效）"
+                if active_rules
+                else "未启用（沿用三处推送目标）"
             )
         )
         monitor_status = self.monitor.status()
