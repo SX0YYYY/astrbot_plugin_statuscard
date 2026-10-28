@@ -467,15 +467,27 @@ class ReportStore:
         Used by the daily report so an interruption that began days ago (and
         is therefore outside the report window) is still visible instead of
         looking like "no anomalies".
+
+        Alerts written before ``resolved_ts`` back-filling existed (v2.12.0)
+        never carry that field even though a matching recovery event follows.
+        Those are excluded here: an alert that has a later recovery for the
+        same rule is already resolved, and keeping it would show a stale
+        "unresolved" line until the lookback window slides past it.
         """
 
         rows = self._query(
             """
-            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
-            FROM events
-            WHERE status = 'alert' AND resolved_ts IS NULL
-              AND ts >= ? AND ts < ?
-            ORDER BY ts ASC LIMIT ?
+            SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
+                   e.status, e.resolved_ts
+            FROM events AS e
+            WHERE e.status = 'alert' AND e.resolved_ts IS NULL
+              AND e.ts >= ? AND e.ts < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM events AS r
+                  WHERE r.status = 'recovery' AND r.ts > e.ts
+                    AND r.kind = e.kind AND r.name = e.name
+              )
+            ORDER BY e.ts ASC LIMIT ?
             """,
             (int(since_ts), int(before_ts), max(1, min(500, limit))),
         )

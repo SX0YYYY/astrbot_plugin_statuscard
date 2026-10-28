@@ -673,7 +673,9 @@ class DailyReportBuilder:
             name = str(alert.get("name") or "")
             if not name:
                 continue
-            if status == "alert":
+            if status in {"alert", "failed"}:
+                # A "failed" row means the fault happened but its push did
+                # not arrive; it still starts an interruption for pairing.
                 open_alerts[name] = int(alert.get("ts") or 0)
             elif status == "recovery":
                 # A recovery before the window closes the alert for pairing
@@ -686,7 +688,7 @@ class DailyReportBuilder:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
             resolved_ts = event.get("resolved_ts")
-            if status == "alert":
+            if status in {"alert", "failed"}:
                 open_alerts[name] = int(event.get("ts") or 0)
             if str(event.get("day") or "") not in window_days:
                 continue
