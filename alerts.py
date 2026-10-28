@@ -161,6 +161,7 @@ class AlertEngine:
         self._running = False
         self._webhook_runner: Any = None
         self._webhook_site: Any = None
+        self._broadcast_task: asyncio.Task | None = None
         self._primed = False
         self._disk_warned: set[str] = set()
         self._daily_last_sent_day: str | None = None
@@ -334,6 +335,7 @@ class AlertEngine:
             self._monitor_task,
             self._daily_task,
             self._webhook_task,
+            self._broadcast_task,
         )
         for task in tasks:
             if task and not task.done():
@@ -345,6 +347,7 @@ class AlertEngine:
         self._monitor_task = None
         self._daily_task = None
         self._webhook_task = None
+        self._broadcast_task = None
         await self.stop_webhook()
 
     # ------------------------------------------------------------------
@@ -899,9 +902,15 @@ class AlertEngine:
                     "recovery",
                 )
                 if not stale:
-                    await self._broadcast_recovery(
-                        now - duration, format_duration(duration)
+                    # A hundred-group broadcast with a 3s gap can take five
+                    # minutes; running it inline stalled every later sample
+                    # and delayed the operator's own recovery notice.
+                    self._broadcast_task = asyncio.create_task(
+                        self._broadcast_recovery(
+                            now - duration, format_duration(duration)
+                        )
                     )
+                    self._broadcast_task.add_done_callback(self._on_task_done)
                 if self.offline_notify and parts:
                     text = "\n\n".join(parts)
                     result = await self._send(text, kind="offline")

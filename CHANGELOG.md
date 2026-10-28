@@ -10,6 +10,7 @@
 - 告警聚合器按通知类型（resource / service）分桶；修复慢发送期间新窗口没有任务 flush、缓冲告警永久滞留的问题；新增 `stop()`，插件重载时取消汇总任务。
 - `alerts.aggregate_seconds` / `aggregate_max_items` / `alerts.cooldown_seconds` 统一走 `clamp_config`，手改超范围会打 warning。
 - `alerts.offline_notify` 只控制通知：掉线/恢复事件、`resolved_ts`、日报中断时长与全群广播不再受该开关影响；广播由 `offline_broadcast.enabled` 独立控制。
+- 掉线恢复全群广播改为后台任务并移到恢复通知之后：逐群发送不再阻塞 30 秒采样循环，运营者的恢复通知也不会被上百个群的广播拖延。
 - 配置体检按通知类型解析目标：通知中心已覆盖 resource/service/daily_image 时不再误报「推送目标为空」；新增磁盘挂载点不存在提示；通知中心提示改为「仅接管规则覆盖的类型」。
 - `StateStore.save()` 对 deepcopy 期间的并发修改做 3 次快照重试并串行化保存；monitor/alerts 的非 await 状态修改改用 `section()`，启动时校验嵌套类型。
 - 采样器初始化、网络计数器、磁盘挂载点读取失败不再让后台任务静默退出；Packages/GPU 探测失败改为 5 分钟后重试（成功才缓存 24 小时）；lspci GPU 名称不再切在 PCI 地址冒号上。
