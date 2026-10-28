@@ -30,9 +30,9 @@ from .collectors import (
     format_duration,
     get_timezone,
     memory_stat,
-    notify_rules_active,
     now_in_timezone,
     process_info,
+    resolve_targets,
     swap_stat,
 )
 from .provider_quality import today_overview
@@ -78,6 +78,28 @@ def _query_value(name: str, default: Any = None) -> Any:
         return default
 
 
+async def _request_value(name: str, default: Any = None) -> Any:
+    """Read a value from the query string or a JSON request body.
+
+    ``verify`` is a POST route because it really sends messages; the bridge
+    sends its parameters as JSON, while the older GET handlers used query
+    parameters. Accept both so a cached page keeps working.
+    """
+
+    value = _query_value(name, None)
+    if value is not None:
+        return value
+    if _request is None:
+        return default
+    try:
+        body = await _request.json()
+    except Exception:
+        return default
+    if isinstance(body, dict) and name in body:
+        return body[name]
+    return default
+
+
 RANGE_SECONDS = {
     "24h": 86400,
     "7d": 7 * 86400,
@@ -116,7 +138,7 @@ class PageApi:
             ("events", self.events, ["GET"], "异常事件"),
             ("reports", self.reports, ["GET"], "日报摘要"),
             ("export", self.export, ["GET"], "导出历史数据"),
-            ("verify", self.verify, ["GET"], "立即验证"),
+            ("verify", self.verify, ["POST"], "立即验证"),
         )
         for name, handler, methods, desc in routes:
             register(f"/{PLUGIN_NAME}/{name}", handler, methods, desc)
@@ -218,7 +240,7 @@ class PageApi:
                 {
                     "rank": index,
                     "name": "已隐藏" if redact else str(row.get("name") or ""),
-                    "pid": int(row.get("pid") or 0),
+                    "pid": None if redact else int(row.get("pid") or 0),
                     "cpu": round(float(row.get("cpu_raw") or 0.0), 1),
                     "mem_mb": round(float(row.get("mem_mb") or 0.0), 1),
                 }
@@ -374,7 +396,6 @@ class PageApi:
                 },
                 "provider_quality": provider_quality,
                 "audit": [issue.as_dict() for issue in plugin.audit_issues()],
-                "store": plugin.report_store.stats(),
             }
         )
 
@@ -389,38 +410,47 @@ class PageApi:
         exercised end to end.
         """
 
-        kind = str(_query_value("kind", "targets")).lower()
+        kind = str(await _request_value("kind", "targets")).lower()
         plugin = self.plugin
         if kind == "targets":
             platform_id = str(
                 cfg_get(plugin.config, "alerts.platform_id", "default") or "default"
             )
             merged: list[str] = []
-            if notify_rules_active(plugin.config):
-                # The notification center has taken over: verify the targets
-                # that real notifications would use, not the legacy lists.
-                rules = cfg_get(plugin.config, "notify.rules", []) or []
-                for rule in rules:
-                    if not isinstance(rule, dict):
-                        continue
-                    item = str(cfg_get(rule, "target", "") or "").strip()
-                    if not item:
-                        continue
-                    for one in normalize_targets([item], platform_id):
-                        if one not in merged:
-                            merged.append(one)
-            for key in (
-                "alerts.targets",
-                "monitors.targets",
-                "daily_report.targets",
+            center_active = False
+            # Verify exactly what real notifications would use: resolve each
+            # kind through the notification center (which already filters
+            # disabled rules and empty targets), and only fall back to the
+            # legacy lists for kinds no rule covers.
+            for notify_kind in (
+                "resource",
+                "service",
+                "offline",
+                "provider",
+                "daily",
+                "weekly",
+                "daily_image",
             ):
-                raw = cfg_get(plugin.config, key, [])
-                if isinstance(raw, str):
-                    raw = [raw]
-                for item in raw or []:
-                    for one in normalize_targets([item], platform_id):
-                        if one not in merged:
-                            merged.append(one)
+                picked = resolve_targets(plugin.config, notify_kind)
+                if picked is None:
+                    continue
+                center_active = True
+                for one in picked:
+                    if one not in merged:
+                        merged.append(one)
+            if not center_active:
+                for key in (
+                    "alerts.targets",
+                    "monitors.targets",
+                    "daily_report.targets",
+                ):
+                    raw = cfg_get(plugin.config, key, [])
+                    if isinstance(raw, str):
+                        raw = [raw]
+                    for item in raw or []:
+                        for one in normalize_targets([item], platform_id):
+                            if one not in merged:
+                                merged.append(one)
             if not merged:
                 return jsonify({"ok": False, "error": "未配置任何推送目标"})
             text = (
@@ -555,7 +585,9 @@ class PageApi:
         limit = 20000
         truncated = False
         if kind == "resources":
-            fetched = store.list_resources(start, limit=limit + 1)
+            fetched = await asyncio.to_thread(
+                store.list_resources, start, limit=limit + 1
+            )
             truncated = len(fetched) > limit
             rows = [row for row in fetched[:limit] if int(row.get("ts") or 0) <= end]
             if "network" in self._redact():
@@ -573,11 +605,11 @@ class PageApi:
             # cpu and mem are two independent tables; truncating after the
             # merge used to drop the whole mem half once cpu filled the cap.
             half = limit // 2
-            cpu_rows = store.list_process_samples(
-                start, end + 60, "cpu", limit=half + 1
+            cpu_rows = await asyncio.to_thread(
+                store.list_process_samples, start, end + 60, "cpu", limit=half + 1
             )
-            mem_rows = store.list_process_samples(
-                start, end + 60, "mem", limit=half + 1
+            mem_rows = await asyncio.to_thread(
+                store.list_process_samples, start, end + 60, "mem", limit=half + 1
             )
             truncated = len(cpu_rows) > half or len(mem_rows) > half
             rows = [dict(row) for row in cpu_rows[:half]]
@@ -594,12 +626,16 @@ class PageApi:
             if "process" in self._redact():
                 rows = [dict(row, name="已隐藏", pid=None) for row in rows]
         elif kind == "websites":
-            fetched = store.list_website_samples(start, end + 60, limit=limit + 1)
+            fetched = await asyncio.to_thread(
+                store.list_website_samples, start, end + 60, limit=limit + 1
+            )
             truncated = len(fetched) > limit
             rows = fetched[-limit:]
         elif kind == "events":
             # One range query instead of one connection per day.
-            fetched = store.list_events_range(start, end, limit=limit + 1)
+            fetched = await asyncio.to_thread(
+                store.list_events_range, start, end, limit=limit + 1
+            )
             truncated = len(fetched) > limit
             rows = fetched[:limit]
         else:
@@ -831,7 +867,6 @@ class PageApi:
             "website": view.get("website"),
             "process": view.get("process"),
             "runs": plugin.report_store.list_report_runs(limit=30),
-            "snapshots": self._snapshots_for_page(plugin),
         }
         self._reports_cache = (now_ts, payload)
         return jsonify(payload)

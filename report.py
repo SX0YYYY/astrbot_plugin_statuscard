@@ -458,6 +458,7 @@ class DailyReporter:
         self._weekly_retry_count = 0
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
+        self._last_attempt_day: str | None = None
         self._weekly_last_sent_week: str | None = None
         # Render retries: a short T2I outage should not turn the report into
         # text. The attempts and the next retry time survive reloads too.
@@ -501,6 +502,7 @@ class DailyReporter:
                 return default
 
         self._last_sent_day = saved.get("last_sent_day") or None
+        self._last_attempt_day = saved.get("last_attempt_day") or None
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = saved.get("pending_retry_day") or None
@@ -557,6 +559,7 @@ class DailyReporter:
                 "report_delivery",
                 {
                     "last_sent_day": self._last_sent_day,
+                    "last_attempt_day": self._last_attempt_day,
                     "pending_retry": pending,
                     "pending_retry_count": self._pending_retry_count,
                     "pending_retry_day": self._pending_retry_day,
@@ -862,7 +865,14 @@ class DailyReporter:
                 now = now_in_timezone(self.config)
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
-                    target += timedelta(days=1)
+                    if self._daily_catch_up_allowed(self._today()):
+                        logger.info(
+                            "日报定时点已过且今天尚未尝试，立即补发一次（%s）",
+                            self._today(),
+                        )
+                        target = now
+                    else:
+                        target += timedelta(days=1)
                 if last_logged != target:
                     self._next_run_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
@@ -1046,8 +1056,9 @@ class DailyReporter:
         return True
 
     async def _send_weekly_scheduled(self, day: str | None = None) -> None:
-        if self._sections() is not None and not self._sections():
-            logger.warning("周报内容为空（daily_report.sections=[]），跳过发送")
+        weekly_sections = self._weekly_sections()
+        if weekly_sections is not None and not weekly_sections:
+            logger.warning("周报内容为空（daily_report.weekly_sections=[]），跳过发送")
             return
         if not self.store.available:
             logger.error("日报数据库不可用，跳过本次周报发送")
@@ -1270,7 +1281,22 @@ class DailyReporter:
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
 
+    def _daily_catch_up_allowed(self, today: str) -> bool:
+        """Whether a missed daily-report window may be sent on start-up.
+
+        A missing marker means this is a first install or an upgrade from a
+        version without the marker; sending then would duplicate a report the
+        previous process may already have delivered. Once a marker exists,
+        only ``last_attempt_day`` protects against a reload loop.
+        """
+
+        if not self._last_attempt_day:
+            return False
+        return not (self._last_sent_day == today or self._last_attempt_day == today)
+
     async def _send_scheduled(self, day: str | None = None) -> None:
+        self._last_attempt_day = self._today()
+        self._save_delivery_state()
         targets = self._targets()
         if self._sections() is not None and not self._sections():
             logger.warning("日报内容为空（daily_report.sections=[]），跳过发送")

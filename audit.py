@@ -10,6 +10,7 @@ shown on the dashboard, instead of being discovered by silence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .collectors import (
@@ -36,9 +37,18 @@ class AuditIssue:
         return {"level": self.level, "code": self.code, "message": self.message}
 
 
-def _effective_targets(config: Any, key: str, platform_id: str) -> list[str]:
-    """Resolve a target list that falls back to ``alerts.targets`` when empty."""
+def _effective_targets(config: Any, key: str, platform_id: str, kind: str) -> list[str]:
+    """Resolve targets for one kind, falling back to the legacy list.
 
+    The notification center takes over a kind only when an enabled rule
+    matches it; every other kind keeps its per-module list. Checking only the
+    legacy list produced false "no targets" errors for users who moved their
+    routing into the notification center.
+    """
+
+    picked = resolve_targets(config, kind)
+    if picked is not None:
+        return picked
     raw = cfg_get(config, key, [])
     if not raw:
         raw = cfg_get(config, "alerts.targets", [])
@@ -93,17 +103,30 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     alerts_targets = normalize_targets(
         cfg_get(config, "alerts.targets", []), platform_id
     )
-    monitor_targets = _effective_targets(config, "monitors.targets", platform_id)
-    report_targets = _effective_targets(config, "daily_report.targets", platform_id)
+    resource_targets = resolve_targets(config, "resource")
+    if resource_targets is None:
+        resource_targets = alerts_targets
+    monitor_targets = _effective_targets(
+        config, "monitors.targets", platform_id, "service"
+    )
+    daily_targets = _effective_targets(
+        config, "daily_report.targets", platform_id, "daily"
+    )
+    weekly_targets = _effective_targets(
+        config, "daily_report.targets", platform_id, "weekly"
+    )
+    daily_image_targets = _effective_targets(
+        config, "alerts.targets", platform_id, "daily_image"
+    )
 
     if monitors_on and not monitor_targets:
         issues.append(
             AuditIssue(
                 "error",
                 "monitors_no_targets",
-                "服务监测已启用，但推送目标为空（monitors.targets 与 alerts.targets "
-                "均未填写），监测项不会探测也不会告警。请在「服务可用性监测 → 监测推送目标」"
-                "或「告警与每日定时状态图 → 推送目标」填写群号。",
+                "服务监测已启用，但推送目标为空（通知中心无 service 规则，"
+                "monitors.targets 与 alerts.targets 也均未填写），监测项不会探测也不会告警。"
+                "请在「服务可用性监测 → 监测推送目标」或「告警与每日定时状态图 → 推送目标」填写群号。",
             )
         )
     if monitors_on:
@@ -118,39 +141,44 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             ]
         ):
             issues.append(AuditIssue("warning", "monitor_item_config", problem))
-    if alerts_on and not alerts_targets:
+    if alerts_on and not resource_targets:
         issues.append(
             AuditIssue(
                 "error",
                 "alerts_no_targets",
-                "资源与掉线告警已启用，但推送目标为空，告警不会送达任何会话。"
+                "资源与掉线告警已启用，但推送目标为空（通知中心无 resource 规则，"
+                "alerts.targets 也未填写），告警不会送达任何会话。"
                 "请在「告警与每日定时状态图 → 推送目标」填写群号。",
             )
         )
-    if daily_on and not report_targets:
+    if daily_on and not daily_targets:
         issues.append(
             AuditIssue(
                 "warning",
                 "daily_report_no_targets",
-                "每日日报已启用，但推送目标为空（daily_report.targets 与 alerts.targets "
-                "均未填写），日报不会发送。",
+                "每日日报已启用，但推送目标为空（通知中心无 daily 规则，"
+                "daily_report.targets 与 alerts.targets 也均未填写），日报不会发送。",
             )
         )
-    if weekly_on and not report_targets:
+    if weekly_on and not weekly_targets:
         issues.append(
             AuditIssue(
                 "warning",
                 "weekly_report_no_targets",
-                "每周周报已启用，但推送目标为空（与每日日报共用），周报不会发送。",
+                "每周周报已启用，但推送目标为空（通知中心无 weekly 规则，"
+                "daily_report.targets 与 alerts.targets 也均未填写），周报不会发送。",
             )
         )
-    if cfg_bool(config, "alerts.daily_summary.enabled", False) and not alerts_targets:
+    if (
+        cfg_bool(config, "alerts.daily_summary.enabled", False)
+        and not daily_image_targets
+    ):
         issues.append(
             AuditIssue(
                 "warning",
                 "daily_summary_no_targets",
-                "每日定时状态图已启用，但推送目标为空（与资源告警共用 alerts.targets），"
-                "到点后会静默跳过且当天不重试。",
+                "每日定时状态图已启用，但推送目标为空（通知中心无 daily_image 规则，"
+                "alerts.targets 也未填写），到点后会静默跳过且当天不重试。",
             )
         )
     if cfg_bool(config, "alerts.provider_watch.enabled", False):
@@ -190,14 +218,33 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
             except (TypeError, ValueError):
                 continue
+        disk_paths = cfg_get(config, "display.disk_paths", [])
+        if isinstance(disk_paths, list):
+            for raw_path in disk_paths:
+                path_text = str(raw_path or "").strip()
+                if not path_text:
+                    continue
+                try:
+                    exists = Path(path_text).exists()
+                except OSError:
+                    continue
+                if not exists:
+                    issues.append(
+                        AuditIssue(
+                            "warning",
+                            "disk_path_missing",
+                            f"磁盘挂载点「{path_text}」不存在：磁盘使用率告警会静默跳过，"
+                            "请检查「状态卡显示 → 磁盘挂载点」。",
+                        )
+                    )
     active_rules = notify_rules_active(config)
     if active_rules:
         issues.append(
             AuditIssue(
                 "warning",
                 "notify_center_active",
-                f"通知中心已启用（{active_rules} 条有效规则）：alerts / monitors / "
-                "daily_report 三处的「推送目标」不再生效，所有通知按通知规则分发。",
+                f"通知中心已启用（{active_rules} 条有效规则）：仅接管规则覆盖的通知类型，"
+                "未被规则覆盖的类型继续使用 alerts / monitors / daily_report 的旧目标。",
             )
         )
     else:

@@ -75,8 +75,18 @@ class StatusCardPlugin(Star):
         self.report = ReportCollector(self, self.state, self.config, self.report_store)
         self.daily_report = DailyReporter(self, self.report_store, self.config)
         self._alert_aggregator = AlertAggregator(
-            cfg_int(self.config, "alerts.aggregate_seconds", 120),
-            cfg_int(self.config, "alerts.aggregate_max_items", 8),
+            clamp_config(
+                cfg_int(self.config, "alerts.aggregate_seconds", 120),
+                0,
+                600,
+                "alerts.aggregate_seconds",
+            ),
+            clamp_config(
+                cfg_int(self.config, "alerts.aggregate_max_items", 8),
+                2,
+                20,
+                "alerts.aggregate_max_items",
+            ),
         )
         self.alerts = AlertEngine(
             self,
@@ -253,6 +263,7 @@ class StatusCardPlugin(Star):
         await self.report.stop()
         await self.monitor.stop()
         await self.alerts.stop()
+        await self._alert_aggregator.stop()
         await self.sampler.stop()
         logger.info("StatusCard plugin terminated")
 

@@ -32,6 +32,7 @@ class StateStore:
         self.path = path
         self.data: dict[str, Any] = {}
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()
         self.load()
 
     def load(self) -> None:
@@ -80,23 +81,41 @@ class StateStore:
         directly cannot make the serialisation fail. The temporary file name
         carries the process and thread id so two concurrent saves from the
         same process never fight over the same file.
+
+        Some callers still mutate nested sections across an ``await`` (the
+        alert and monitor state machines do this while a message is being
+        sent). Such a mutation can change a dict's size while ``deepcopy`` is
+        iterating it; a single failed snapshot used to drop the whole save.
+        Retrying the snapshot a few times makes that window harmless without
+        changing every call site.
         """
 
         try:
-            with self._lock:
-                self.data.setdefault("schema_version", SCHEMA_VERSION)
-                snapshot = copy.deepcopy(self.data)
-            payload = json.dumps(snapshot, ensure_ascii=False, indent=1)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(
-                f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-            )
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, self.path)
-            try:
-                os.chmod(self.path, 0o600)
-            except Exception:
-                pass
+            with self._save_lock:
+                with self._lock:
+                    self.data.setdefault("schema_version", SCHEMA_VERSION)
+                    snapshot = None
+                    for attempt in range(3):
+                        try:
+                            snapshot = copy.deepcopy(self.data)
+                            break
+                        except RuntimeError:
+                            if attempt == 2:
+                                raise
+                            time.sleep(0.002)
+                if snapshot is None:  # pragma: no cover - defensive
+                    raise RuntimeError("state snapshot unavailable")
+                payload = json.dumps(snapshot, ensure_ascii=False, indent=1)
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_name(
+                    f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                )
+                tmp.write_text(payload, encoding="utf-8")
+                os.replace(tmp, self.path)
+                try:
+                    os.chmod(self.path, 0o600)
+                except Exception:
+                    pass
         except Exception as exc:
             logger.warning("写入状态文件失败 %s: %s", self.path, exc)
 

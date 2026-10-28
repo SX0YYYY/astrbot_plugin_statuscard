@@ -100,8 +100,18 @@ class Sampler:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self.run_forever())
+            self._task.add_done_callback(self._on_task_done)
         if self._proc_task is None or self._proc_task.done():
             self._proc_task = asyncio.create_task(self._process_cpu_loop())
+            self._proc_task.add_done_callback(self._on_task_done)
+
+    @staticmethod
+    def _on_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("采样任务异常退出: %r", exc, exc_info=exc)
 
     async def stop(self) -> None:
         task = self._task
@@ -148,11 +158,15 @@ class Sampler:
         if self._primed:
             return
         now = time.time()
-        counters = psutil.net_io_counters()
+        try:
+            counters = psutil.net_io_counters()
+        except Exception:
+            logger.warning("读取网络计数器失败，网络速率暂按 0 处理", exc_info=True)
+            counters = None
         with self.state.section("net") as net:
             net.setdefault("last_ts", now)
-            net.setdefault("last_sent", int(counters.bytes_sent))
-            net.setdefault("last_recv", int(counters.bytes_recv))
+            net.setdefault("last_sent", int(counters.bytes_sent) if counters else 0)
+            net.setdefault("last_recv", int(counters.bytes_recv) if counters else 0)
             net.setdefault("month", now_in_timezone(self.config).strftime("%Y-%m"))
             net.setdefault("month_up", 0)
             net.setdefault("month_down", 0)
@@ -176,7 +190,12 @@ class Sampler:
         self._primed = True
 
     async def run_forever(self) -> None:
-        self._prime()
+        try:
+            self._prime()
+        except Exception:
+            # A restricted container can refuse net_io_counters(); sampled
+            # rates then stay at 0, but the loop must keep running.
+            logger.exception("采样初始化失败，将继续尝试后续采样")
         # Give the counters a short window so the first card has a real rate.
         await asyncio.sleep(1.0)
         while True:
@@ -200,7 +219,13 @@ class Sampler:
         self.state.save()
 
     def _sample_network(self, now: float) -> None:
-        counters = psutil.net_io_counters()
+        try:
+            counters = psutil.net_io_counters()
+        except Exception:
+            logger.debug("读取网络计数器失败，本轮跳过网络采样", exc_info=True)
+            return
+        if counters is None:
+            return
         with self.state.section("net") as net:
             last_ts = float(net.get("last_ts") or now)
             last_sent = int(net.get("last_sent") or 0)

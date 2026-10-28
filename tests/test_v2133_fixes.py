@@ -15,7 +15,7 @@ from astrbot_plugin_statuscard.report import DailyReporter
 from astrbot_plugin_statuscard.report_store import ReportStore
 from astrbot_plugin_statuscard.state import StateStore
 
-TARGET = "default:GroupMessage:461961169"
+TARGET = "default:GroupMessage:123456789"
 
 
 def _report_config() -> dict:

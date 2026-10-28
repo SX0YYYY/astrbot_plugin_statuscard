@@ -121,6 +121,11 @@ class Redactor:
                 network[key] = HIDDEN_NUMBER
             network["interface"] = HIDDEN
             network["chart"] = _empty_chart()
+            # The sysinfo table repeats the interface name; hiding only the
+            # network card left eth0/ens3 visible there.
+            for row in view.get("system_info", []):
+                if isinstance(row, dict) and row.get("label") == "Network":
+                    row["value"] = HIDDEN
         if self.qq_stats:
             bot = view.setdefault("bot", {})
             for key in ("friends", "groups", "members", "recv", "sent"):

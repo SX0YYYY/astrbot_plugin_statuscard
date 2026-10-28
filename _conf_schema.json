@@ -252,7 +252,7 @@
                 "description": "通知规则",
                 "type": "template_list",
                 "default": [],
-                "hint": "添加至少一条启用且勾选了类型的规则后，通知中心接管所有推送目标（alerts/monitors/daily_report 三处的「推送目标」不再生效）；清空全部规则即回退旧行为。",
+                "hint": "添加至少一条启用且勾选了类型的规则后，该规则覆盖的通知类型改用规则目标；未被任何规则覆盖的类型继续使用 alerts/monitors/daily_report 的旧「推送目标」。清空全部规则即完全回退旧行为。",
                 "templates": {
                     "rule": {
                         "name": "通知规则",

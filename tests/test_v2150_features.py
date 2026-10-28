@@ -19,7 +19,7 @@ from astrbot_plugin_statuscard.report_view import (
 )
 from astrbot_plugin_statuscard.state import StateStore
 
-TARGET = "default:GroupMessage:461961169"
+TARGET = "default:GroupMessage:123456789"
 
 
 def _report_config() -> dict:
@@ -247,7 +247,7 @@ def test_resource_alert_buffered_records_alert_event(tmp_path: Path) -> None:
     # 预热聚合窗口，使下一条进入缓冲
     warm = AlertAggregator(window_seconds=120, max_items=8)
     engine._aggregator = warm
-    asyncio.run(warm.push("预热", "x", "text", _async_send([])))
+    asyncio.run(warm.push("预热", "x", "text", _async_send([]), kind="resource"))
 
     asyncio.run(engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%"))
 
@@ -364,7 +364,7 @@ def test_report_targets_weekly_routing(tmp_path: Path) -> None:
     reporter = DailyReporter(_OkPlugin(), ReportStore(tmp_path / "r.db"), config)
     assert reporter._targets("weekly") == ["default:GroupMessage:333"]
     # 日报无规则匹配 → 回退旧三处 targets
-    assert reporter._targets("daily") == ["default:GroupMessage:461961169"]
+    assert reporter._targets("daily") == ["default:GroupMessage:123456789"]
 
 
 def test_audit_flags_notify_center() -> None:

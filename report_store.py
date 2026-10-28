@@ -480,12 +480,13 @@ class ReportStore:
             SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
                    e.status, e.resolved_ts
             FROM events AS e
-            WHERE e.status = 'alert' AND e.resolved_ts IS NULL
+            WHERE e.status IN ('alert', 'failed') AND e.resolved_ts IS NULL
               AND e.ts >= ? AND e.ts < ?
               AND NOT EXISTS (
                   SELECT 1 FROM events AS r
                   WHERE r.status = 'recovery' AND r.ts > e.ts
                     AND r.kind = e.kind AND r.name = e.name
+                    AND COALESCE(r.target, '') = COALESCE(e.target, '')
               )
             ORDER BY e.ts ASC LIMIT ?
             """,
@@ -792,10 +793,11 @@ class ReportStore:
         rows = self._query(
             """
             SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
-            FROM events WHERE day = ? ORDER BY ts ASC LIMIT ?
+            FROM events WHERE day = ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             (day, max(1, min(1000, limit))),
         )
+        rows = list(reversed(rows or []))
         keys = (
             "id",
             "ts",

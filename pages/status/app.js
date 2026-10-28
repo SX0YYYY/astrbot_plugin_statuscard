@@ -191,6 +191,23 @@
       "targets empty": ["method_targets_empty", "目标为空"],
       "send failed": ["method_send_failed", "发送失败"],
       "weekly send failed": ["method_weekly_send_failed", "周报发送失败"],
+      "db unavailable": ["method_db_unavailable", "数据库不可用"],
+      "image retry cross-day": [
+        "method_image_retry_cross_day",
+        "图片重试跨天放弃",
+      ],
+      "send failed (cross-day)": [
+        "method_send_failed_cross_day",
+        "发送失败（跨天放弃）",
+      ],
+      "weekly-image retry cross-week": [
+        "method_weekly_image_retry_cross_week",
+        "周报图片重试跨周放弃",
+      ],
+      "weekly send failed (cross-week)": [
+        "method_weekly_send_failed_cross_week",
+        "周报发送失败（跨周放弃）",
+      ],
     };
     const entry = map[key];
     return entry ? t(entry[0], entry[1]) : key || "--";
@@ -373,6 +390,12 @@
   }
 
   function renderChart(container, series, options) {
+    // The container node is stable across redraws; bind its listeners once
+    // per render and abort the previous set, otherwise every range change
+    // leaves another closure (and its series data) behind.
+    if (container._chartAbort) container._chartAbort.abort();
+    const controller = new AbortController();
+    container._chartAbort = controller;
     const labels = options.labels || [];
     const values = series
       .flatMap((item) => item.values)
@@ -572,7 +595,7 @@
     });
     svg += "</svg>";
     container.innerHTML = svg;
-    attachChartTip(container, {
+    attachChartTip(container, controller, {
       width,
       left,
       plotW,
@@ -594,7 +617,7 @@
   // Adds a hover/keyboard readout to a rendered chart. The SVG itself stays
   // static: one reference line and one dot per series are moved around, and
   // an HTML tooltip shows the exact values for the nearest sample.
-  function attachChartTip(container, ctx) {
+  function attachChartTip(container, controller, ctx) {
     const svg = container.querySelector("svg");
     if (!svg) return;
     const line = svg.querySelector(".hover-line");
@@ -697,24 +720,36 @@
     });
     svg.addEventListener("pointerleave", hide);
     svg.addEventListener("pointercancel", hide);
-    container.addEventListener("pointerup", () => {
-      setTimeout(hide, 1400);
-    });
-    container.addEventListener("focus", () => {
-      show(0);
-    });
-    container.addEventListener("blur", hide);
-    container.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      const raw = container.getAttribute("data-active-index");
-      const current = raw === null ? -1 : Number(raw);
-      const next =
-        event.key === "ArrowRight"
-          ? Math.min(ctx.count - 1, current < 0 ? 0 : current + 1)
-          : Math.max(0, current < 0 ? ctx.count - 1 : current - 1);
-      show(next);
-    });
+    container.addEventListener(
+      "pointerup",
+      () => {
+        setTimeout(hide, 1400);
+      },
+      { signal: controller.signal },
+    );
+    container.addEventListener(
+      "focus",
+      () => {
+        show(0);
+      },
+      { signal: controller.signal },
+    );
+    container.addEventListener("blur", hide, { signal: controller.signal });
+    container.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const raw = container.getAttribute("data-active-index");
+        const current = raw === null ? -1 : Number(raw);
+        const next =
+          event.key === "ArrowRight"
+            ? Math.min(ctx.count - 1, current < 0 ? 0 : current + 1)
+            : Math.max(0, current < 0 ? ctx.count - 1 : current - 1);
+        show(next);
+      },
+      { signal: controller.signal },
+    );
   }
 
   function renderLegend(container, series) {
@@ -745,6 +780,7 @@
     const disk = data.disk || {};
     const host = data.host || "--";
     $("subtitle").textContent = host + " · " + (data.platform || "default");
+    $("subtitle").removeAttribute("data-i18n");
     $("plugin-version").textContent = "v" + (data.plugin_version || "--");
 
     $("metrics").innerHTML = [
@@ -1012,13 +1048,13 @@
       downloadCsv(kind, range, data.rows || []);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    if (truncated) {
-      toast(t("export_truncated", "数据量超出上限，仅导出最近的记录"));
-    }
+    const done = exported
+      ? t("export_done", "已导出 {count} 个文件", { count: exported })
+      : t("export_empty", "所选范围内没有可导出的数据");
     toast(
-      exported
-        ? t("export_done", "已导出 {count} 个文件", { count: exported })
-        : t("export_empty", "所选范围内没有可导出的数据"),
+      truncated
+        ? t("export_truncated", "数据量超出上限，仅导出最近的记录") + " · " + done
+        : done,
     );
   }
 
@@ -1429,7 +1465,16 @@
               "</tbody></table></div>"
             : "") +
           (quality.note
-            ? '<p class="card-note">' + esc(quality.note) + "</p>"
+            ? '<p class="card-note">' +
+              esc(
+                (quality.note_code
+                  ? t(quality.note_code, quality.note)
+                  : quality.note) +
+                  (quality.note_truncated
+                    ? " " + t("quality_note_truncated", "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。")
+                    : ""),
+              ) +
+              "</p>"
             : "") +
           "</div>",
       );
@@ -1546,7 +1591,7 @@
       metric(
         t("report_token", "Token"),
         tokenValue,
-        t("report_last_7d", "最近 7 天"),
+        t("report_yesterday", "昨日"),
         null,
       ),
       metric(
@@ -1776,7 +1821,7 @@
     button.dataset.armed = "";
     button.classList.remove("verify-armed");
     clearTimeout(verifyArmTimer);
-    const original = t("verify_targets", "验证推送目标");
+    const original = button.textContent;
     button.disabled = true;
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");
@@ -1784,7 +1829,7 @@
       box.innerHTML = '<p class="muted">' + esc(t("verifying", "验证中…")) + "</p>";
     }
     try {
-      const data = await apiGet("verify", { kind });
+      const data = await apiPost("verify", { kind });
       renderVerifyResult(kind, data);
     } catch (error) {
       if (box) {

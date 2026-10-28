@@ -356,7 +356,12 @@ _WEBSITE_CACHE: dict[
 
 def _normalize_website_targets(raw: Any) -> list[WebsiteTarget]:
     defaults = [WebsiteTarget("Baidu", "https://www.baidu.com/", 3.0)]
-    if not isinstance(raw, list) or not raw:
+    # An absent key keeps the historical default; an explicit empty list means
+    # the operator removed every target, which must disable the external
+    # probes instead of silently falling back to Baidu.
+    if raw is None:
+        return defaults
+    if not isinstance(raw, list):
         return defaults
     out: list[WebsiteTarget] = []
     for item in raw:
@@ -377,7 +382,7 @@ def _normalize_website_targets(raw: Any) -> list[WebsiteTarget]:
             url = item.strip()
             if url:
                 out.append(WebsiteTarget(url, url, 3.0))
-    return out or defaults
+    return out
 
 
 def _copy_conn_tests(results: list[ConnTest]) -> list[ConnTest]:
@@ -396,13 +401,26 @@ def _copy_conn_tests(results: list[ConnTest]) -> list[ConnTest]:
 async def _probe_websites(sites: list[WebsiteTarget]) -> list[ConnTest]:
     async def probe(site: WebsiteTarget, cli: httpx.AsyncClient) -> ConnTest:
         start = time.perf_counter()
+
+        async def fetch() -> tuple[int, str]:
+            # Let the status-card probe finish as soon as the headers are in.
+            # Reading the body with a hard cap and a total timeout prevents a
+            # slow-drip server from parking the whole collect pass.
+            async with cli.stream("GET", site.url, timeout=site.timeout) as resp:
+                body = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) >= 262144:
+                        break
+                return resp.status_code, resp.reason_phrase or "OK"
+
         try:
-            resp = await cli.get(site.url, timeout=site.timeout)
+            status, reason = await asyncio.wait_for(fetch(), timeout=site.timeout + 2)
             dt = (time.perf_counter() - start) * 1000
             return ConnTest(
                 name=site.name,
-                status=str(resp.status_code),
-                reason=resp.reason_phrase or "OK",
+                status=str(status),
+                reason=reason,
                 delay=dt,
             )
         except Exception as exc:
@@ -697,6 +715,9 @@ def _run_command(args: list[str], timeout: float = 4.0) -> str | None:
 
 _pkg_cache: dict[str, Any] = {}
 _SYSINFO_CACHE_TTL = 24 * 3600
+# A failed dpkg/pip/lspci probe is retried after this short delay instead of
+# being cached as "--" for a whole day.
+_SYSINFO_RETRY_TTL = 300
 
 
 def _cache_time(cache: dict[str, Any], key: str) -> float:
@@ -763,7 +784,8 @@ def _package_counts(
 
     dpkg: int | None = None
     pip: int | None = None
-    if shutil.which("dpkg-query"):
+    has_dpkg = bool(shutil.which("dpkg-query"))
+    if has_dpkg:
         out = _run_command(["dpkg-query", "-W", "-f", "${Package}\n"], timeout=6)
         if out is not None:
             dpkg = len([line for line in out.splitlines() if line.strip()])
@@ -775,8 +797,12 @@ def _package_counts(
             pip = len([line for line in out.splitlines() if line.strip()])
     except Exception:
         pass
-    _pkg_cache.update(pkg_ts=now, dpkg=dpkg, pip=pip)
-    _save_sysinfo_cache(state, {"pkg_ts": now, "dpkg": dpkg, "pip": pip})
+    # Only a fully successful probe earns the 24h cache. A failed package
+    # manager used to leave "Packages --" on the card for a whole day.
+    ok = (not has_dpkg or dpkg is not None) and pip is not None
+    stamp = now if ok else now - _SYSINFO_CACHE_TTL + _SYSINFO_RETRY_TTL
+    _pkg_cache.update(pkg_ts=stamp, dpkg=dpkg, pip=pip)
+    _save_sysinfo_cache(state, {"pkg_ts": stamp, "dpkg": dpkg, "pip": pip})
     return dpkg, pip
 
 
@@ -798,7 +824,7 @@ def _gpu_name(state: Any = None) -> str:
             for line in out.splitlines():
                 low = line.lower()
                 if any(key in low for key in ("vga", "3d controller", "display")):
-                    gpu = line.split(":", 1)[-1].strip()
+                    gpu = line.split(": ", 1)[-1].strip()
                     break
     if gpu == "--" and platform.system() == "Windows":
         out = _run_command(
@@ -812,9 +838,10 @@ def _gpu_name(state: Any = None) -> str:
         )
         if out and out.strip():
             gpu = out.strip()
+    stamp = now if gpu != "--" else now - _SYSINFO_CACHE_TTL + _SYSINFO_RETRY_TTL
     _pkg_cache["gpu"] = gpu
-    _pkg_cache["gpu_ts"] = now
-    _save_sysinfo_cache(state, {"gpu_ts": now, "gpu": gpu})
+    _pkg_cache["gpu_ts"] = stamp
+    _save_sysinfo_cache(state, {"gpu_ts": stamp, "gpu": gpu})
     return gpu
 
 

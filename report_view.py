@@ -444,7 +444,7 @@ class DailyReportBuilder:
     def _resource_section(
         self, day: date, previous: date, history_days: int
     ) -> dict[str, Any]:
-        start_day = min(day - timedelta(days=history_days - 1), previous)
+        start_day = day - timedelta(days=history_days - 1)
         start_ts = int(
             datetime.combine(start_day, time.min, tzinfo=self.tz).timestamp()
         )
@@ -662,7 +662,7 @@ class DailyReportBuilder:
         # ``resolved_ts`` is filled in when a condition clears, so the
         # duration survives a plugin restart. Events recorded before that
         # field was used fall back to pairing them in memory.
-        open_alerts: dict[str, int] = {}
+        open_alerts: dict[tuple[str, str, str], int] = {}
         # An interruption that began before the window still has an alert row
         # outside ``events``; load the preceding month so a recovery inside
         # the window can be paired with it instead of showing "--".
@@ -673,35 +673,45 @@ class DailyReportBuilder:
             name = str(alert.get("name") or "")
             if not name:
                 continue
+            key = (
+                str(alert.get("kind") or ""),
+                name,
+                str(alert.get("target") or ""),
+            )
             if status in {"alert", "failed"}:
                 # A "failed" row means the fault happened but its push did
                 # not arrive; it still starts an interruption for pairing.
-                open_alerts[name] = int(alert.get("ts") or 0)
+                open_alerts[key] = int(alert.get("ts") or 0)
             elif status == "recovery":
                 # A recovery before the window closes the alert for pairing
                 # purposes; otherwise a later recovery could be matched with
                 # an interruption that had already ended.
-                open_alerts.pop(name, None)
+                open_alerts.pop(key, None)
         items: list[dict[str, Any]] = []
         count = 0
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
+            key = (
+                str(event.get("kind") or ""),
+                name,
+                str(event.get("target") or ""),
+            )
             resolved_ts = event.get("resolved_ts")
             if status in {"alert", "failed"}:
-                open_alerts[name] = int(event.get("ts") or 0)
+                open_alerts[key] = int(event.get("ts") or 0)
             if str(event.get("day") or "") not in window_days:
                 continue
             if status not in {"alert", "recovery", "failed"}:
                 continue
             duration_text = "--"
             if status == "recovery":
-                start = open_alerts.pop(name, None)
+                start = open_alerts.pop(key, None)
                 if start:
                     duration_text = format_duration(int(event.get("ts") or 0) - start)
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
-            elif status == "alert":
+            elif status in {"alert", "failed"}:
                 if resolved_ts:
                     duration_text = format_duration(
                         int(resolved_ts) - int(event.get("ts") or 0)
@@ -727,25 +737,33 @@ class DailyReportBuilder:
                     "duration": duration_text,
                 }
             )
+
         # An interruption that began before the window and never got a
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
         # would otherwise read as "no anomalies". Surface it explicitly, but
-        # skip names that already show a recovery inside the window.
-        recovered_names = {
-            str(event.get("name") or "")
+        # skip entries that already show a recovery inside the window.
+        def _event_key(item: dict[str, Any]) -> tuple[str, str, str]:
+            return (
+                str(item.get("kind") or ""),
+                str(item.get("name") or ""),
+                str(item.get("target") or ""),
+            )
+
+        recovered_keys = {
+            _event_key(event)
             for event in events
             if str(event.get("status") or "") == "recovery"
         }
-        stale: dict[str, dict[str, Any]] = {}
+        stale: dict[tuple[str, str, str], dict[str, Any]] = {}
         for alert in self.store.list_unresolved_alerts(
             window_start_ts, window_start_ts - 30 * 86400, limit=50
         ):
-            name = str(alert.get("name") or "")
-            if not name or name in recovered_names:
+            key = _event_key(alert)
+            if not key[1] or key in recovered_keys:
                 continue
-            # Oldest start per name wins ("ongoing since ...").
-            if name not in stale:
-                stale[name] = alert
+            # Oldest start per rule/target wins ("ongoing since ...").
+            if key not in stale:
+                stale[key] = alert
         unresolved_items: list[dict[str, Any]] = []
         for alert in stale.values():
             started = datetime.fromtimestamp(int(alert.get("ts") or 0), self.tz)
@@ -1272,7 +1290,7 @@ class DailyReportBuilder:
             min_day = parsed_min.astimezone(self.tz).strftime("%Y-%m-%d")
 
         by_day = {
-            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0}
+            item.isoformat(): {"tokens": 0, "calls": 0, "completed": 0, "errors": 0}
             for item in chart_days
         }
         by_model: dict[str, int] = {}
@@ -1287,8 +1305,11 @@ class DailyReportBuilder:
             tokens = sum(int(value or 0) for value in (row[3], row[4], row[5]))
             bucket["tokens"] += tokens
             bucket["calls"] += 1
-            if str(row[1] or "") == "completed":
+            status = str(row[1] or "")
+            if status == "completed":
                 bucket["completed"] += 1
+            elif status == "error":
+                bucket["errors"] += 1
             if local_day not in window_set:
                 continue
             model = str(row[2] or "未知模型")
@@ -1303,7 +1324,13 @@ class DailyReportBuilder:
         completed = sum(
             bucket["completed"] for key, bucket in by_day.items() if key in window_set
         )
-        success_rate = (completed / calls * 100.0) if calls else None
+        errors = sum(
+            bucket["errors"] for key, bucket in by_day.items() if key in window_set
+        )
+        # Same denominator as the LLM quality section: user aborts are listed
+        # separately and do not count as failures.
+        attempts = completed + errors
+        success_rate = (completed / attempts * 100.0) if attempts else None
         top_models = []
         for model, tokens in sorted(
             by_model.items(), key=lambda pair: pair[1], reverse=True
@@ -1347,7 +1374,8 @@ class DailyReportBuilder:
             "top_models": top_models,
             "trend": trend,
             "note": (
-                "Token 口径：token_input_other + token_input_cached + token_output；按 AstrBot provider_stats 记录统计。"
+                "Token 口径：token_input_other + token_input_cached + token_output；"
+                "成功率 = 完成 / (完成 + 失败)，用户中止（aborted）单列不计入分母。"
                 + (
                     "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
                     if truncated
@@ -1520,15 +1548,17 @@ class DailyReportBuilder:
             "top_conversations": top_conversations,
             "trend": trend,
             "note": note,
+            "note_code": "quality_note",
+            "note_truncated": bool(truncated),
         }
 
     def _provider_rows(
         self, start_day: date, end_day: date
     ) -> tuple[list[tuple[Any, ...]], str | None, bool, bool]:
-        """Provider rows in [start_day, end_day], oldest-first capped by the SQL.
+        """Provider rows in [start_day, end_day], newest-first capped by SQL.
 
-        The fourth value flags that the 20000-row cap was hit, in which case
-        the oldest part of the window is missing from every aggregate.
+        The second value is the oldest row actually kept; when the cap cuts
+        the window the trend must show a gap before that point, not zero.
         """
 
         connection = self._readonly_db()
@@ -1542,23 +1572,24 @@ class DailyReportBuilder:
                 FROM provider_stats
                 WHERE created_at >= ? AND created_at < ?
                 ORDER BY created_at DESC
-                LIMIT 20000
+                LIMIT 20001
                 """,
                 (
                     f"{(start_day - timedelta(days=2)).isoformat()} 00:00:00",
                     f"{(end_day + timedelta(days=3)).isoformat()} 00:00:00",
                 ),
             ).fetchall()
-            min_row = connection.execute(
-                "SELECT MIN(created_at) FROM provider_stats"
-            ).fetchone()
         except Exception:
             return [], None, False, False
         finally:
             connection.close()
-        min_created = str(min_row[0]) if min_row and min_row[0] else None
-        truncated = len(rows) >= 20000
-        return rows, min_created, True, truncated
+        # Fetch one extra row to distinguish "exactly at the cap" from
+        # "truncated"; the oldest kept row (not the global MIN) is the point
+        # before which the trend must show a gap instead of zero.
+        truncated = len(rows) > 20000
+        rows = rows[:20000]
+        oldest_kept = str(rows[-1][0]) if rows else None
+        return rows, oldest_kept, True, truncated
 
 
 def detect_resource_gaps(

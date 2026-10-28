@@ -121,10 +121,18 @@ class DeliveryService:
             return DeliveryResult(ok=False)
 
         client = self._safe_client()
+        image = str(payload.get("image") or "")
+        # A local Pillow fallback card is a host path, not a URL. The OneBot
+        # container may not see that path (NapCat is often a separate
+        # container), so go straight to the framework path, which reads the
+        # file and uploads the bytes. Only URL images use the direct path.
+        direct_ok = client is not None and (
+            not image or image.lower().startswith(("http://", "https://"))
+        )
         result = DeliveryResult()
         for target in targets:
             receipt = None
-            if client is not None:
+            if direct_ok:
                 receipt = await send_direct(client, target, self._segments(payload))
             if receipt is not None:
                 result.receipts[target] = {

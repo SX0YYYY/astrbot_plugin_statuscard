@@ -17,7 +17,7 @@ from astrbot_plugin_statuscard.report import DailyReporter
 from astrbot_plugin_statuscard.report_store import ReportStore
 from astrbot_plugin_statuscard.report_view import DailyReportBuilder
 
-TARGET = "default:GroupMessage:461961169"
+TARGET = "default:GroupMessage:123456789"
 SECOND = "default:GroupMessage:2"
 
 

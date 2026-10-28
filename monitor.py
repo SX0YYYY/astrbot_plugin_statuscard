@@ -126,7 +126,10 @@ class ServiceMonitor:
                 continue
             required = REQUIRED_FIELDS[kind]
             config_error: str | None = None
-            if not item.get(required):
+            required_value = item.get(required)
+            if isinstance(required_value, str):
+                required_value = required_value.strip()
+            if not required_value:
                 config_error = f"缺少 {required} 配置"
             elif kind == "tcp":
                 port = cfg_int(item, "port", 0)
@@ -147,6 +150,8 @@ class ServiceMonitor:
             normalized = dict(item)
             normalized["__template_key"] = kind
             normalized["name"] = str(item.get("name") or kind)
+            if isinstance(item.get(required), str):
+                normalized[required] = str(item.get(required)).strip()
             if config_error:
                 normalized["config_error"] = config_error
             out.append(normalized)
@@ -161,21 +166,22 @@ class ServiceMonitor:
         event and skips the notification.
         """
 
-        items = (self.state.data.get("monitors") or {}).get("items") or {}
-        if not isinstance(items, dict):
-            return
-        now = time.time()
-        for key, st in items.items():
-            if not isinstance(st, dict) or not st.get("alerting"):
-                continue
-            last_checked = float(st.get("last_checked") or st.get("since") or 0)
-            if last_checked and now - last_checked > 86400:
-                st["stale"] = True
-                logger.warning(
-                    "监测项 %s 已超过 24 小时未探测（可能关闭了监测），"
-                    "恢复时只记事件、不发恢复消息",
-                    key,
-                )
+        with self.state.section("monitors") as monitors:
+            items = monitors.get("items") or {}
+            if not isinstance(items, dict):
+                return
+            now = time.time()
+            for key, st in items.items():
+                if not isinstance(st, dict) or not st.get("alerting"):
+                    continue
+                last_checked = float(st.get("last_checked") or st.get("since") or 0)
+                if last_checked and now - last_checked > 86400:
+                    st["stale"] = True
+                    logger.warning(
+                        "监测项 %s 已超过 24 小时未探测（可能关闭了监测），"
+                        "恢复时只记事件、不发恢复消息",
+                        key,
+                    )
 
     def start(self) -> None:
         if not self.enabled:
@@ -183,12 +189,17 @@ class ServiceMonitor:
             return
         if not self.items:
             logger.warning("服务监测已启用，但没有配置任何监测目标")
-        elif not self.targets:
+        elif not self._targets_for("service"):
             logger.error(
-                "服务监测已启用但没有推送目标（monitors.targets 与 alerts.targets 均为空），"
-                "监测项不会探测也不会告警；请在配置页的“告警与每日定时状态图 → 推送目标”里填写"
+                "服务监测已启用但没有推送目标（通知中心无 service 规则，"
+                "monitors.targets 与 alerts.targets 也均为空），"
+                "监测项不会探测也不会告警；请在配置页填写推送目标"
             )
         self._prune_state()
+        # A hand-edited state.json can hold a list/scalar here; replacing it
+        # with a dict under the store's lock keeps start-up from crashing.
+        with self.state.section("monitors"):
+            pass
         self._mark_stale_items()
         self._running = True
         self._is_silenced()
@@ -256,14 +267,17 @@ class ServiceMonitor:
     def _prune_state(self) -> None:
         if not self.items:
             return
-        monitors = self.state.data.setdefault("monitors", {})
-        states = monitors.setdefault("items", {})
-        valid_keys = {self._item_key(item) for item in self.items}
-        stale_keys = [key for key in states if key not in valid_keys]
-        if not stale_keys:
-            return
-        for key in stale_keys:
-            states.pop(key, None)
+        with self.state.section("monitors") as monitors:
+            states = monitors.setdefault("items", {})
+            if not isinstance(states, dict):
+                states = {}
+                monitors["items"] = states
+            valid_keys = {self._item_key(item) for item in self.items}
+            stale_keys = [key for key in states if key not in valid_keys]
+            if not stale_keys:
+                return
+            for key in stale_keys:
+                states.pop(key, None)
         self.state.save()
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
@@ -289,12 +303,15 @@ class ServiceMonitor:
             await asyncio.sleep(self.interval)
 
     async def check_all(self) -> None:
-        if not self.targets:
+        if not self._targets_for("service"):
             # A missing push target means alerts could never reach anyone;
             # warn once at start-up (see audit) instead of every round.
+            # The notification center may supply the target even when both
+            # legacy lists are empty, so resolve it before giving up.
             if not self._targets_warned:
                 logger.error(
-                    "服务监测已启用但没有推送目标（monitors.targets 与 alerts.targets 均为空），"
+                    "服务监测已启用但没有推送目标（通知中心无 service 规则，"
+                    "monitors.targets 与 alerts.targets 也均为空），"
                     "不会探测也不会告警；请在配置页填写推送目标"
                 )
                 self._targets_warned = True
@@ -310,7 +327,8 @@ class ServiceMonitor:
         for result in results:
             if isinstance(result, Exception):
                 logger.error("服务监测检查异常: %s", result)
-        self.state.data.setdefault("monitors", {})["last_run"] = time.time()
+        with self.state.section("monitors") as monitors:
+            monitors["last_run"] = time.time()
         self.state.save()
 
     def _silence_until(self) -> datetime | None:
@@ -579,9 +597,12 @@ class ServiceMonitor:
                 # drip can keep the probe alive far beyond the configured
                 # limit. The outer wait_for caps the whole probe.
                 async def _do_probe() -> tuple[bool, str, str]:
+                    # A 3xx expected status cannot be matched while redirects
+                    # are followed: the probe would compare the final 200.
+                    follow = not (300 <= expected < 400)
                     async with (
                         httpx.AsyncClient(
-                            follow_redirects=True, timeout=timeout
+                            follow_redirects=follow, timeout=timeout
                         ) as cli,
                         cli.stream("GET", url) as resp,
                     ):
@@ -682,16 +703,22 @@ class ServiceMonitor:
             pattern = str(item.get("pattern") or "").strip().lower()
             if not pattern:
                 return False, "进程匹配串未配置", "-"
-            try:
-                for p in psutil.process_iter(["name", "cmdline"]):
+
+            def scan_processes() -> tuple[bool, str, str]:
+                for proc in psutil.process_iter(["name", "cmdline"]):
                     try:
-                        name = str(p.info.get("name") or "")
-                        cmdline = " ".join(p.info.get("cmdline") or [])
+                        name = str(proc.info.get("name") or "")
+                        cmdline = " ".join(proc.info.get("cmdline") or [])
                         if pattern in f"{name} {cmdline}".lower():
-                            return True, f"匹配到进程 {name or p.pid}", pattern
+                            return True, f"匹配到进程 {name or proc.pid}", pattern
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
                 return False, f"未找到匹配进程: {pattern}", pattern
+
+            try:
+                # Scanning every /proc entry is a synchronous syscall loop;
+                # run it off the event loop like the status-card collector.
+                return await asyncio.to_thread(scan_processes)
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", pattern
 
@@ -770,6 +797,7 @@ class ServiceMonitor:
             reason=detail,
             text=text,
             send=self._send,
+            kind="service",
         )
 
     @staticmethod

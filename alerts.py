@@ -92,8 +92,11 @@ class AlertEngine:
             10,
             "alerts.sustain_samples",
         )
-        self.cooldown = max(
-            0, min(86400, cfg_int(config, "alerts.cooldown_seconds", 1800))
+        self.cooldown = clamp_config(
+            cfg_int(config, "alerts.cooldown_seconds", 1800),
+            0,
+            86400,
+            "alerts.cooldown_seconds",
         )
         self.recover_notify = cfg_bool(config, "alerts.recover_notify", True)
         self.offline_notify = cfg_bool(config, "alerts.offline_notify", True)
@@ -159,6 +162,7 @@ class AlertEngine:
         self._webhook_runner: Any = None
         self._webhook_site: Any = None
         self._primed = False
+        self._disk_warned: set[str] = set()
         self._daily_last_sent_day: str | None = None
         self._daily_last_attempt_day: str | None = None
         self._next_daily_text: str | None = None
@@ -259,33 +263,40 @@ class AlertEngine:
         report the entire disabled window as one interruption.
         """
 
-        rules = (self.state.data.get("alerts") or {}).get("rules") or {}
-        offline = (self.state.data.get("alerts") or {}).get("offline") or {}
-        if not isinstance(rules, dict):
-            return
-        now = time.time()
-        tracked: list[tuple[str, Any]] = [(str(key), st) for key, st in rules.items()]
-        if isinstance(offline, dict):
-            tracked.append(("offline", offline))
-        for key, st in tracked:
-            if not isinstance(st, dict) or not st.get("alerting"):
-                continue
-            last_seen = float(st.get("last_seen") or st.get("alert_since") or 0)
-            if not last_seen and key == "offline":
-                last_seen = float(st.get("since") or 0)
-            if last_seen and now - last_seen > 86400:
-                st["stale"] = True
-                logger.warning(
-                    "告警规则 %s 已超过 24 小时未采样（可能关闭了告警），"
-                    "恢复时只记事件、不发恢复消息",
-                    key,
-                )
+        with self.state.section("alerts") as alerts:
+            rules = alerts.get("rules") or {}
+            offline = alerts.get("offline") or {}
+            if not isinstance(rules, dict):
+                return
+            now = time.time()
+            tracked: list[tuple[str, Any]] = [
+                (str(key), st) for key, st in rules.items()
+            ]
+            if isinstance(offline, dict):
+                tracked.append(("offline", offline))
+            for key, st in tracked:
+                if not isinstance(st, dict) or not st.get("alerting"):
+                    continue
+                last_seen = float(st.get("last_seen") or st.get("alert_since") or 0)
+                if not last_seen and key == "offline":
+                    last_seen = float(st.get("since") or 0)
+                if last_seen and now - last_seen > 86400:
+                    st["stale"] = True
+                    logger.warning(
+                        "告警规则 %s 已超过 24 小时未采样（可能关闭了告警），"
+                        "恢复时只记事件、不发恢复消息",
+                        key,
+                    )
 
     def start(self) -> None:
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
         daily_on = cfg_bool(self.config, "alerts.daily_summary.enabled", False)
         self._running = alerts_on or daily_on
         if alerts_on:
+            # A hand-edited state.json can hold a list/scalar here; replacing
+            # it under the store's lock keeps start-up from crashing.
+            with self.state.section("alerts"):
+                pass
             self._mark_stale_rules()
         if alerts_on:
             self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -379,6 +390,7 @@ class AlertEngine:
             reason=reason,
             text=text,
             send=lambda text: self._send(text, kind="resource"),
+            kind="resource",
         )
 
     @staticmethod
@@ -502,8 +514,14 @@ class AlertEngine:
                 "%",
                 f"{disk.percent:.1f}% ({format_bytes(disk.used)} / {format_bytes(disk.total)})",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if disk_path not in self._disk_warned:
+                self._disk_warned.add(disk_path)
+                logger.warning(
+                    "磁盘挂载点 %s 无法读取（%s），磁盘告警已跳过；请检查 display.disk_paths",
+                    disk_path,
+                    exc,
+                )
 
         if hasattr(os, "getloadavg"):
             try:
@@ -521,8 +539,10 @@ class AlertEngine:
             except Exception:
                 pass
 
-        if self.offline_notify:
-            await self._check_offline()
+        # Detection, event logging and the optional broadcast are independent
+        # of the notification preference: turning notifications off must not
+        # erase offline incidents from the daily report.
+        await self._check_offline()
         if self.provider_watch_enabled:
             await self._check_provider_quality()
         self.state.set("alerts_last_sample", now)
@@ -561,10 +581,22 @@ class AlertEngine:
             count += 1
             st["count"] = count
             if not alerting and count >= self.sustain:
+                if last_sent and now - last_sent < self.cooldown:
+                    # A second episode inside the cooldown used to vanish
+                    # completely. Latch it and write one event (with the
+                    # suppression noted); only the duplicate push is skipped.
+                    st["alerting"] = True
+                    st["alert_since"] = now
+                    st["count"] = 0
+                    self._record_event(
+                        "resource",
+                        name,
+                        f"{value_text}（阈值 {threshold:.1f}{unit}，冷却窗口内仅记录）",
+                        "alert",
+                    )
+                    return
                 next_attempt = float(st.get("next_attempt") or 0)
-                if now >= next_attempt and (
-                    not last_sent or now - last_sent >= self.cooldown
-                ):
+                if now >= next_attempt:
                     text = (
                         f"⚠️ 系统告警 · {name}\n"
                         "──────────────\n"
@@ -810,7 +842,17 @@ class AlertEngine:
             st["count"] = 0
             st["unreachable"] = 0
             st["unreachable_warned"] = False
-            pending_text = st.get("pending_recovery")
+            pending_text = st.get("pending_recovery") if self.offline_notify else None
+            if not self.offline_notify:
+                for key in (
+                    "pending_recovery",
+                    "recovery_attempt",
+                    "recovery_next_attempt",
+                    "recovery_retry_count",
+                    "pending_alert_text",
+                ):
+                    st.pop(key, None)
+                st["pending_alert"] = False
             if pending_text:
                 next_recovery = float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
@@ -829,13 +871,15 @@ class AlertEngine:
             if st.get("alerting") or st.get("pending_alert_text"):
                 stale = bool(st.pop("stale", False))
                 duration = now - float(st.get("since") or now)
-                queued = st.pop("pending_alert_text", None)
+                queued = (
+                    st.pop("pending_alert_text", None) if self.offline_notify else None
+                )
                 st["alerting"] = False
                 st["since"] = 0
                 parts: list[str] = []
                 if queued:
                     parts.append(str(queued))
-                if self.recover_notify and not stale:
+                if self.offline_notify and self.recover_notify and not stale:
                     text = (
                         "✅ Bot 连接已恢复\n"
                         "──────────────\n"
@@ -858,7 +902,7 @@ class AlertEngine:
                     await self._broadcast_recovery(
                         now - duration, format_duration(duration)
                     )
-                if parts:
+                if self.offline_notify and parts:
                     text = "\n\n".join(parts)
                     result = await self._send(text, kind="offline")
                     if self._delivered(result):
@@ -898,6 +942,10 @@ class AlertEngine:
             st["alerting"] = True
             st["since"] = now
             st["count"] = 0
+            if not self.offline_notify:
+                # Keep the incident in the event log; only the push is off.
+                self._record_event("offline", "Bot 连接", "连接离线", "alert")
+                return
             text = (
                 "🔴 Bot 连接离线\n"
                 "──────────────\n"
@@ -1196,8 +1244,12 @@ class AlertEngine:
         if self._daily_last_sent_day == today:
             logger.info("每日定时状态图 %s 已发送，跳过重复发送", today)
             return True
-        if not self.targets:
-            logger.warning("每日定时状态图已启用，但告警目标为空，跳过发送")
+        targets = self._targets_for("daily_image")
+        if not targets:
+            logger.warning(
+                "每日定时状态图已启用，但推送目标为空（通知中心无 daily_image "
+                "规则，alerts.targets 也未填写），跳过发送"
+            )
             return True
         with_image = cfg_bool(self.config, "alerts.daily_summary.with_image", True)
         if with_image:
@@ -1208,13 +1260,13 @@ class AlertEngine:
                 image_url = None
             if image_url:
                 result = await self.plugin.send_image(
-                    self._targets_for("daily_image"),
+                    targets,
                     image_url,
                     source="daily_summary",
                 )
                 if self._delivered(result):
                     self._mark_daily_sent(today)
-                    logger.info("每日定时状态图已发送（图片）：%s", self.targets)
+                    logger.info("每日定时状态图已发送（图片）：%s", targets)
                     return True
         summary = await self.plugin.build_summary_text()
         result = await self._send(
@@ -1224,9 +1276,9 @@ class AlertEngine:
         )
         if self._delivered(result):
             self._mark_daily_sent(today)
-            logger.info("每日定时状态图已发送（文字）：%s", self.targets)
+            logger.info("每日定时状态图已发送（文字）：%s", targets)
             return True
-        logger.warning("每日定时状态图发送失败：%s", self.targets)
+        logger.warning("每日定时状态图发送失败：%s", targets)
         return False
 
     # ------------------------------------------------------------------
