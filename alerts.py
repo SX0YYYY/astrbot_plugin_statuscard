@@ -575,6 +575,7 @@ class AlertEngine:
             # in alerting forever; treat it as disabled instead.
             st["count"] = 0
             st["alerting"] = False
+            st["alerted"] = False
             return
 
         if value >= threshold:
@@ -589,6 +590,7 @@ class AlertEngine:
                     # completely. Latch it and write one event (with the
                     # suppression noted); only the duplicate push is skipped.
                     st["alerting"] = True
+                    st["alerted"] = False
                     st["alert_since"] = now
                     st["count"] = 0
                     self._record_event(
@@ -619,6 +621,7 @@ class AlertEngine:
                         # Covered by the aggregator summary; the rule is in
                         # alerting and the event log stays complete.
                         st["alerting"] = True
+                        st["alerted"] = True
                         st["alert_since"] = now
                         st["count"] = 0
                         self._record_event(
@@ -629,6 +632,7 @@ class AlertEngine:
                         )
                     elif delivered:
                         st["alerting"] = True
+                        st["alerted"] = True
                         st["alert_since"] = now
                         st["count"] = 0
                         st["last_sent"] = now
@@ -654,6 +658,7 @@ class AlertEngine:
                                 retry_count,
                             )
                             st["alerting"] = True
+                            st["alerted"] = True
                             st["alert_since"] = now
                             st["count"] = 0
                             st["retry_count"] = 0
@@ -693,6 +698,11 @@ class AlertEngine:
                         st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 stale = bool(st.pop("stale", False))
+                # Only announce the recovery for an episode that was actually
+                # pushed. A second episode inside the cooldown is logged but
+                # never sent, so its recovery notice would arrive without a
+                # matching alert and look like a duplicate (2026-10-29 实测).
+                notified = bool(st.pop("alerted", True))
                 st["alerting"] = False
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
@@ -708,7 +718,7 @@ class AlertEngine:
                     f"持续 {format_duration(duration)}",
                     "recovery",
                 )
-                if self.recover_notify and not stale:
+                if self.recover_notify and not stale and notified:
                     text = (
                         f"✅ 已恢复 · {name}\n"
                         "──────────────\n"

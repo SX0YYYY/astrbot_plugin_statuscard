@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.18.0-blue)
+![Version](https://img.shields.io/badge/version-2.18.1-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -649,6 +649,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.18.1**：修复「内存恢复通知发两遍」——冷却窗口内被抑制的故障不再单独发恢复通知
 - **v2.18.0**：推送目标统一——三个模块合并为一个「默认推送目标」，旧的分模块目标收进高级选项并保留兼容，配置页只需填一处
 - **v2.17.2**：配置页提示排版修正——通知规则说明改为不依赖换行的单段（配置页会把换行折叠成空格）
 - **v2.17.1**：配置页易用化——通知中心与「推送目标」的区别和覆盖关系写清楚、分组顺序改为先基础后高级、补齐一批空提示；功能与行为不变
