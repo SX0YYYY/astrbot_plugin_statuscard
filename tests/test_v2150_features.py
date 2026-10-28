@@ -204,8 +204,20 @@ def test_aggregator_flush_posts_summary() -> None:
     asyncio.run(agg.push("B", "原因B", "文本B", _async_send(sent)))
     asyncio.run(_drain(agg, sent))
     assert len(sent) == 2
-    assert "2 项异常" in sent[-1] and "A: 原因A" in sent[-1]
+    # Only the buffered follow-up is merged: the first alert already went
+    # out on its own and must not repeat in the summary.
+    assert "1 项异常" in sent[-1] and "B: 原因B" in sent[-1]
+    assert "A: 原因A" not in sent[-1]
     assert not agg.active
+
+
+def test_aggregator_single_alert_no_summary() -> None:
+    sent: list[str] = []
+    agg = AlertAggregator(window_seconds=120, max_items=8)
+    asyncio.run(agg.push("A", "原因A", "文本A", _async_send(sent)))
+    asyncio.run(_drain(agg, sent))
+    # A lone alert is delivered once; the flush has nothing to merge.
+    assert sent == ["文本A"]
 
 
 def test_aggregator_disabled_sends_everything() -> None:

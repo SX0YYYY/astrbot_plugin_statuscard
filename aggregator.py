@@ -56,7 +56,11 @@ class AlertAggregator:
             result = await send(text)
             if self.window_seconds > 0:
                 self._until = time.time() + self.window_seconds
-                self._pending = [(label, reason)]
+                # The first alert was delivered on its own; it must not be
+                # repeated in the follow-up summary. Only alerts that arrive
+                # inside the window need merging, so a single alert never
+                # produces an extra "1 item" summary.
+                self._pending = []
                 self._schedule_flush(send)
             return result
         self._pending.append((label, reason))
