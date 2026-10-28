@@ -124,9 +124,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "error",
                 "monitors_no_targets",
-                "服务监测已启用，但推送目标为空（通知中心无 service 规则，"
-                "monitors.targets 与 alerts.targets 也均未填写），监测项不会探测也不会告警。"
-                "请在「服务可用性监测 → 监测推送目标」或「告警与每日定时状态图 → 推送目标」填写群号。",
+                "服务监测已启用，但没有可用的推送目标（通知中心无 service 规则，"
+                "默认推送目标也为空），监测项不会探测也不会告警。"
+                "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
     if monitors_on:
@@ -146,9 +146,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "error",
                 "alerts_no_targets",
-                "资源与掉线告警已启用，但推送目标为空（通知中心无 resource 规则，"
-                "alerts.targets 也未填写），告警不会送达任何会话。"
-                "请在「告警与每日定时状态图 → 推送目标」填写群号。",
+                "资源与掉线告警已启用，但没有可用的推送目标（通知中心无 resource 规则，"
+                "默认推送目标也为空），告警不会送达任何会话。"
+                "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
     if daily_on and not daily_targets:
@@ -156,8 +156,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "daily_report_no_targets",
-                "每日日报已启用，但推送目标为空（通知中心无 daily 规则，"
-                "daily_report.targets 与 alerts.targets 也均未填写），日报不会发送。",
+                "每日日报已启用，但没有可用的推送目标（通知中心无 daily 规则，"
+                "默认推送目标也为空），日报不会发送。",
             )
         )
     if weekly_on and not weekly_targets:
@@ -165,8 +165,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "weekly_report_no_targets",
-                "每周周报已启用，但推送目标为空（通知中心无 weekly 规则，"
-                "daily_report.targets 与 alerts.targets 也均未填写），周报不会发送。",
+                "每周周报已启用，但没有可用的推送目标（通知中心无 weekly 规则，"
+                "默认推送目标也为空），周报不会发送。",
             )
         )
     if (
@@ -177,8 +177,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "daily_summary_no_targets",
-                "每日定时状态图已启用，但推送目标为空（通知中心无 daily_image 规则，"
-                "alerts.targets 也未填写），到点后会静默跳过且当天不重试。",
+                "每日定时状态图已启用，但没有可用的推送目标（通知中心无 daily_image 规则，"
+                "默认推送目标也为空），到点后会静默跳过且当天不重试。",
             )
         )
     if cfg_bool(config, "alerts.provider_watch.enabled", False):
@@ -192,8 +192,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 AuditIssue(
                     "warning",
                     "provider_watch_no_targets",
-                    "LLM 服务告警已启用，但推送目标为空（通知中心无 provider 规则且"
-                    "alerts.targets 未填写），连续失败时不会送达任何会话。",
+                    "LLM 服务告警已启用，但没有可用的推送目标（通知中心无 provider 规则，"
+                    "默认推送目标也为空），连续失败时不会送达任何会话。",
                 )
             )
     if alerts_on:
@@ -244,7 +244,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "warning",
                 "notify_center_active",
                 f"通知中心已启用（{active_rules} 条有效规则）：规则覆盖的类型走规则目标，"
-                "其余类型继续使用各模块自己的「推送目标」。这是正常状态，无需处理；"
+                "其余类型继续使用「默认推送目标」。这是正常状态，无需处理；"
                 "只有当某类型收不到通知时才需要检查这里的覆盖关系。",
             )
         )
@@ -264,6 +264,32 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
                 )
                 break
+    # The per-module target lists are legacy: they still work (and win over
+    # the shared default), but they are hidden behind "show advanced" now.
+    # Surface them so a user who forgot about them knows why that module
+    # ignores the default target.
+    legacy_scopes = []
+    for key, label in (
+        ("monitors.targets", "服务监测"),
+        ("daily_report.targets", "日报/周报"),
+    ):
+        raw = cfg_get(config, key, []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, list) and any(
+            isinstance(item, str) and item.strip() for item in raw
+        ):
+            legacy_scopes.append(label)
+    if legacy_scopes:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "legacy_module_targets",
+                f"检测到{'、'.join(legacy_scopes)}单独配置了推送目标：该模块会用它而不是"
+                "「默认推送目标」。如果本意就是统一发送，请在对应分组的「显示高级选项」里"
+                "清空这一项。",
+            )
+        )
     # normalize_rules silently drops unknown values; a typo such as
     # "hostnames" therefore looks like redaction is on while nothing is
     # hidden. Make the ignored values visible.
