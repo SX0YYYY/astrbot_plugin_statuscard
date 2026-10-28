@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.17.1-blue)
+![Version](https://img.shields.io/badge/version-2.17.2-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -649,6 +649,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.17.2**：配置页提示排版修正——通知规则说明改为不依赖换行的单段（配置页会把换行折叠成空格）
 - **v2.17.1**：配置页易用化——通知中心与「推送目标」的区别和覆盖关系写清楚、分组顺序改为先基础后高级、补齐一批空提示；功能与行为不变
 - **v2.17.0**：三批找茬修复合并发布：通知中心按类型接管真正生效（监测/定时状态图不再静默）、告警聚合按类型分桶且慢发送不丢、掉线检测与通知解耦、看板脱敏补漏与验证接口改 POST、Token 成功率/周报趋势/未恢复告警/事件顺序等口径修正、发布包与文档全面清理
 - **v2.16.4**：告警聚合修正：单条告警不再多发「1 项异常」汇总，汇总只包含被真正合并的后续告警
