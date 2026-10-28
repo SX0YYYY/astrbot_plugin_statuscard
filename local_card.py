@@ -20,14 +20,8 @@ from datetime import datetime
 from io import BytesIO
 from typing import Any
 
+from astrbot.api import logger
 from PIL import Image, ImageDraw, ImageFont
-
-try:
-    from astrbot.api import logger
-except Exception:  # pragma: no cover - tests stub astrbot.api
-    import logging
-
-    logger = logging.getLogger("astrbot")
 
 WIDTH = 1170
 PADDING = 48
