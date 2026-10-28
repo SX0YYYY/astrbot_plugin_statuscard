@@ -243,8 +243,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "notify_center_active",
-                f"通知中心已启用（{active_rules} 条有效规则）：仅接管规则覆盖的通知类型，"
-                "未被规则覆盖的类型继续使用 alerts / monitors / daily_report 的旧目标。",
+                f"通知中心已启用（{active_rules} 条有效规则）：规则覆盖的类型走规则目标，"
+                "其余类型继续使用各模块自己的「推送目标」。这是正常状态，无需处理；"
+                "只有当某类型收不到通知时才需要检查这里的覆盖关系。",
             )
         )
     else:

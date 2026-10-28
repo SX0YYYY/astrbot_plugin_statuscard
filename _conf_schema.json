@@ -244,58 +244,83 @@
             }
         }
     },
-    "notify": {
-        "description": "通知中心（可选）：按通知类型分配推送目标",
+    "avatar": {
+        "description": "头像",
         "type": "object",
+        "hint": "默认使用 Bot 的 QQ 头像。想换头像时，把“头像来源”改为“自定义上传”，再上传一张图片即可。",
         "items": {
-            "rules": {
-                "description": "通知规则",
-                "type": "template_list",
+            "avatar_source": {
+                "description": "头像来源",
+                "type": "string",
+                "default": "default",
+                "options": [
+                    "default",
+                    "upload"
+                ],
+                "labels": [
+                    "默认（QQ 头像）",
+                    "自定义上传"
+                ],
+                "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
+            },
+            "avatar_upload_files": {
+                "description": "上传头像图片",
+                "type": "file",
                 "default": [],
-                "hint": "添加至少一条启用且勾选了类型的规则后，该规则覆盖的通知类型改用规则目标；未被任何规则覆盖的类型继续使用 alerts/monitors/daily_report 的旧「推送目标」。清空全部规则即完全回退旧行为。",
-                "templates": {
-                    "rule": {
-                        "name": "通知规则",
-                        "items": {
-                            "enabled": {
-                                "description": "启用该规则",
-                                "type": "bool",
-                                "default": true
-                            },
-                            "target": {
-                                "description": "推送目标",
-                                "type": "string",
-                                "default": "",
-                                "hint": "QQ 群号（如 123456789）或完整 UMO（如 default:GroupMessage:123456789）。"
-                            },
-                            "kinds": {
-                                "description": "接收的通知类型",
-                                "type": "list",
-                                "default": [],
-                                "options": [
-                                    "resource",
-                                    "service",
-                                    "offline",
-                                    "provider",
-                                    "daily",
-                                    "weekly",
-                                    "daily_image"
-                                ],
-                                "labels": [
-                                    "资源告警",
-                                    "服务监测告警",
-                                    "掉线/恢复",
-                                    "LLM 服务告警",
-                                    "每日日报",
-                                    "每周周报",
-                                    "每日定时状态图"
-                                ],
-                                "render_type": "checkbox",
-                                "hint": "勾选该目标要接收的通知类型；留空 = 该规则不生效。"
-                            }
-                        }
-                    }
-                }
+                "file_types": [
+                    "png",
+                    "jpg",
+                    "jpeg",
+                    "webp",
+                    "gif"
+                ],
+                "condition": {
+                    "avatar_source": "upload"
+                },
+                "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
+            },
+            "avatar_text": {
+                "description": "状态图显示的 Bot 名称",
+                "type": "string",
+                "default": "",
+                "hint": "留空自动读取 QQ 昵称；只影响卡片上的文字。"
+            }
+        }
+    },
+    "background": {
+        "description": "背景",
+        "type": "object",
+        "hint": "默认使用内置背景。想换背景时，把“背景来源”改为“自定义上传”，再上传一张图片即可。",
+        "items": {
+            "background_source": {
+                "description": "背景来源",
+                "type": "string",
+                "default": "default",
+                "options": [
+                    "default",
+                    "upload"
+                ],
+                "labels": [
+                    "默认（内置背景）",
+                    "自定义上传"
+                ],
+                "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
+            },
+            "bg_upload_files": {
+                "description": "上传背景图片",
+                "type": "file",
+                "default": [],
+                "file_types": [
+                    "png",
+                    "jpg",
+                    "jpeg",
+                    "webp",
+                    "gif"
+                ],
+                "condition": {
+                    "background_source": "upload"
+                },
+                "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
             }
         }
     },
@@ -317,7 +342,7 @@
                 "items": {
                     "type": "string"
                 },
-                "hint": "填 QQ 群号或完整 UMO；资源告警、掉线告警、每日定时状态图和监测默认都发到这里。"
+                "hint": "填 QQ 群号或完整 UMO。资源告警、掉线告警、每日定时状态图和监测默认都发到这里；只发一个群时只填这一处即可，其他模块留空会自动复用。"
             },
             "daily_summary": {
                 "description": "每日定时状态图",
@@ -368,7 +393,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "连续超过该百分比才告警；默认 85。"
             },
             "mem_threshold": {
                 "description": "内存告警阈值（%）",
@@ -381,7 +407,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "连续超过该百分比才告警；默认 90，设太低会频繁误报。"
             },
             "swap_threshold": {
                 "description": "SWAP 告警阈值（%）",
@@ -394,7 +421,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "连续超过该百分比才告警；默认 90。"
             },
             "disk_threshold": {
                 "description": "磁盘告警阈值（%）",
@@ -407,7 +435,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "连续超过该百分比才告警；默认 85，注意磁盘长期高于 80 应尽快清理。"
             },
             "load_per_core_threshold": {
                 "description": "每核负载告警阈值",
@@ -500,7 +529,8 @@
                 "condition": {
                     "enabled": true,
                     "show_advanced": true
-                }
+                },
+                "hint": "恢复正常时补发一条「已恢复」通知；关闭后只报故障。"
             },
             "offline_notify": {
                 "description": "Bot 掉线/恢复通知",
@@ -559,7 +589,8 @@
                         },
                         "hint": "超过上限的群不再发送；0 = 不限制。"
                     }
-                }
+                },
+                "hint": "默认关闭。开启后掉线/恢复会广播到机器人所在的全部群，适合多群运营；只发一个群不用开。"
             },
             "provider_watch": {
                 "description": "LLM 服务告警",
@@ -628,7 +659,8 @@
                     "enabled": {
                         "description": "启用 Webhook 接收",
                         "type": "bool",
-                        "default": false
+                        "default": false,
+                        "hint": "接收 Komari 的 Webhook 事件并转发到推送目标；默认关闭。"
                     },
                     "host": {
                         "description": "监听地址",
@@ -650,7 +682,8 @@
                         },
                         "condition": {
                             "enabled": true
-                        }
+                        },
+                        "hint": "本机监听端口；默认 9968，需与 Komari 的 Webhook 地址一致。"
                     },
                     "path": {
                         "description": "Webhook 路径",
@@ -658,7 +691,8 @@
                         "default": "/webhook",
                         "condition": {
                             "enabled": true
-                        }
+                        },
+                        "hint": "Webhook 路径；默认 /webhook。"
                     },
                     "token": {
                         "description": "鉴权 Token",
@@ -727,7 +761,7 @@
                 "items": {
                     "type": "string"
                 },
-                "hint": "留空复用“告警与每日定时状态图”的推送目标；每日日报与每周周报共用。"
+                "hint": "推荐留空：留空自动复用「告警与每日定时状态图」的推送目标，日报与周报共用。被通知中心的「每日日报 / 每周周报」规则勾选时不使用这里。"
             },
             "sections": {
                 "description": "日报内容",
@@ -824,7 +858,8 @@
             "show_advanced": {
                 "description": "显示高级日报选项",
                 "type": "bool",
-                "default": false
+                "default": false,
+                "hint": "资源采样间隔、保留天数、渲染超时等；通常不需要改。"
             },
             "render_timeout": {
                 "description": "日报渲染超时（秒）",
@@ -851,7 +886,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "资源/网站/进程写库的采样间隔，影响趋势精度；默认 300 秒。"
             },
             "process_top_n": {
                 "description": "Top 进程数量",
@@ -878,7 +914,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "资源采样保留天数，超期自动清理；默认 30 天。"
             },
             "event_retention_days": {
                 "description": "异常事件保留天数",
@@ -891,7 +928,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "告警/监测事件保留天数，超期自动清理；默认 90 天。"
             }
         }
     },
@@ -903,7 +941,8 @@
             "enabled": {
                 "description": "启用服务监测",
                 "type": "bool",
-                "default": false
+                "default": false,
+                "hint": "按「监测目标列表」逐项探测 HTTP/TCP/Docker/进程/systemd，连续失败达阈值后告警。"
             },
             "targets": {
                 "description": "监测推送目标",
@@ -912,7 +951,7 @@
                 "items": {
                     "type": "string"
                 },
-                "hint": "留空会自动使用上面的告警推送目标；通常只填一次。"
+                "hint": "推荐留空：留空自动复用上面的「告警推送目标」。被通知中心的「服务监测告警」规则勾选时不使用这里。"
             },
             "items": {
                 "description": "监测目标列表",
@@ -1186,7 +1225,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "每轮探测的间隔；默认 60 秒，30 秒更灵敏但请求更频繁。"
             },
             "fail_threshold": {
                 "description": "连续失败几次后告警（服务监测）",
@@ -1213,7 +1253,8 @@
                 },
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "同一目标恢复前不重复告警的时间；默认 1800 秒。"
             },
             "recover_notify": {
                 "description": "恢复时发送通知",
@@ -1221,7 +1262,8 @@
                 "default": true,
                 "condition": {
                     "show_advanced": true
-                }
+                },
+                "hint": "目标恢复时补发一条「已恢复」通知；关闭后只报故障。"
             },
             "max_response_bytes": {
                 "description": "HTTP 探测最大读取字节数",
@@ -1239,83 +1281,59 @@
             }
         }
     },
-    "avatar": {
-        "description": "头像",
+    "notify": {
+        "description": "通知中心（可选，只在“不同通知发到不同群”时才需要）",
         "type": "object",
-        "hint": "默认使用 Bot 的 QQ 头像。想换头像时，把“头像来源”改为“自定义上传”，再上传一张图片即可。",
         "items": {
-            "avatar_source": {
-                "description": "头像来源",
-                "type": "string",
-                "default": "default",
-                "options": [
-                    "default",
-                    "upload"
-                ],
-                "labels": [
-                    "默认（QQ 头像）",
-                    "自定义上传"
-                ],
-                "hint": "默认会自动读取 Bot 的 QQ 头像；选择自定义上传后，在下面上传一张图片。"
-            },
-            "avatar_upload_files": {
-                "description": "上传头像图片",
-                "type": "file",
+            "rules": {
+                "description": "通知规则",
+                "type": "template_list",
                 "default": [],
-                "file_types": [
-                    "png",
-                    "jpg",
-                    "jpeg",
-                    "webp",
-                    "gif"
-                ],
-                "condition": {
-                    "avatar_source": "upload"
-                },
-                "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
-            },
-            "avatar_text": {
-                "description": "状态图显示的 Bot 名称",
-                "type": "string",
-                "default": "",
-                "hint": "留空自动读取 QQ 昵称；只影响卡片上的文字。"
-            }
-        }
-    },
-    "background": {
-        "description": "背景",
-        "type": "object",
-        "hint": "默认使用内置背景。想换背景时，把“背景来源”改为“自定义上传”，再上传一张图片即可。",
-        "items": {
-            "background_source": {
-                "description": "背景来源",
-                "type": "string",
-                "default": "default",
-                "options": [
-                    "default",
-                    "upload"
-                ],
-                "labels": [
-                    "默认（内置背景）",
-                    "自定义上传"
-                ],
-                "hint": "默认使用插件自带背景；选择自定义上传后，在下面上传一张图片。"
-            },
-            "bg_upload_files": {
-                "description": "上传背景图片",
-                "type": "file",
-                "default": [],
-                "file_types": [
-                    "png",
-                    "jpg",
-                    "jpeg",
-                    "webp",
-                    "gif"
-                ],
-                "condition": {
-                    "background_source": "upload"
-                },
-                "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
+                "hint": "多数情况不用配：所有通知都发同一个群时，保持本组为空（不添加条目），只填「告警与每日定时状态图 → 推送目标」一处即可，服务监测和日报留空会自动复用。\n需要配的情况：把不同类型发到不同群，例如资源告警发运维群、日报发主群；一条规则填一个目标，勾选它要接收的类型。\n覆盖关系：某个类型被任意规则勾选后，该类型的通知只发到规则目标，并忽略各模块自己的「推送目标」；没被勾选的类型继续用各模块的目标。清空全部规则 = 完全回到旧行为（与不配通知中心一样）。",
+                "templates": {
+                    "rule": {
+                        "name": "通知规则",
+                        "items": {
+                            "enabled": {
+                                "description": "启用该规则",
+                                "type": "bool",
+                                "default": true,
+                                "hint": "停用后这条规则不生效，相当于删掉（但保留配置）。"
+                            },
+                            "target": {
+                                "description": "推送目标",
+                                "type": "string",
+                                "default": "",
+                                "hint": "QQ 群号（如 123456789）或完整 UMO（如 default:GroupMessage:123456789）。"
+                            },
+                            "kinds": {
+                                "description": "接收的通知类型",
+                                "type": "list",
+                                "default": [],
+                                "options": [
+                                    "resource",
+                                    "service",
+                                    "offline",
+                                    "provider",
+                                    "daily",
+                                    "weekly",
+                                    "daily_image"
+                                ],
+                                "labels": [
+                                    "资源告警",
+                                    "服务监测告警",
+                                    "掉线/恢复",
+                                    "LLM 服务告警",
+                                    "每日日报",
+                                    "每周周报",
+                                    "每日定时状态图"
+                                ],
+                                "render_type": "checkbox",
+                                "hint": "勾选这条规则要接收的通知类型；一个类型可以被多条规则勾选（会发到多个群）。留空 = 该规则不生效。"
+                            }
+                        }
+                    }
+                }
             }
         }
     }
