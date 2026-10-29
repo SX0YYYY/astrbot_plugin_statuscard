@@ -156,7 +156,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "daily_report_no_targets",
-                "每日日报已启用，但没有可用的推送目标（通知中心无 daily 规则，"
+                "趋势日报已启用，但没有可用的推送目标（通知中心无 daily 规则，"
                 "默认推送目标也为空），日报不会发送。",
             )
         )
@@ -165,7 +165,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "weekly_report_no_targets",
-                "每周周报已启用，但没有可用的推送目标（通知中心无 weekly 规则，"
+                "周报已启用，但没有可用的推送目标（通知中心无 weekly 规则，"
                 "默认推送目标也为空），周报不会发送。",
             )
         )
