@@ -39,6 +39,28 @@ REQUIRED_FIELDS = {
     "systemd": "unit",
 }
 
+# Probe failures that mean the probe itself is misconfigured (missing binary,
+# no permission, wrong container/unit name, daemon not reachable) rather than
+# the service being down. Counting them as outages produced a fake alert every
+# cooldown forever -- the same trap the TCP-port validation already avoids.
+_CONFIG_ERROR_HINTS = (
+    "permission denied",
+    "system has not been booted with systemd",
+    "could not be found",
+    "no such file or directory",
+    "executable not found",
+    "command not found",
+    "docker: not found",
+    "cannot connect to the docker daemon",
+)
+
+CONFIG_ERROR_PREFIX = "配置错误: "
+
+
+def _looks_like_config_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(hint in lowered for hint in _CONFIG_ERROR_HINTS)
+
 
 def _now_text(config: Any = None) -> str:
     if config is None:
@@ -431,17 +453,68 @@ class ServiceMonitor:
         name = str(item.get("name") or item.get("__template_key") or "服务")
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
 
+        if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
+            # Misconfiguration is not an outage: warn once, never alert.
+            st["last_checked"] = now
+            st["last_error"] = detail
+            st["fails"] = 0
+            if not st.get("config_error_warned"):
+                st["config_error_warned"] = True
+                logger.warning(
+                    "监测项 %s 探测配置错误，已跳过告警"
+                    "（请检查容器名/unit 名/权限）: %s",
+                    name,
+                    detail,
+                )
+            states[key] = st
+            return
+
         if self._is_silenced():
-            # Keep the check history fresh but freeze alert state so the
-            # maintenance window never emits alerts or recovery messages.
+            # The maintenance window mutes the push, not the state machine.
+            # Freezing it entirely meant a fault that started and ended inside
+            # the window left no event at all, and one that outlived it
+            # reported the whole window as the outage duration.
             st["last_checked"] = now
             if ok:
                 st["last_ok"] = now
                 st["last_error"] = ""
+                started = float(st.pop("silent_since", 0) or 0)
+                if started:
+                    self._record_event(
+                        name,
+                        target_text,
+                        f"{detail}（维护静默期内，未推送）",
+                        "alert",
+                    )
+                    self._record_event(
+                        name,
+                        target_text,
+                        f"持续 {format_duration(now - started)}"
+                        "（维护静默期内，未推送）",
+                        "recovery",
+                    )
             else:
                 st["last_error"] = detail
+                st.setdefault("silent_since", now)
             states[key] = st
             return
+
+        # A fault that became healthy right at the end of the window: record
+        # it with the real start time instead of dropping the episode.
+        silent_since = float(st.pop("silent_since", 0) or 0)
+        if silent_since and ok:
+            self._record_event(
+                name,
+                target_text,
+                f"{detail}（维护静默期内，未推送）",
+                "alert",
+            )
+            self._record_event(
+                name,
+                target_text,
+                f"持续 {format_duration(now - silent_since)}（维护静默期内，未推送）",
+                "recovery",
+            )
 
         if not ok and not alerting:
             suppressed_by = self._suppress_alert(item)
@@ -465,9 +538,32 @@ class ServiceMonitor:
             st["last_checked"] = now
             if will_alert:
                 next_attempt = float(st.get("next_attempt") or 0)
-                if now >= next_attempt and (
-                    not last_sent or now - last_sent >= self.cooldown
-                ):
+                if last_sent and now - last_sent < self.cooldown:
+                    # Inside the cooldown: latch the episode and record one
+                    # event (with the suppression noted) instead of vanishing.
+                    # Staying silent here meant an entire outage never reached
+                    # the event log and the recovery notice later arrived
+                    # without any matching alert -- the defect v2.18.1 fixed
+                    # for the resource rules.
+                    st["alerting"] = True
+                    st["alerted"] = False
+                    st["since"] = now
+                    st["last_attempt"] = now
+                    st["fails"] = 0
+                    st["pending"] = False
+                    self._record_event(
+                        name,
+                        target_text,
+                        f"{detail}（冷却窗口内仅记录，未重复推送）",
+                        "alert",
+                    )
+                    logger.info(
+                        "监测项 %s 在冷却窗口内再次异常，已记录事件不重复推送",
+                        name,
+                    )
+                    states[key] = st
+                    return
+                if now >= next_attempt:
                     # A second failure after a recovery notice could not be
                     # delivered used to drop that notice silently. Fold it
                     # into the new alert instead of losing the fact that the
@@ -491,6 +587,7 @@ class ServiceMonitor:
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
                     st["alerting"] = True
+                    st["alerted"] = True
                     st["since"] = now
                     st["last_attempt"] = now
                     st["fails"] = 0
@@ -553,6 +650,10 @@ class ServiceMonitor:
                         st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 stale = bool(st.pop("stale", False))
+                # Only announce a recovery for an episode that actually
+                # reached the operator; a cooldown-suppressed one is logged
+                # but stays silent (same rule as the resource alerts).
+                notified = bool(st.pop("alerted", True))
                 duration = now - float(st.get("since") or now)
                 st["alerting"] = False
                 st["since"] = 0
@@ -562,7 +663,7 @@ class ServiceMonitor:
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
                 self._record_event(name, target_text, detail, "recovery")
-                if self.recover_notify and not stale:
+                if self.recover_notify and not stale and notified:
                     extra = "\n（异常告警此前未能送达）" if pending else ""
                     text = (
                         f"✅ 服务恢复 · {name}\n"
@@ -693,6 +794,12 @@ class ServiceMonitor:
                     detail = (
                         proc.stderr or proc.stdout or "docker inspect 失败"
                     ).strip()
+                    if _looks_like_config_error(detail):
+                        return (
+                            False,
+                            f"{CONFIG_ERROR_PREFIX}{detail[:180]}",
+                            container,
+                        )
                     return False, detail[:200], container
                 running = proc.stdout.strip().lower() == "true"
                 return running, f"容器 running={running}", container
@@ -735,6 +842,12 @@ class ServiceMonitor:
                     timeout=timeout,
                 )
                 state_text = (proc.stdout or proc.stderr or "unknown").strip()
+                if _looks_like_config_error(state_text):
+                    return (
+                        False,
+                        f"{CONFIG_ERROR_PREFIX}{unit}: {state_text[:180]}",
+                        unit,
+                    )
                 return state_text == "active", f"{unit}: {state_text}", unit
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", unit

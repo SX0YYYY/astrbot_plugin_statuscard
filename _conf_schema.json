@@ -565,6 +565,9 @@
                         "description": "不参与广播的群号",
                         "type": "list",
                         "default": [],
+                        "items": {
+                            "type": "string"
+                        },
                         "hint": "填 QQ 群号（纯数字），这些群不参与广播。"
                     },
                     "interval_seconds": {

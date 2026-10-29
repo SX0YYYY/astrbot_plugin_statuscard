@@ -22,6 +22,7 @@ from .collectors import (
     cfg_float,
     cfg_get,
     cfg_int,
+    disk_usage,
     format_bytes,
     format_duration,
     memory_stat,
@@ -508,7 +509,13 @@ class AlertEngine:
         except Exception:
             pass
         try:
-            disk = psutil.disk_usage(disk_path)
+            # One implementation shared with the card, the report and the
+            # dashboard: used/total. psutil's percent excludes the ext4
+            # root-reserved blocks and would alert on a different scale than
+            # the number the user reads on the card.
+            disk = disk_usage([disk_path])[0]
+            if disk.percent is None or disk.used is None or disk.total is None:
+                raise RuntimeError(disk.exception or "磁盘信息不可用")
             await self._evaluate(
                 "disk",
                 f"磁盘使用率 ({disk_path})",
@@ -572,10 +579,23 @@ class AlertEngine:
         if threshold <= 0:
             # A threshold of 0 (slider misjudged as "rule off") would make
             # "value >= threshold" true for every sample and stick the rule
-            # in alerting forever; treat it as disabled instead.
+            # in alerting forever; treat it as disabled instead. Closing the
+            # open interruption matters: without a recovery event the alert
+            # stayed "unresolved" in the daily report for up to 30 days.
+            was_alerting = alerting
             st["count"] = 0
             st["alerting"] = False
             st["alerted"] = False
+            st["alert_since"] = 0
+            st["retry_count"] = 0
+            st["next_attempt"] = 0
+            if was_alerting:
+                self._record_event(
+                    "resource",
+                    name,
+                    "阈值改为 0，规则已停用",
+                    "recovery",
+                )
             return
 
         if value >= threshold:
@@ -602,6 +622,15 @@ class AlertEngine:
                     return
                 next_attempt = float(st.get("next_attempt") or 0)
                 if now >= next_attempt:
+                    # A recovery notice that never got through is folded into
+                    # this alert. Retrying it separately after a new episode
+                    # produced two "recovered" messages, the first one quoting
+                    # the previous episode's numbers (2026-10-29 审计实测).
+                    had_pending = bool(st.pop("pending_recovery", None))
+                    if had_pending:
+                        st.pop("recovery_attempt", None)
+                        st.pop("recovery_next_attempt", None)
+                        st.pop("recovery_retry_count", None)
                     text = (
                         f"⚠️ 系统告警 · {name}\n"
                         "──────────────\n"
@@ -610,6 +639,8 @@ class AlertEngine:
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.sustain} 个采样周期超过阈值。"
                     )
+                    if had_pending:
+                        text += "\n（上一次的恢复通知未送达，已并入本条）"
                     result = await self._push_alert(
                         name, f"{value_text}（阈值 {threshold:.1f}{unit}）", text
                     )
@@ -1072,9 +1103,11 @@ class AlertEngine:
                 last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown
             )
             if in_cooldown:
-                # Latch and record without pushing: the event log keeps the
-                # incident and the recovery notice tells the rest of it.
+                # Latch and record without pushing. ``alerted=False`` keeps
+                # the recovery notice from arriving without a matching alert
+                # -- the exact defect v2.18.1 fixed for the resource rules.
                 watch["alerting"] = True
+                watch["alerted"] = False
                 watch["last_streak"] = streak
                 self.state.save()
                 self._record_event(
@@ -1091,6 +1124,9 @@ class AlertEngine:
             result = await self._send(text, source="provider", kind="provider")
             delivered = self._delivered(result)
             watch["alerting"] = True
+            # A failed push still owes the user an explanation, which the
+            # recovery notice carries; only cooldown suppression is silent.
+            watch["alerted"] = True
             watch["last_alert_ts"] = now
             watch["last_streak"] = streak
             self.state.save()
@@ -1114,6 +1150,9 @@ class AlertEngine:
 
         if alerting and latest == "completed":
             watch["alerting"] = False
+            # Only announce a recovery for an episode that actually reached
+            # the user; a cooldown-suppressed one is logged but silent.
+            notified = bool(watch.pop("alerted", True))
             self.state.save()
             self._record_event(
                 "provider",
@@ -1121,7 +1160,7 @@ class AlertEngine:
                 "最近一次 LLM 调用成功",
                 "recovery",
             )
-            if self.recover_notify:
+            if self.recover_notify and notified:
                 last_streak = int(watch.get("last_streak") or 0)
                 text = (
                     "✅ 已恢复 · LLM 服务\n"

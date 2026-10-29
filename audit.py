@@ -106,6 +106,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     resource_targets = resolve_targets(config, "resource")
     if resource_targets is None:
         resource_targets = alerts_targets
+    offline_targets = resolve_targets(config, "offline")
+    if offline_targets is None:
+        offline_targets = alerts_targets
     monitor_targets = _effective_targets(
         config, "monitors.targets", platform_id, "service"
     )
@@ -129,6 +132,16 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
+    if monitors_on and monitor is not None and not monitor.items:
+        # "Enabled but empty" is the classic silent configuration: the switch
+        # looks on, nothing is probed, and only a log line says so.
+        issues.append(
+            AuditIssue(
+                "warning",
+                "monitors_no_items",
+                "服务监测已启用，但监测项列表为空，不会有任何探测或告警。",
+            )
+        )
     if monitors_on:
         for problem in (
             _monitor_config_errors(config)
@@ -141,14 +154,25 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             ]
         ):
             issues.append(AuditIssue("warning", "monitor_item_config", problem))
-    if alerts_on and not resource_targets:
+    if alerts_on and not resource_targets and not offline_targets:
         issues.append(
             AuditIssue(
                 "error",
                 "alerts_no_targets",
-                "资源与掉线告警已启用，但没有可用的推送目标（通知中心无 resource 规则，"
-                "默认推送目标也为空），告警不会送达任何会话。"
+                "资源与掉线告警已启用，但两类都没有可用的推送目标（通知中心无 resource/"
+                "offline 规则，默认推送目标也为空），告警不会送达任何会话。"
                 "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
+            )
+        )
+    elif alerts_on and not offline_targets:
+        # The offline rule has its own notification kind: a rule that only
+        # covers "resource" leaves disconnect notices without a destination.
+        issues.append(
+            AuditIssue(
+                "warning",
+                "alerts_offline_no_targets",
+                "掉线 / 恢复通知没有可用的推送目标（通知中心无 offline 规则，"
+                "默认推送目标也为空），掉线时不会收到消息。",
             )
         )
     if daily_on and not daily_targets:
@@ -196,6 +220,49 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "默认推送目标也为空），连续失败时不会送达任何会话。",
                 )
             )
+    # A Webhook that cannot start is worth more than a log line in the
+    # background: the switch looks on, nothing listens, and no other surface
+    # reflects the refusal.
+    if cfg_bool(config, "alerts.komari_webhook.enabled", False):
+        webhook_token = str(
+            cfg_get(config, "alerts.komari_webhook.token", "") or ""
+        ).strip()
+        webhook_host = str(
+            cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or ""
+        ).strip()
+        if cfg_bool(config, "alerts.komari_webhook.require_token", True) and not (
+            webhook_token
+        ):
+            issues.append(
+                AuditIssue(
+                    "error",
+                    "webhook_no_token",
+                    "Komari Webhook 已启用且勾选了「强制要求 Token」，但没有填写 Token，"
+                    "Webhook 会拒绝启动。请填写 Token 或关闭该开关。",
+                )
+            )
+        elif webhook_host in ("0.0.0.0", "::", "") and not webhook_token:
+            issues.append(
+                AuditIssue(
+                    "error",
+                    "webhook_open_no_token",
+                    "Komari Webhook 监听所有网卡（0.0.0.0）却没有设置 Token，"
+                    "出于安全考虑会拒绝启动。请设置 Token 或改回 127.0.0.1。",
+                )
+            )
+    if cfg_bool(config, "alerts.offline_broadcast.enabled", False) and not cfg_bool(
+        config, "alerts.enabled", False
+    ):
+        # Disconnect detection lives inside the alert loop; with the alert
+        # switch off the broadcast can never fire.
+        issues.append(
+            AuditIssue(
+                "warning",
+                "offline_broadcast_requires_alerts",
+                "「掉线恢复全群广播」已开启，但「启用资源与掉线告警」未开启："
+                "掉线检测不会运行，广播也不会触发。请先打开告警总开关。",
+            )
+        )
     if alerts_on:
         # A threshold of 0 disables the rule (see AlertEngine._evaluate); the
         # audit only needs to make that silent behaviour discoverable.

@@ -1314,7 +1314,9 @@
       );
     }
     const qq = data.qq || {};
-    if (qq.yesterday) {
+    // `yesterday` is an object even when the section is hidden or empty, so
+    // testing it alone rendered a block of "--" instead of the reason.
+    if (qq.available && qq.yesterday) {
       const yesterday = qq.yesterday;
       blocks.push(
         '<div class="detail-block"><h3>' +
@@ -1821,7 +1823,6 @@
     button.dataset.armed = "";
     button.classList.remove("verify-armed");
     clearTimeout(verifyArmTimer);
-    const original = button.textContent;
     button.disabled = true;
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");
@@ -1840,7 +1841,9 @@
       }
     } finally {
       button.disabled = false;
-      button.textContent = original;
+      // Restore the real label, not whatever the arm step last wrote: it was
+      // captured after arming, so the button stayed "再点一次确认发送".
+      button.textContent = t("verify_targets", "验证推送目标");
     }
   }
 

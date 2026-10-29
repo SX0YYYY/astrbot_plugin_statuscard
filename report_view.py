@@ -681,7 +681,10 @@ class DailyReportBuilder:
             if status in {"alert", "failed"}:
                 # A "failed" row means the fault happened but its push did
                 # not arrive; it still starts an interruption for pairing.
-                open_alerts[key] = int(alert.get("ts") or 0)
+                # setdefault keeps the earliest start of one episode: a
+                # failed push followed by a successful retry must not move
+                # the start time three minutes later.
+                open_alerts.setdefault(key, int(alert.get("ts") or 0))
             elif status == "recovery":
                 # A recovery before the window closes the alert for pairing
                 # purposes; otherwise a later recovery could be matched with
@@ -689,6 +692,7 @@ class DailyReportBuilder:
                 open_alerts.pop(key, None)
         items: list[dict[str, Any]] = []
         count = 0
+        episode_open: set[tuple[str, str, str]] = set()
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
@@ -699,7 +703,7 @@ class DailyReportBuilder:
             )
             resolved_ts = event.get("resolved_ts")
             if status in {"alert", "failed"}:
-                open_alerts[key] = int(event.get("ts") or 0)
+                open_alerts.setdefault(key, int(event.get("ts") or 0))
             if str(event.get("day") or "") not in window_days:
                 continue
             if status not in {"alert", "recovery", "failed"}:
@@ -707,19 +711,26 @@ class DailyReportBuilder:
             duration_text = "--"
             if status == "recovery":
                 start = open_alerts.pop(key, None)
+                episode_open.discard(key)
                 if start:
                     duration_text = format_duration(int(event.get("ts") or 0) - start)
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
             elif status in {"alert", "failed"}:
+                if key in episode_open:
+                    # One interruption can leave both a "failed" row (the
+                    # first push did not arrive) and an "alert" row (the
+                    # retry succeeded). They are the same episode: keep the
+                    # earlier row and count it once.
+                    continue
+                episode_open.add(key)
+                count += 1
                 if resolved_ts:
                     duration_text = format_duration(
                         int(resolved_ts) - int(event.get("ts") or 0)
                     )
                 else:
                     duration_text = "进行中"
-            if status in {"alert", "failed"}:
-                count += 1
             # A weekly window spans several days, so a bare "HH:MM" cannot
             # locate the event inside it.
             time_format = "%H:%M" if span == 1 else "%m-%d %H:%M"
@@ -1155,7 +1166,7 @@ class DailyReportBuilder:
             "targets": targets,
             "chart": chart,
             "history_note": history_note,
-            "note": "延迟为 HTTP 请求耗时，可用率按“无网络错误”统计；目标复用状态卡的网站测试设置。",
+            "note": "延迟为 HTTP 请求耗时，可用率按响应状态码 2xx/3xx 统计；目标复用状态卡的网站测试设置。",
         }
 
     # ------------------------------------------------------------------

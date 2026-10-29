@@ -25,6 +25,23 @@ from astrbot.api import logger
 
 from .onebot_receipt import send_direct, should_retry_send
 
+# Failures that happen before the request can reach the platform: a broken
+# message chain (Comp.Image on a missing file), a framework signature change,
+# a bad local path. None of them can have delivered anything, so they must be
+# reported as "definitely not sent" instead of "maybe already sent" -- the
+# latter silently disables alerts and produces recovery notices for faults the
+# user was never told about.
+_LOCAL_SEND_ERRORS: tuple[type[BaseException], ...] = (
+    TypeError,
+    AttributeError,
+    NameError,
+    ImportError,
+    FileNotFoundError,
+    IsADirectoryError,
+    PermissionError,
+    ValueError,
+)
+
 
 @dataclass
 class DeliveryResult:
@@ -204,6 +221,19 @@ class DeliveryService:
                 return False, True
             except Exception as exc:
                 detail = str(exc) or exc.__class__.__name__
+                if isinstance(exc, _LOCAL_SEND_ERRORS):
+                    # Raised before anything reached the platform: a broken
+                    # message chain, a framework signature change, a missing
+                    # local file. Treating these as "maybe already sent" made
+                    # every alert a silent no-op (no retry, no failure event,
+                    # and recovery notices for faults nobody was told about).
+                    logger.error(
+                        "主动发送%s到 %s 在本地失败（请求未发出）: %s",
+                        label,
+                        target,
+                        detail,
+                    )
+                    return False, False
                 if not should_retry_send(exc):
                     logger.warning(
                         "主动发送%s到 %s 未确认送达（可能已发出，不重发以免重复）: %s",

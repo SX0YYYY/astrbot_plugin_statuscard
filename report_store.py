@@ -357,14 +357,21 @@ class ReportStore:
                 (day, friends, groups, members, recv_total, complete, captured_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(day) DO UPDATE SET
-                friends = excluded.friends,
-                groups = excluded.groups,
-                members = excluded.members,
-                recv_total = excluded.recv_total,
+                -- Merge per column: a retry that only recovered recv_total
+                -- must not wipe the QQ counts an earlier attempt stored (and
+                -- vice versa), which used to leave the day permanently "--".
+                friends = COALESCE(excluded.friends, daily_snapshots.friends),
+                groups = COALESCE(excluded.groups, daily_snapshots.groups),
+                members = COALESCE(excluded.members, daily_snapshots.members),
+                recv_total = COALESCE(
+                    excluded.recv_total, daily_snapshots.recv_total
+                ),
                 -- A backfill of a late recv_total must not downgrade a
                 -- complete snapshot back to incomplete.
                 complete = MAX(daily_snapshots.complete, excluded.complete),
-                captured_at = excluded.captured_at
+                captured_at = COALESCE(
+                    excluded.captured_at, daily_snapshots.captured_at
+                )
             WHERE daily_snapshots.complete = 0
                OR (
                     daily_snapshots.recv_total IS NULL
@@ -435,7 +442,15 @@ class ReportStore:
         forever and keep showing up in the daily report.
         """
 
-        conditions = ["resolved_ts IS NULL", "status = 'alert'", "name = ?", "ts <= ?"]
+        conditions = [
+            "resolved_ts IS NULL",
+            # A failed push still marks the start of an interruption; closing
+            # only 'alert' rows left every failed one open forever ("进行中"
+            # in the daily report even after the service recovered).
+            "status IN ('alert', 'failed')",
+            "name = ?",
+            "ts <= ?",
+        ]
         case_params: list[Any] = [name, int(ts)]
         if kind is not None:
             conditions.append("kind = ?")

@@ -17,6 +17,7 @@ from .collectors import (
     cfg_int,
     collect_bot_info,
     connection_test,
+    disk_usage,
     memory_stat,
     now_in_timezone,
     resolve_targets,
@@ -49,6 +50,23 @@ def _delivered(result: Any) -> bool:
     if isinstance(result, DeliveryResult):
         return result.ok
     return bool(result)
+
+
+def _website_ok(status: Any) -> bool:
+    """Available means 2xx/3xx.
+
+    A 502/500 is the server answering while the endpoint is broken; the old
+    rule only treated a transport error as downtime, so a dead backend behind
+    a live proxy still reported "可用率 100%".
+    """
+
+    text = str(status or "")
+    if text == "ERR":
+        return False
+    try:
+        return 200 <= int(text) < 400
+    except ValueError:
+        return False
 
 
 def _uncertain(result: Any) -> bool:
@@ -221,7 +239,11 @@ class ReportCollector:
                 disk_path = str(disk_paths[0])
             else:
                 disk_path = os.path.abspath(os.sep)
-            disk_pct = float(psutil.disk_usage(disk_path).percent)
+            # Same denominator as the status card, the disk alert and the
+            # dashboard: used/total. psutil's own percent drops the
+            # filesystem's root-reserved blocks and reads 2-3 points higher.
+            rows = disk_usage([disk_path])
+            disk_pct = rows[0].percent if rows else None
         except Exception:
             disk_pct = None
         load1: float | None = None
@@ -336,7 +358,7 @@ class ReportCollector:
             samples = [
                 {
                     "name": item.name,
-                    "ok": item.status != "ERR",
+                    "ok": _website_ok(item.status),
                     "latency_ms": item.delay,
                     "status": item.status,
                 }
@@ -998,7 +1020,11 @@ class DailyReporter:
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 target += timedelta(days=(6 - target.weekday()) % 7)
                 if target <= now:
-                    target += timedelta(days=7)
+                    if self._weekly_catch_up_allowed():
+                        logger.info("周报定时点已过且本周尚未发送，立即补发一次")
+                        target = now
+                    else:
+                        target += timedelta(days=7)
                 if last_logged != target:
                     self._weekly_next_run_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
@@ -1293,6 +1319,32 @@ class DailyReporter:
         if not self._last_attempt_day:
             return False
         return not (self._last_sent_day == today or self._last_attempt_day == today)
+
+    @staticmethod
+    def _week_key(day: str) -> str:
+        try:
+            iso = date.fromisoformat(day).isocalendar()
+        except ValueError:
+            iso = date.today().isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+
+    def _weekly_catch_up_allowed(self) -> bool:
+        """Whether a missed weekly window may be sent right now.
+
+        The daily report already catches up; the weekly one did not, so a
+        reload at 21:29 silently skipped the whole week. Two guards keep it
+        safe: a missing marker means a first install or an upgrade, and the
+        catch-up only runs on the trigger day itself -- a Monday restart must
+        not deliver last week's report in the middle of a new week.
+        """
+
+        if not self._weekly_last_sent_week:
+            return False
+        now = now_in_timezone(self.config)
+        if now.weekday() != 6:
+            return False
+        report_day = (now - timedelta(days=1)).date().isoformat()
+        return self._weekly_last_sent_week != self._week_key(report_day)
 
     async def _send_scheduled(self, day: str | None = None) -> None:
         self._last_attempt_day = self._today()

@@ -581,9 +581,27 @@ def test_alert_failure_uses_short_retry(tmp_path: Path) -> None:
     assert 0 < rule["next_attempt"] - time.time() <= 31
 
 
-def test_pending_recovery_survives_renewed_threshold(
+class _RecordingPlugin:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def send_text(
+        self, targets: list[str], text: str, source: str = "unknown"
+    ) -> bool:
+        self.texts.append(text)
+        return True
+
+
+def test_pending_recovery_folded_into_new_alert(
     tmp_path: Path,
 ) -> None:
+    """An undelivered recovery notice is folded into the next alert.
+
+    Keeping it queued and retrying it after a new episode produced two
+    "recovered" messages, the first one quoting the previous episode's
+    numbers (2026-10-29 审计实测). The monitor engine already folded it.
+    """
+
     state = StateStore(tmp_path / "state.json")
     state.data["alerts"] = {
         "rules": {
@@ -601,10 +619,13 @@ def test_pending_recovery_survives_renewed_threshold(
             "cooldown_seconds": 1800,
         }
     }
-    engine = AlertEngine(_FailingPlugin(), state, config)
+    plugin = _RecordingPlugin()
+    engine = AlertEngine(plugin, state, config)
     asyncio.run(engine._evaluate("cpu", "CPU", 99.0, 85.0, "%", "99.0%"))
     rule = state.data["alerts"]["rules"]["cpu"]
-    assert rule["pending_recovery"] == "✅ recovered"
+    assert "pending_recovery" not in rule
+    assert plugin.texts, "the new alert must still be sent"
+    assert "已并入本条" in plugin.texts[0]
 
 
 class _DailyPlugin:

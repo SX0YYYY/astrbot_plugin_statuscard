@@ -35,6 +35,7 @@ class _Bucket:
     pending: list[tuple[str, str]] = field(default_factory=list)
     flush_task: asyncio.Task | None = None
     send: SendFn | None = None
+    retries: int = 0
 
 
 class AlertAggregator:
@@ -87,17 +88,27 @@ class AlertAggregator:
         key = str(kind or "default")
         bucket = self._bucket(key)
         if not (self.window_seconds > 0 and time.time() < bucket.until):
-            result = await send(text)
+            # Claim the window *before* awaiting ``send``. Claiming it after
+            # the await meant concurrent alerts (monitor.check_all probes all
+            # targets in parallel) both took this "first alert" branch, and
+            # whichever send returned last then reset ``bucket.pending`` and
+            # silently dropped every follow-up buffered in between -- while
+            # those rules still latched ``alerting=True`` and would later send
+            # a recovery notice for a fault the user never saw.
             if self.window_seconds > 0:
                 bucket.until = time.time() + self.window_seconds
-                # The first alert was delivered on its own; it must not be
-                # repeated in the follow-up summary. Only alerts that arrive
-                # inside the window need merging, so a single alert never
-                # produces an extra "1 item" summary.
-                bucket.pending = []
                 bucket.send = send
                 self._schedule_flush(key)
-            return result
+            try:
+                return await send(text)
+            except BaseException:
+                # Nothing reached the chat and nothing is buffered yet:
+                # release the window so the next alert is sent on its own
+                # instead of waiting for a summary that would never exist.
+                if self.window_seconds > 0:
+                    bucket.until = 0.0
+                    bucket.send = None
+                raise
         bucket.pending.append((label, reason))
         # Keep a bounded buffer (max_items are listed, the rest are counted).
         del bucket.pending[: max(0, len(bucket.pending) - self.max_items * 2)]
@@ -186,16 +197,50 @@ class AlertAggregator:
         try:
             result = await sender("\n".join(lines))
             ok = bool(getattr(result, "ok", result))
-            if not ok:
-                logger.warning(
-                    "告警汇总发送未确认或失败（%s，%d 项）", key, len(pending)
-                )
+            if ok:
+                bucket.retries = 0
+                return
+            if getattr(result, "uncertain_targets", None):
+                # Possibly already in the chat: retrying would duplicate it.
+                logger.warning("告警汇总发送未确认（%s，%d 项）", key, len(pending))
+                return
+            self._requeue(bucket, pending, key, "发送失败")
         except Exception:
+            self._requeue(bucket, pending, key, "发送异常")
             logger.exception("告警汇总发送失败（%s）", key)
         finally:
             # Alerts that arrived during the send opened a new window and
             # need a task of their own once this one is no longer "running".
             self._schedule_if_pending(key)
+
+    def _requeue(
+        self,
+        bucket: _Bucket,
+        pending: list[tuple[str, str]],
+        key: str,
+        why: str,
+    ) -> None:
+        """Put an undelivered summary back instead of losing the batch.
+
+        A failed summary used to be dropped silently while every rule had
+        already latched ``alerting`` -- the user only ever saw the recovery
+        notices. Two retries are allowed, then the batch is abandoned with a
+        warning so a permanently broken channel cannot loop forever.
+        """
+
+        if bucket.retries >= 2:
+            logger.warning("告警汇总%s，%d 项放弃重试（%s）", why, len(pending), key)
+            return
+        bucket.retries += 1
+        bucket.pending[:0] = pending
+        del bucket.pending[: max(0, len(bucket.pending) - self.max_items * 2)]
+        logger.warning(
+            "告警汇总%s，%d 项放回队列等待重试（%s，第 %d 次）",
+            why,
+            len(pending),
+            key,
+            bucket.retries,
+        )
 
     async def stop(self) -> None:
         """Cancel pending summary tasks (plugin reload / shutdown)."""

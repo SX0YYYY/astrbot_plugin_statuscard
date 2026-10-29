@@ -29,6 +29,7 @@ from .collectors import (
     effective_media_source,
     fetch_avatar_bytes,
     notify_rules_active,
+    resolve_targets,
     uploaded_file_path,
 )
 from .delivery import DeliveryResult, DeliveryService
@@ -785,10 +786,20 @@ class StatusCardPlugin(Star):
                     + "）"
                 )
 
+        # Report the targets the alert engine will actually use: a
+        # notification-center rule overrides alerts.targets per kind, so
+        # counting the legacy list alone showed "0" while alerts still went
+        # out (or the reverse).
+        resource_targets = resolve_targets(self.config, "resource")
+        effective_targets = (
+            resource_targets
+            if resource_targets is not None
+            else list(self.alerts.targets)
+        )
         lines.append(
             "告警: "
             + ("开启" if cfg_bool(self.config, "alerts.enabled", False) else "关闭")
-            + f"，目标 {len(self.alerts.targets)} 个"
+            + f"，实际生效目标 {len(effective_targets)} 个"
         )
         daily_time = str(
             cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
@@ -805,9 +816,10 @@ class StatusCardPlugin(Star):
         lines.append(
             "通知中心: "
             + (
-                f"启用（{active_rules} 条有效规则，三处旧推送目标不再生效）"
+                f"启用（{active_rules} 条有效规则，被勾选的类型改发到规则目标，"
+                "未勾选的继续用默认推送目标）"
                 if active_rules
-                else "未启用（沿用三处推送目标）"
+                else "未启用（全部使用默认推送目标）"
             )
         )
         monitor_status = self.monitor.status()

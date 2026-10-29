@@ -26,6 +26,7 @@ from .collectors import (
     cfg_bool,
     cfg_get,
     cfg_int,
+    disk_usage,
     format_bytes,
     format_duration,
     get_timezone,
@@ -201,7 +202,10 @@ class PageApi:
         else:
             path = os.path.abspath(os.sep)
         try:
-            usage = psutil.disk_usage(path)
+            # Keep the dashboard on the same used/total scale as the card.
+            usage = disk_usage([path])[0]
+            if usage.percent is None or usage.used is None or usage.total is None:
+                raise RuntimeError(usage.exception or "磁盘信息不可用")
             return {
                 "path": path,
                 "percent": round(float(usage.percent), 1),
