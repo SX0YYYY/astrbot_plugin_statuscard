@@ -401,7 +401,10 @@ class ReportCollector:
         if self.store.snapshot_ready(day):
             return
         attempts = self._snapshot_attempts.get(day, 0)
-        if attempts >= 12:
+        # Keep retrying for the whole day (5-minute cadence): OneBot being
+        # unreachable between 00:05 and 01:05 used to leave friends/groups/
+        # members NULL for that day and the receive delta empty for two days.
+        if attempts >= 288:
             return
         if time.time() - self._last_snapshot_attempt < 300:
             return
@@ -819,13 +822,14 @@ class DailyReporter:
                     self._pending_image_retry_report_day = None
                     self._pending_image_retry_send_day = None
                     if send_day and send_day != self._today():
+                        # The report day is pinned, so the retry still sends
+                        # the same report rather than a new one. Dropping it
+                        # meant a 23:50 schedule lost the whole report when
+                        # the retry crossed midnight.
                         logger.warning(
-                            "日报图片重试已跨天，放弃本次重试（避免发送另一份报告）"
+                            "日报图片重试已跨天，继续用原报告日 %s 发送",
+                            report_day or "--",
                         )
-                        self._record(report_day or "", False, "image retry cross-day")
-                        self._save_delivery_state()
-                        await asyncio.sleep(60)
-                        continue
                     self._save_delivery_state()
                     try:
                         await self._send_scheduled(report_day)
@@ -954,13 +958,13 @@ class DailyReporter:
                     report_day = self._weekly_image_report_day
                     self._weekly_image_report_day = None
                     if report_day and report_day != self._default_report_day():
+                        # Same rule as the daily image retry: the report day is
+                        # pinned, so sending it late is still the same report.
+                        # Dropping it lost the whole week.
                         logger.warning(
-                            "周报图片重试已跨周，放弃本次重试（避免发送另一份周报）"
+                            "周报图片重试已跨周，继续用原报告日 %s 发送",
+                            report_day,
                         )
-                        self._record(report_day, False, "weekly-image retry cross-week")
-                        self._save_delivery_state()
-                        await asyncio.sleep(60)
-                        continue
                     self._save_delivery_state()
                     try:
                         await self._send_weekly_scheduled(report_day)

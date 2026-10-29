@@ -509,3 +509,12 @@ body {
   background: #451a03;
   color: #fcd34d;
 }
+
+/* Long unbroken strings (cloud FQDNs, container names, model ids) used to
+   overflow the 650px canvas and get clipped by the renderer. */
+.hero-right,
+.model-table td,
+.event-main strong,
+.stat-label {
+  overflow-wrap: anywhere;
+}

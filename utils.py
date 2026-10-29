@@ -131,6 +131,10 @@ def redact_url(url: Any) -> str:
     except Exception:
         return text
     if not parts.netloc:
+        # A bare "example.com/api?token=abc" has no scheme, so urlsplit puts
+        # everything in path and the query survives. Strip it explicitly.
+        stripped = text.split("#", 1)[0].split("?", 1)[0]
+        return stripped
         return text
     host = parts.hostname or ""
     if ":" in host and not host.startswith("["):

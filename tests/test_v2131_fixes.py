@@ -179,7 +179,7 @@ class _OfflinePlugin:
         return True
 
 
-def _run_offline(monkeypatch, tmp_path: Path, exc: BaseException):
+def _run_offline(monkeypatch, tmp_path: Path, exc: BaseException, times: int = 1):
     state = StateStore(tmp_path / "state.json")
     config = {
         "alerts": {
@@ -198,12 +198,15 @@ def _run_offline(monkeypatch, tmp_path: Path, exc: BaseException):
         raise exc
 
     monkeypatch.setattr(alerts_module, "_call_action", boom)
-    asyncio.run(engine._check_offline())
+    for _ in range(times):
+        asyncio.run(engine._check_offline())
     return state
 
 
 def test_api_not_available_counts_as_offline(monkeypatch, tmp_path: Path) -> None:
-    state = _run_offline(monkeypatch, tmp_path, ApiNotAvailable())
+    # Disconnect alerts use a fixed two-sample threshold, independent of
+    # ``sustain_samples`` (documented as affecting resource rules only).
+    state = _run_offline(monkeypatch, tmp_path, ApiNotAvailable(), times=2)
     offline = state.data["alerts"]["offline"]
     assert offline["alerting"] is True
 

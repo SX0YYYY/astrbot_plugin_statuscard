@@ -118,7 +118,7 @@ class PageApi:
 
     def __init__(self, plugin: Any):
         self.plugin = plugin
-        self._reports_cache: tuple[float, dict[str, Any]] | None = None
+        self._reports_cache: tuple[float, dict[str, Any], tuple] | None = None
         self._reports_cache_seconds = 60.0
 
     # ------------------------------------------------------------------
@@ -194,6 +194,19 @@ class PageApi:
             return resolve_astrbot_version(self.plugin.context)
         except Exception:
             return ""
+
+    def _mask_host_text(self, text: str) -> str:
+        """Hide probe errors that embed an internal host or address.
+
+        ``asyncio.open_connection`` failures read like
+        ``ConnectionRefusedError: [Errno 111] Connect call failed ('10.0.0.12', 9000)``
+        and used to reach the browser verbatim even with hostname redaction on.
+        """
+
+        value = str(text or "")
+        if not value or "hostname" not in self._redact():
+            return value
+        return "已隐藏（错误详情含主机或地址信息）"
 
     def _disk(self) -> dict[str, Any]:
         paths = cfg_get(self.plugin.config, "display.disk_paths", None)
@@ -323,7 +336,9 @@ class PageApi:
                     "status": status,
                     "last_checked": checked,
                     "last_ok": state.get("last_ok"),
-                    "last_error": str(state.get("last_error") or "")[:160],
+                    "last_error": self._mask_host_text(
+                        str(state.get("last_error") or "")[:160]
+                    ),
                     "config_error": config_error,
                 }
             )
@@ -498,10 +513,16 @@ class PageApi:
                     }
                 )
 
+            # Dozens of monitor targets used to be probed at once on a
+            # single click, which spikes the sites being watched and keeps the
+            # request open for the slowest probe.
+            semaphore = asyncio.Semaphore(6)
+
             async def probe_one(item: dict[str, Any]) -> dict[str, Any]:
                 started = time.perf_counter()
                 try:
-                    ok, detail, _target = await monitor._probe(item)
+                    async with semaphore:
+                        ok, detail, _target = await monitor._probe(item)
                 except Exception as exc:
                     ok, detail = False, f"探测异常: {exc.__class__.__name__}"
                 return {
@@ -582,7 +603,11 @@ class PageApi:
 
         kind = str(_query_value("kind", "resources")).lower()
         range_key = str(_query_value("range", "7d")).lower()
-        seconds = RANGE_SECONDS.get(range_key, 86400 * 7)
+        if range_key not in RANGE_SECONDS:
+            # /history already normalises; the export echoed the raw value
+            # while silently using the 7-day window.
+            range_key = "7d"
+        seconds = RANGE_SECONDS[range_key]
         end = int(time.time())
         start = end - seconds
         store = self.plugin.report_store
@@ -593,7 +618,10 @@ class PageApi:
                 store.list_resources, start, limit=limit + 1
             )
             truncated = len(fetched) > limit
-            rows = [row for row in fetched[:limit] if int(row.get("ts") or 0) <= end]
+            # list_resources returns ascending rows, so the newest ones are
+            # at the end; cutting [:limit] dropped the latest samples while
+            # the toast promised "the most recent records".
+            rows = [row for row in fetched[-limit:] if int(row.get("ts") or 0) <= end]
             if "network" in self._redact():
                 # The overview and history honour the network rule; the CSV
                 # export is a file people forward, so it must not leak the
@@ -616,8 +644,8 @@ class PageApi:
                 store.list_process_samples, start, end + 60, "mem", limit=half + 1
             )
             truncated = len(cpu_rows) > half or len(mem_rows) > half
-            rows = [dict(row) for row in cpu_rows[:half]]
-            rows += [dict(row) for row in mem_rows[:half]]
+            rows = [dict(row) for row in cpu_rows[-half:]]
+            rows += [dict(row) for row in mem_rows[-half:]]
             # process_samples stores the per-core percentage; the dashboard
             # shows whole-machine percentages. Export both so a CSV consumer
             # can tell which one it is looking at.
@@ -641,7 +669,20 @@ class PageApi:
                 store.list_events_range, start, end, limit=limit + 1
             )
             truncated = len(fetched) > limit
-            rows = fetched[:limit]
+            # Same whitelist as /events: the CSV is forwarded to other people
+            # and ``target`` carries probe URLs.
+            rows = [
+                {
+                    "ts": row.get("ts"),
+                    "day": row.get("day"),
+                    "kind": row.get("kind"),
+                    "name": row.get("name"),
+                    "detail": row.get("detail"),
+                    "status": row.get("status"),
+                    "resolved_ts": row.get("resolved_ts"),
+                }
+                for row in fetched[-limit:]
+            ]
         else:
             return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
         return jsonify(
@@ -782,8 +823,11 @@ class PageApi:
             tzinfo=tz,
         )
         # One range query instead of one connection per day.
-        events = self.plugin.report_store.list_events_range(
-            int(start_dt.timestamp()), int(time.time()) + 60, limit=2000
+        events = await asyncio.to_thread(
+            self.plugin.report_store.list_events_range,
+            int(start_dt.timestamp()),
+            int(time.time()) + 60,
+            limit=2000,
         )
         items: list[dict[str, Any]] = [
             {
@@ -813,6 +857,7 @@ class PageApi:
         return jsonify(
             {
                 "ok": True,
+                "counts_limit": 2000,
                 "days": days,
                 "items": items[:page_size],
                 "counts": counts,
@@ -828,8 +873,20 @@ class PageApi:
         plugin = self.plugin
         now_ts = time.time()
         fresh = str(_query_value("fresh", "0")) == "1"
+        # The cache key carries the date and the redaction rules: a single
+        # slot used to serve yesterday's report right after midnight, or an
+        # unredacted payload for a minute after page_redact was turned on.
+        cache_key = (
+            now_in_timezone(plugin.config).date().isoformat(),
+            tuple(sorted(self._redact())),
+        )
         cached = self._reports_cache
-        if cached and not fresh and now_ts - cached[0] < self._reports_cache_seconds:
+        if (
+            cached
+            and not fresh
+            and now_ts - cached[0] < self._reports_cache_seconds
+            and cached[2] == cache_key
+        ):
             return jsonify(cached[1])
         view: dict[str, Any] = {}
         try:
@@ -872,5 +929,5 @@ class PageApi:
             "process": view.get("process"),
             "runs": plugin.report_store.list_report_runs(limit=30),
         }
-        self._reports_cache = (now_ts, payload)
+        self._reports_cache = (now_ts, payload, cache_key)
         return jsonify(payload)

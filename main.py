@@ -754,7 +754,7 @@ class StatusCardPlugin(Star):
             pass
         lines.append(f"平台: {platform or '--'}")
         lines.append(f"插件: v{__version__}")
-        if platform and platform != "aiocqhttp":
+        if platform and not is_supported_platform(platform):
             lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
         platform_id = str(
@@ -848,8 +848,11 @@ class StatusCardPlugin(Star):
                 )
 
         audit = self.audit_issues()
-        if audit:
-            lines.append(f"配置体检: {len(audit)} 项待处理")
+        actionable = [item for item in audit if item.level in ("error", "warning")]
+        if actionable:
+            lines.append(f"配置体检: {len(actionable)} 项待处理")
+        elif audit:
+            lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
             for issue in audit[:4]:
                 tag = "错误" if issue.level == "error" else "提醒"
                 lines.append(f"  [{tag}] {issue.message}")

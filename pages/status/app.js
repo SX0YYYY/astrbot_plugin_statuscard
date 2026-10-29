@@ -1274,6 +1274,25 @@
 
   function reportDetails(data) {
     const blocks = [];
+    // The backend computes an empty_reason per section; dropping it left a
+    // blank page with no explanation for a fresh install or a disabled module.
+    const emptyReasons = ["resources", "token", "process", "website", "qq", "provider_quality"]
+      .map((key) => {
+        const section = data[key] || {};
+        return section.available === false && section.empty_reason
+          ? section.empty_reason
+          : null;
+      })
+      .filter(Boolean);
+    if (emptyReasons.length) {
+      blocks.push(
+        '<div class="detail-block"><h3>' +
+          esc(t("report_unavailable", "部分内容不可用")) +
+          '</h3><p class="muted">' +
+          emptyReasons.map(esc).join("<br>") +
+          "</p></div>",
+      );
+    }
     const resources = data.resources || {};
     if (resources.available && resources.yesterday) {
       const yesterday = resources.yesterday;
@@ -1550,7 +1569,7 @@
     const seq = ++state.reportsSeq;
     const data = await apiGet("reports", force ? { fresh: 1 } : undefined);
     if (seq !== state.reportsSeq) return;
-    if (!data || data.ok === false) {
+    if (!data || data.ok !== true) {
       throw new Error(
         t(
           (data && data.error_code) || "report_build_failed",
@@ -1731,7 +1750,7 @@
   function renderVerifyResult(kind, data) {
     const box = $("verify-result");
     if (!box) return;
-    if (!data || data.ok === false) {
+    if (!data || data.ok !== true) {
       box.innerHTML =
         '<div class="error-state"><p>' +
         esc((data && data.error) || t("verify_failed", "验证失败")) +

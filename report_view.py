@@ -218,10 +218,18 @@ def _line_chart(
                 )
 
     y_labels = []
-    for i in range(5):
-        value = maximum * i / 4
-        y = top + plot_h * (1 - i / 4)
-        y_labels.append({"y": round(y, 1), "text": y_formatter(value)})
+    if maximum <= 1:
+        # An all-zero series has nothing to scale: five ticks all collapse to
+        # "0"/"1" and read like duplicated axis labels.
+        for index in (0, 4):
+            value = maximum * index / 4
+            y = top + plot_h * (1 - index / 4)
+            y_labels.append({"y": round(y, 1), "text": y_formatter(value)})
+    else:
+        for i in range(5):
+            value = maximum * i / 4
+            y = top + plot_h * (1 - i / 4)
+            y_labels.append({"y": round(y, 1), "text": y_formatter(value)})
 
     # Ceiling keeps tick marks on the "nice" slots: for a 24-point hour axis
     # this yields 0/6/12/18/23 instead of 0/6/12/17/23.
@@ -345,11 +353,13 @@ class DailyReportBuilder:
             ),
         }
         if "resource" in selected:
-            view["resources"] = self._resource_section(target, previous, history_days)
+            view["resources"] = self._resource_section(
+                target, previous, history_days, span
+            )
         if "anomaly" in selected:
             view["anomalies"] = self._anomaly_section(target, previous, span)
         if "qq" in selected:
-            view["qq"] = self._qq_section(target, history_days)
+            view["qq"] = self._qq_section(target, history_days, span)
         if "token" in selected:
             view["token"] = self._token_section(target, history_days, span)
         if "provider" in selected:
@@ -442,7 +452,7 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _resource_section(
-        self, day: date, previous: date, history_days: int
+        self, day: date, previous: date, history_days: int, span: int = 1
     ) -> dict[str, Any]:
         start_day = day - timedelta(days=history_days - 1)
         start_ts = int(
@@ -591,6 +601,11 @@ class DailyReportBuilder:
         return {
             "available": available,
             "empty_reason": empty_reason,
+            # "较前日" is only meaningful for a single-day report; a weekly
+            # report compares against the previous period (or shows nothing
+            # when that window has no samples).
+            "delta_label": "较前日" if span == 1 else "较上期",
+            "hour_label": "昨日" if span == 1 else "最后一天",
             "first_day": first_day,
             "history_note": history_note,
             "coverage_note": coverage_note,
@@ -800,7 +815,10 @@ class DailyReportBuilder:
             if not items
             else None,
             "count": count,
-            "unresolved": len(unresolved_items),
+            # Episodes that started inside the window and never recovered are
+            # shown as "进行中" but were not counted here, so the headline said
+            # "未恢复 0 项" right above a row that said otherwise.
+            "unresolved": len(unresolved_items) + len(episode_open - set(stale.keys())),
             "total": len(items),
             "items": items[:20],
             "normal": {
@@ -842,7 +860,9 @@ class DailyReportBuilder:
     # QQ
     # ------------------------------------------------------------------
 
-    def _qq_section(self, day: date, history_days: int) -> dict[str, Any]:
+    def _qq_section(
+        self, day: date, history_days: int, span: int = 1
+    ) -> dict[str, Any]:
         if self.redactor.qq_stats:
             return {
                 "available": False,
@@ -1014,6 +1034,13 @@ class DailyReportBuilder:
                 "members": member_chart,
                 "traffic": traffic_chart,
             },
+            # The numbers above are a single snapshot + its daily delta, so a
+            # weekly report must not label them "最近 7 天".
+            "scope_label": (
+                f"{day.strftime('%m-%d')} 快照值与当日增量"
+                if span > 1
+                else f"最近 {history_days} 天"
+            ),
             "note": (
                 "发=platform_stats 发送动作次数；收=message_stats 跟踪群累计差值；"
                 "群员=各群 member_count 之和，跨群会重复计数。"
@@ -1027,19 +1054,50 @@ class DailyReportBuilder:
         if connection is None:
             return {}, None, False
         try:
-            rows = connection.execute(
-                """
-                SELECT substr(timestamp, 1, 10) AS day, SUM(count)
-                FROM platform_stats
-                WHERE platform_id = 'aiocqhttp'
-                  AND timestamp >= ? AND timestamp < ?
-                GROUP BY day
-                """,
-                (
-                    f"{start_day.isoformat()} 00:00:00",
-                    f"{(end_day + timedelta(days=1)).isoformat()} 00:00:00",
-                ),
-            ).fetchall()
+            server_offset = datetime.now().astimezone().utcoffset()
+            tz_offset = datetime.now(self.tz).utcoffset()
+            if server_offset == tz_offset:
+                # Same offset: grouping by the timestamp text is exact and
+                # keeps the primary-key index usable.
+                rows = connection.execute(
+                    """
+                    SELECT substr(timestamp, 1, 10) AS day, SUM(count)
+                    FROM platform_stats
+                    WHERE platform_id = 'aiocqhttp'
+                      AND timestamp >= ? AND timestamp < ?
+                    GROUP BY day
+                    """,
+                    (
+                        f"{start_day.isoformat()} 00:00:00",
+                        f"{(end_day + timedelta(days=1)).isoformat()} 00:00:00",
+                    ),
+                ).fetchall()
+                mapping = {str(day): int(count or 0) for day, count in rows}
+            else:
+                # ``platform_stats.timestamp`` is written in the *server's*
+                # local time while every other section converts UTC into
+                # display.timezone. When the two offsets differ the day
+                # boundary was hours off, so re-bucket here instead.
+                raw = connection.execute(
+                    """
+                    SELECT timestamp, count FROM platform_stats
+                    WHERE platform_id = 'aiocqhttp'
+                      AND timestamp >= ? AND timestamp < ?
+                    """,
+                    (
+                        f"{(start_day - timedelta(days=1)).isoformat()} 00:00:00",
+                        f"{(end_day + timedelta(days=2)).isoformat()} 00:00:00",
+                    ),
+                ).fetchall()
+                mapping = {}
+                for stamp, count in raw:
+                    try:
+                        local = datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
+                    except (TypeError, ValueError):
+                        continue
+                    key = local.astimezone(self.tz).date().isoformat()
+                    if start_day.isoformat() <= key <= end_day.isoformat():
+                        mapping[key] = mapping.get(key, 0) + int(count or 0)
             min_row = connection.execute(
                 """
                 SELECT MIN(substr(timestamp, 1, 10))
@@ -1050,7 +1108,6 @@ class DailyReportBuilder:
             return {}, None, False
         finally:
             connection.close()
-        mapping = {str(day): int(count or 0) for day, count in rows}
         min_day = str(min_row[0]) if min_row and min_row[0] else None
         return mapping, min_day, True
 

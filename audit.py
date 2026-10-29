@@ -9,6 +9,7 @@ shown on the dashboard, instead of being discovered by silence.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from .utils import normalize_targets
 class AuditIssue:
     """A single configuration finding shown to the operator."""
 
-    level: str  # "error" or "warning"
+    level: str  # "error", "warning" or "info"
     code: str  # stable identifier the dashboard can key on
     message: str
 
@@ -263,6 +264,24 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "掉线检测不会运行，广播也不会触发。请先打开告警总开关。",
             )
         )
+    # A hand-edited schedule like "9:00" (or "25:00") only logs a warning and
+    # the task never fires, while the diagnostics still show the raw value.
+    for enabled_key, time_key, label in (
+        ("daily_report.enabled", "daily_report.time", "趋势日报"),
+        ("alerts.daily_summary.enabled", "alerts.daily_summary.time", "每日定时状态图"),
+    ):
+        if not cfg_bool(config, enabled_key, False):
+            continue
+        raw = str(cfg_get(config, time_key, "") or "").strip()
+        if not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", raw):
+            issues.append(
+                AuditIssue(
+                    "error",
+                    "invalid_schedule_time",
+                    f"{label}的发送时间「{raw}」格式非法（应为 HH:MM），"
+                    "定时任务不会触发。",
+                )
+            )
     if alerts_on:
         # A threshold of 0 disables the rule (see AlertEngine._evaluate); the
         # audit only needs to make that silent behaviour discoverable.
@@ -306,9 +325,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
     active_rules = notify_rules_active(config)
     if active_rules:
+        # "info": the switch is on and everything works -- it must not be
+        # counted as "N 项待处理" in the diagnostics command.
         issues.append(
             AuditIssue(
-                "warning",
+                "info",
                 "notify_center_active",
                 f"通知中心已启用（{active_rules} 条有效规则）：规则覆盖的类型走规则目标，"
                 "其余类型继续使用「默认推送目标」。这是正常状态，无需处理；"
@@ -317,20 +338,47 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         )
     else:
         raw_rules = cfg_get(config, "notify.rules", []) or []
+        valid_kinds = {
+            "resource",
+            "service",
+            "offline",
+            "provider",
+            "daily",
+            "weekly",
+            "daily_image",
+        }
+        invalid_rules = 0
+        unknown_kinds: set[str] = set()
         for rule in raw_rules:
             if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
                 continue
-            if not str(cfg_get(rule, "target", "") or "").strip() or not (
-                cfg_get(rule, "kinds", []) or []
-            ):
-                issues.append(
-                    AuditIssue(
-                        "warning",
-                        "notify_rule_invalid",
-                        "通知中心存在未生效的规则：缺少推送目标或未勾选任何通知类型。",
-                    )
+            kinds = cfg_get(rule, "kinds", []) or []
+            if not str(cfg_get(rule, "target", "") or "").strip() or not kinds:
+                invalid_rules += 1
+                continue
+            for kind in kinds:
+                if str(kind).strip() and str(kind).strip() not in valid_kinds:
+                    unknown_kinds.add(str(kind).strip())
+        if invalid_rules:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "notify_rule_invalid",
+                    f"通知中心有 {invalid_rules} 条规则未生效："
+                    "缺少推送目标或未勾选任何通知类型。",
                 )
-                break
+            )
+        if unknown_kinds:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "notify_rule_unknown_kind",
+                    "通知中心的规则里有无法识别的通知类型："
+                    + "、".join(sorted(unknown_kinds))
+                    + "（可选：resource / service / offline / provider / "
+                    "daily / weekly / daily_image），这些类型不会生效。",
+                )
+            )
     # The per-module target lists are legacy: they still work (and win over
     # the shared default), but they are hidden behind "show advanced" now.
     # Surface them so a user who forgot about them knows why that module

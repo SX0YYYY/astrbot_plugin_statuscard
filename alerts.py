@@ -43,12 +43,45 @@ def _now_text(config: Any = None) -> str:
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Parse a state field without letting one bad value stop the loop.
+
+    ``int("abc")`` used to escape ``_evaluate`` entirely, and because the
+    sampling loop caught it at the top level the remaining rules, the offline
+    check and ``alerts_last_sample`` were skipped on every round -- one
+    corrupted value disabled the whole alert system.
+    """
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 BROADCAST_TEMPLATE_DEFAULT = (
     "✅ Bot 已恢复上线\n"
     "掉线时间: {offline_time}\n"
     "恢复时间: {recover_time}\n"
     "离线时长: {duration}"
 )
+
+# A recovery notice that cannot be delivered is retried a few times and then
+# dropped. Without a ceiling the resource and offline paths retried every ten
+# minutes until the process restarted, each attempt doing a full delivery.
+MAX_RECOVERY_RETRIES = 5
+
+
+# Disconnect alerts use their own sample threshold: ``sustain_samples`` is
+# documented as affecting only the resource rules, and raising it to dampen
+# memory jitter used to delay disconnect alerts by the same factor.
+OFFLINE_ALERT_SAMPLES = 2
 
 
 def _fmt_ts(ts: float, config: Any = None) -> str:
@@ -281,7 +314,7 @@ class AlertEngine:
                     continue
                 last_seen = float(st.get("last_seen") or st.get("alert_since") or 0)
                 if not last_seen and key == "offline":
-                    last_seen = float(st.get("since") or 0)
+                    last_seen = _safe_float(st.get("since"))
                 if last_seen and now - last_seen > 86400:
                     st["stale"] = True
                     logger.warning(
@@ -431,9 +464,15 @@ class AlertEngine:
             if status == "recovery":
                 # Close the open alert of the same rule so the report can
                 # show how long the interruption lasted, even across a
-                # plugin restart.
+                # plugin restart. ``target`` keeps two rules that share a name
+                # (same label, different disk/mount) from closing each other.
                 self.report_store.resolve_event(
-                    int(now), name, int(now), kind=kind, close_all=True
+                    int(now),
+                    name,
+                    int(now),
+                    kind=kind,
+                    target=target,
+                    close_all=True,
                 )
         except Exception:
             logger.exception("记录告警事件失败")
@@ -501,37 +540,49 @@ class AlertEngine:
             f"{swap.percent:.1f}% ({format_bytes(swap.used)} / {format_bytes(swap.total)})",
         )
 
-        disk_path = "/"
+        disk_paths: list[str] = []
         try:
-            disk_paths = cfg_get(self.config, "display.disk_paths", None)
-            if isinstance(disk_paths, list) and disk_paths:
-                disk_path = str(disk_paths[0])
+            configured = cfg_get(self.config, "display.disk_paths", None)
+            if isinstance(configured, list):
+                disk_paths = [str(item) for item in configured if str(item).strip()]
         except Exception:
-            pass
-        try:
-            # One implementation shared with the card, the report and the
-            # dashboard: used/total. psutil's percent excludes the ext4
-            # root-reserved blocks and would alert on a different scale than
-            # the number the user reads on the card.
-            disk = disk_usage([disk_path])[0]
-            if disk.percent is None or disk.used is None or disk.total is None:
-                raise RuntimeError(disk.exception or "磁盘信息不可用")
-            await self._evaluate(
-                "disk",
-                f"磁盘使用率 ({disk_path})",
-                disk.percent,
-                self.disk_threshold,
-                "%",
-                f"{disk.percent:.1f}% ({format_bytes(disk.used)} / {format_bytes(disk.total)})",
-            )
-        except Exception as exc:
-            if disk_path not in self._disk_warned:
-                self._disk_warned.add(disk_path)
-                logger.warning(
-                    "磁盘挂载点 %s 无法读取（%s），磁盘告警已跳过；请检查 display.disk_paths",
-                    disk_path,
-                    exc,
+            disk_paths = []
+        if not disk_paths:
+            disk_paths = ["/"]
+
+        # Every configured mount gets its own rule. Watching only the first
+        # one meant a second disk could fill up silently while the card and
+        # the report showed it.
+        for disk_path in disk_paths:
+            # A single mount keeps the historical key so the cooldown and the
+            # existing state survive the upgrade; extra mounts are keyed.
+            rule_key = "disk" if len(disk_paths) == 1 else f"disk:{disk_path}"
+            try:
+                # One implementation shared with the card, the report and the
+                # dashboard: used/total. psutil's percent excludes the ext4
+                # root-reserved blocks and would alert on a different scale
+                # than the number the user reads on the card.
+                disk = disk_usage([disk_path])[0]
+                if disk.percent is None or disk.used is None or disk.total is None:
+                    raise RuntimeError(disk.exception or "磁盘信息不可用")
+                await self._evaluate(
+                    rule_key,
+                    f"磁盘使用率 ({disk_path})",
+                    disk.percent,
+                    self.disk_threshold,
+                    "%",
+                    f"{disk.percent:.1f}%"
+                    f" ({format_bytes(disk.used)} / {format_bytes(disk.total)})",
                 )
+            except Exception as exc:
+                if disk_path not in self._disk_warned:
+                    self._disk_warned.add(disk_path)
+                    logger.warning(
+                        "磁盘挂载点 %s 无法读取（%s），磁盘告警已跳过；"
+                        "请检查 display.disk_paths",
+                        disk_path,
+                        exc,
+                    )
 
         if hasattr(os, "getloadavg"):
             try:
@@ -572,9 +623,19 @@ class AlertEngine:
         st = rules.setdefault(key, {})
         now = time.time()
         st["last_seen"] = now
-        count = int(st.get("count") or 0)
+        count = _safe_int(st.get("count"))
         alerting = bool(st.get("alerting"))
-        last_sent = float(st.get("last_sent") or 0)
+        last_sent = _safe_float(st.get("last_sent"))
+        if st.pop("send_inflight", False) and not alerting:
+            # The process was reloaded or crashed while this alert was being
+            # sent. The message may already be in the chat, so treat the
+            # episode as announced instead of firing the same alert again
+            # after ``sustain`` more samples.
+            alerting = True
+            st["alerting"] = True
+            st["alerted"] = True
+            st["alert_since"] = _safe_float(st.get("last_attempt")) or now
+            st["count"] = 0
 
         if threshold <= 0:
             # A threshold of 0 (slider misjudged as "rule off") would make
@@ -620,7 +681,7 @@ class AlertEngine:
                         "alert",
                     )
                     return
-                next_attempt = float(st.get("next_attempt") or 0)
+                next_attempt = _safe_float(st.get("next_attempt"))
                 if now >= next_attempt:
                     # A recovery notice that never got through is folded into
                     # this alert. Retrying it separately after a new episode
@@ -641,12 +702,19 @@ class AlertEngine:
                     )
                     if had_pending:
                         text += "\n（上一次的恢复通知未送达，已并入本条）"
+                    # Persist before the await: a reload or crash during a
+                    # slow send used to leave the rule "not alerting" on
+                    # disk, so the same alert fired again later.
+                    st["last_attempt"] = now
+                    st["send_inflight"] = True
+                    self.state.save()
                     result = await self._push_alert(
                         name, f"{value_text}（阈值 {threshold:.1f}{unit}）", text
                     )
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
                     st["last_attempt"] = now
+                    st.pop("send_inflight", None)
                     st["last_error"] = "" if delivered or buffered else "send_failed"
                     if buffered:
                         # Covered by the aggregator summary; the rule is in
@@ -655,6 +723,10 @@ class AlertEngine:
                         st["alerted"] = True
                         st["alert_since"] = now
                         st["count"] = 0
+                        # The summary did reach the chat, so the cooldown
+                        # applies to this rule too; without it the next
+                        # episode pushed a second alert minutes later.
+                        st["last_sent"] = now
                         self._record_event(
                             "resource",
                             name,
@@ -676,7 +748,7 @@ class AlertEngine:
                             "alert",
                         )
                     else:
-                        retry_count = int(st.get("retry_count") or 0) + 1
+                        retry_count = _safe_int(st.get("retry_count")) + 1
                         st["retry_count"] = retry_count
                         if retry_count >= 3:
                             # Stop retrying: an unreachable target used to be
@@ -715,7 +787,7 @@ class AlertEngine:
             st["next_attempt"] = 0
             pending_text = st.get("pending_recovery")
             if pending_text:
-                next_recovery = float(st.get("recovery_next_attempt") or 0)
+                next_recovery = _safe_float(st.get("recovery_next_attempt"))
                 if now >= next_recovery:
                     result = await self._send(str(pending_text))
                     if self._delivered(result):
@@ -724,9 +796,20 @@ class AlertEngine:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
-                        st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
+                        retry_count = _safe_int(st.get("recovery_retry_count")) + 1
+                        if retry_count > MAX_RECOVERY_RETRIES:
+                            logger.warning(
+                                "%s 的恢复通知连续 %d 次未送达，放弃补发",
+                                name,
+                                retry_count - 1,
+                            )
+                            st.pop("pending_recovery", None)
+                            st.pop("recovery_attempt", None)
+                            st.pop("recovery_next_attempt", None)
+                            st.pop("recovery_retry_count", None)
+                        else:
+                            st["recovery_retry_count"] = retry_count
+                            st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 stale = bool(st.pop("stale", False))
                 # Only announce the recovery for an episode that was actually
@@ -738,7 +821,7 @@ class AlertEngine:
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
                 st["last_error"] = ""
-                duration = now - float(st.get("alert_since") or now)
+                duration = now - _safe_float(st.get("alert_since"), now)
                 st["alert_since"] = 0
                 # The event log is the source of truth for interruption
                 # durations and the daily report's unresolved list, so it must
@@ -796,7 +879,9 @@ class AlertEngine:
             if str(item).strip()
         }
         interval = max(1, min(30, cfg_int(cfg, "interval_seconds", 3)))
-        max_groups = max(0, cfg_int(cfg, "max_groups", 100))
+        # Match the schema slider (1-500). A hand-edited 10000 used to be
+        # taken literally and posted to every group the bot is in.
+        max_groups = max(0, min(500, cfg_int(cfg, "max_groups", 100)))
         template = str(cfg.get("template") or BROADCAST_TEMPLATE_DEFAULT)
         offline_text = _fmt_ts(offline_ts, self.config)
         recover_text = _now_text(self.config)
@@ -812,12 +897,18 @@ class AlertEngine:
                 logger.warning("掉线广播：群数超过上限 %d，剩余群未发送", max_groups)
                 break
             try:
-                text = template.format(
-                    offline_time=offline_text,
-                    recover_time=recover_text,
-                    duration=duration_text,
-                )
-            except (KeyError, IndexError, ValueError):
+                # Replace known tokens one by one: ``str.format`` raised
+                # KeyError on any unknown brace and then sent the template
+                # verbatim, so a note like "{备注}" also froze the real
+                # placeholders. The hint promises the rest is preserved.
+                text = template
+                for token, value in (
+                    ("{offline_time}", offline_text),
+                    ("{recover_time}", recover_text),
+                    ("{duration}", duration_text),
+                ):
+                    text = text.replace(token, value)
+            except (TypeError, ValueError):
                 text = template
             if sent or failed:
                 await asyncio.sleep(interval)
@@ -879,8 +970,8 @@ class AlertEngine:
         alerts = self.state.setdefault("alerts", {})
         st = alerts.setdefault("offline", {})
         now = time.time()
-        count = int(st.get("count") or 0)
-        unreachable = int(st.get("unreachable") or 0)
+        count = _safe_int(st.get("count"))
+        unreachable = _safe_int(st.get("unreachable"))
 
         if online:
             st["count"] = 0
@@ -898,7 +989,7 @@ class AlertEngine:
                     st.pop(key, None)
                 st["pending_alert"] = False
             if pending_text:
-                next_recovery = float(st.get("recovery_next_attempt") or 0)
+                next_recovery = _safe_float(st.get("recovery_next_attempt"))
                 if now >= next_recovery:
                     result = await self._send(str(pending_text), kind="offline")
                     if self._delivered(result):
@@ -908,13 +999,26 @@ class AlertEngine:
                         st.pop("recovery_retry_count", None)
                         logger.info("Bot 连接恢复通知补发成功")
                     else:
-                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
-                        st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
-                        logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
+                        retry_count = _safe_int(st.get("recovery_retry_count")) + 1
+                        if retry_count > MAX_RECOVERY_RETRIES:
+                            logger.warning(
+                                "Bot 连接恢复通知连续 %d 次未送达，放弃补发",
+                                retry_count - 1,
+                            )
+                            for stale_key in (
+                                "pending_recovery",
+                                "recovery_attempt",
+                                "recovery_next_attempt",
+                                "recovery_retry_count",
+                            ):
+                                st.pop(stale_key, None)
+                        else:
+                            st["recovery_retry_count"] = retry_count
+                            st["recovery_next_attempt"] = now + retry_delay(retry_count)
+                            logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
             if st.get("alerting") or st.get("pending_alert_text"):
                 stale = bool(st.pop("stale", False))
-                duration = now - float(st.get("since") or now)
+                duration = now - _safe_float(st.get("since"), now)
                 queued = (
                     st.pop("pending_alert_text", None) if self.offline_notify else None
                 )
@@ -946,6 +1050,12 @@ class AlertEngine:
                     # A hundred-group broadcast with a 3s gap can take five
                     # minutes; running it inline stalled every later sample
                     # and delayed the operator's own recovery notice.
+                    if self._broadcast_task and not self._broadcast_task.done():
+                        # A second recovery while the first broadcast is still
+                        # running used to orphan that task: stop() could only
+                        # cancel the newest one and the old one kept posting
+                        # after shutdown.
+                        self._broadcast_task.cancel()
                     self._broadcast_task = asyncio.create_task(
                         self._broadcast_recovery(
                             now - duration, format_duration(duration)
@@ -976,7 +1086,9 @@ class AlertEngine:
             # bot, which would raise a false alarm.
             st["unreachable"] = unreachable + 1
             st["count"] = 0
-            if unreachable + 1 >= self.sustain * 3 and not st.get("unreachable_warned"):
+            if unreachable + 1 >= OFFLINE_ALERT_SAMPLES * 3 and not st.get(
+                "unreachable_warned"
+            ):
                 st["unreachable_warned"] = True
                 logger.warning(
                     "OneBot 状态查询连续 %d 次失败，暂时无法确认 Bot 在线状态",
@@ -988,7 +1100,7 @@ class AlertEngine:
         st["unreachable_warned"] = False
         count += 1
         st["count"] = count
-        if not st.get("alerting") and count >= self.sustain:
+        if not st.get("alerting") and count >= OFFLINE_ALERT_SAMPLES:
             st["alerting"] = True
             st["since"] = now
             st["count"] = 0
@@ -1057,12 +1169,12 @@ class AlertEngine:
         # the alerting latch below would mutate a detached local dict.
         watch = alerts_state.setdefault("provider_watch", {})
         alerting = bool(watch.get("alerting"))
-        last_alert_ts = float(watch.get("last_alert_ts") or 0.0)
+        last_alert_ts = _safe_float(watch.get("last_alert_ts"))
 
         # Retries for a recovery notice whose send failed earlier.
         pending_text = str(watch.get("pending_recovery") or "")
         if pending_text:
-            next_attempt = float(watch.get("recovery_next_attempt") or 0.0)
+            next_attempt = _safe_float(watch.get("recovery_next_attempt"))
             if now >= next_attempt:
                 result = await self._send(
                     pending_text, source="provider", kind="provider"
@@ -1161,7 +1273,7 @@ class AlertEngine:
                 "recovery",
             )
             if self.recover_notify and notified:
-                last_streak = int(watch.get("last_streak") or 0)
+                last_streak = _safe_int(watch.get("last_streak"))
                 text = (
                     "✅ 已恢复 · LLM 服务\n"
                     "──────────────\n"
@@ -1276,17 +1388,26 @@ class AlertEngine:
                 if current_time_text != time_text or current_tz_name != tz_name:
                     # 最后一分钟内改了时间/时区，重新计算，不按旧目标发送。
                     continue
-                if not await self._send_daily_summary():
-                    for attempt in range(3):
-                        await asyncio.sleep(600)
-                        if not self._running:
-                            break
-                        if await self._send_daily_summary():
-                            break
-                        logger.warning(
-                            "每日定时状态图重试失败（第 %d 次）",
-                            attempt + 1,
-                        )
+                try:
+                    sent_ok = await self._send_daily_summary()
+                    if not sent_ok:
+                        for attempt in range(3):
+                            await asyncio.sleep(600)
+                            if not self._running:
+                                break
+                            if await self._send_daily_summary():
+                                break
+                            logger.warning(
+                                "每日定时状态图重试失败（第 %d 次）",
+                                attempt + 1,
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # An exception escaped the normal "give up after four
+                    # attempts" path, so the loop retried the whole collect +
+                    # T2I cycle every 60 seconds for the rest of the day.
+                    logger.exception("每日定时状态图发送异常，今天不再重试")
                 self._mark_daily_attempt(
                     now_in_timezone(self.config).strftime("%Y-%m-%d")
                 )
@@ -1389,7 +1510,10 @@ class AlertEngine:
         max_body_bytes = 64 * 1024
 
         async def handle(request: web.Request) -> web.Response:
-            if token:
+            # The switch decides whether a token is required; a token that is
+            # filled in but with the switch off must not be enforced, or the
+            # documented "off" setting silently rejects every request.
+            if require_token and token:
                 auth = request.headers.get("Authorization", "")
                 if not hmac.compare_digest(
                     auth.encode("utf-8"), f"Bearer {token}".encode()

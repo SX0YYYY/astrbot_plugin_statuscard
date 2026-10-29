@@ -85,14 +85,14 @@ class Sampler:
         self,
         state: StateStore,
         interval_seconds: int = 60,
-        history_size: int = 180,
+        history_size: int = 60,
         config: Any = None,
     ):
         self.state = state
         self.config = config
         # Keep in sync with the display.sample_seconds slider (15-600).
         self.interval_seconds = max(15, min(600, int(interval_seconds or 60)))
-        self.history_size = max(30, int(history_size or 180))
+        self.history_size = max(30, int(history_size or 60))
         self._task: asyncio.Task | None = None
         self._proc_task: asyncio.Task | None = None
         self._primed = False
@@ -219,14 +219,50 @@ class Sampler:
         self.state.save()
 
     def _sample_network(self, now: float) -> None:
+        interface = ""
         try:
-            counters = psutil.net_io_counters()
+            with self.state.section("net") as net:
+                interface = str(net.get("interface") or "")
         except Exception:
-            logger.debug("读取网络计数器失败，本轮跳过网络采样", exc_info=True)
-            return
+            interface = ""
+
+        counters = None
+        try:
+            per_nic = psutil.net_io_counters(pernic=True) or {}
+        except Exception:
+            per_nic = {}
+        if interface and interface in per_nic:
+            counters = per_nic[interface]
+        elif per_nic:
+            # Pick the busiest non-loopback interface once and keep it: the
+            # card labels the line with a single name, while totalling every
+            # interface (docker bridges, loopback) reads about twice as high
+            # on a containerised bot.
+            best = ""
+            best_total = -1
+            for name, item in per_nic.items():
+                if name.startswith("lo"):
+                    continue
+                total = int(item.bytes_sent) + int(item.bytes_recv)
+                if total > best_total:
+                    best, best_total = name, total
+            if best:
+                interface = best
+                counters = per_nic[best]
+        if counters is None:
+            try:
+                counters = psutil.net_io_counters()
+                interface = ""
+            except Exception:
+                logger.debug("读取网络计数器失败，本轮跳过网络采样", exc_info=True)
+                return
         if counters is None:
             return
         with self.state.section("net") as net:
+            previous_iface = str(net.get("interface") or "")
+            switched = bool(interface) and previous_iface not in ("", interface)
+            if interface:
+                net["interface"] = interface
             last_ts = float(net.get("last_ts") or now)
             last_sent = int(net.get("last_sent") or 0)
             last_recv = int(net.get("last_recv") or 0)
@@ -236,8 +272,20 @@ class Sampler:
             dt = max(1.0, now - last_ts)
             sent_delta = max(0, int(counters.bytes_sent) - last_sent)
             recv_delta = max(0, int(counters.bytes_recv) - last_recv)
-            up_rate = sent_delta / dt
-            down_rate = recv_delta / dt
+
+            # A restart leaves last_ts hours behind. The delta then covers the
+            # whole downtime: the derived rate is meaningless, and crediting
+            # it to the month accumulator would book hours of traffic to the
+            # moment of restart (or to the new month, right after a rollover).
+            stale = (now - last_ts) > max(300.0, self.interval_seconds * 5)
+            if switched:
+                # The counters moved to a different scale; this round only
+                # establishes the new baseline.
+                sent_delta = 0
+                recv_delta = 0
+                stale = False
+            up_rate = 0.0 if stale else sent_delta / dt
+            down_rate = 0.0 if stale else recv_delta / dt
 
             month = now_in_timezone(self.config).strftime("%Y-%m")
             net["interval"] = self.interval_seconds
@@ -246,14 +294,15 @@ class Sampler:
                 net["month_up"] = 0
                 net["month_down"] = 0
                 logger.info("已进入 %s，本月流量统计已重置", month)
-            net["month_up"] = int(net.get("month_up") or 0) + sent_delta
-            net["month_down"] = int(net.get("month_down") or 0) + recv_delta
+            if not stale:
+                net["month_up"] = int(net.get("month_up") or 0) + sent_delta
+                net["month_down"] = int(net.get("month_down") or 0) + recv_delta
 
-            history = net.get("history")
-            if not isinstance(history, list):
-                history = []
-            history.append([now, round(up_rate, 1), round(down_rate, 1)])
-            net["history"] = history[-self.history_size :]
+                history = net.get("history")
+                if not isinstance(history, list):
+                    history = []
+                history.append([now, round(up_rate, 1), round(down_rate, 1)])
+                net["history"] = history[-self.history_size :]
 
             net["last_ts"] = now
             net["last_sent"] = int(counters.bytes_sent)
@@ -312,4 +361,4 @@ class Sampler:
             recv["accum"] = max(0, total - baseline)
             recv["available"] = True
             recv["source_updated_at"] = source_updated
-        recv["updated_at"] = now
+            recv["updated_at"] = now

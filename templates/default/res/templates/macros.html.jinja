@@ -113,12 +113,12 @@
       {% if v.network.chart.down_area %}
       <polygon class="area-down" points="{{ v.network.chart.down_area }}" />
       {% endif %}
-      {% if v.network.chart.up_points %}
-      <polyline class="line-up" points="{{ v.network.chart.up_points }}" />
-      {% endif %}
-      {% if v.network.chart.down_points %}
-      <polyline class="line-down" points="{{ v.network.chart.down_points }}" />
-      {% endif %}
+      {% for seg in v.network.chart.up_segments or [] %}
+      <polyline class="line-up" points="{{ seg }}" />
+      {% endfor %}
+      {% for seg in v.network.chart.down_segments or [] %}
+      <polyline class="line-down" points="{{ seg }}" />
+      {% endfor %}
       {% if v.network.chart.peak_up %}
       <g class="peak">
         <circle class="peak-up-dot" cx="{{ v.network.chart.peak_up.x }}" cy="{{ v.network.chart.peak_up.y }}" r="3" />

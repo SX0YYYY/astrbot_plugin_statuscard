@@ -17,6 +17,7 @@ def _config(**overrides):
             "enabled": False,
             "weekly_enabled": False,
             "targets": [],
+            "time": "21:00",
         },
     }
     for section, values in overrides.items():
@@ -43,7 +44,20 @@ def test_alerts_without_targets_is_error() -> None:
 
 
 def test_targets_fall_back_to_alerts_targets() -> None:
-    config = _config(monitors={"enabled": True}, daily_report={"enabled": True})
+    config = _config(
+        monitors={
+            "enabled": True,
+            "items": [
+                {
+                    "__template_key": "tcp",
+                    "name": "本地端口",
+                    "port": 8765,
+                    "enabled": True,
+                }
+            ],
+        },
+        daily_report={"enabled": True, "time": "21:00"},
+    )
     config["alerts"]["targets"] = ["123456"]
     assert run_audit(config) == []
 

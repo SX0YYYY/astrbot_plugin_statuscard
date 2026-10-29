@@ -78,12 +78,14 @@
           <div class="stat-label">{{ label }}</div>
           <div class="stat-value">{{ d.resources.yesterday[key].avg_text }}</div>
           <div class="stat-sub">峰值 {{ d.resources.yesterday[key].peak_text }}</div>
-          <div class="stat-delta">较前日 {{ d.resources.yesterday[key].delta_text }}</div>
+          {% if d.resources.yesterday[key].delta_text and d.resources.yesterday[key].delta_text != "--" %}
+          <div class="stat-delta">{{ d.resources.delta_label }} {{ d.resources.yesterday[key].delta_text }}</div>
+          {% endif %}
         </div>
         {% endfor %}
       </div>
       <div class="chart-block">
-        <div class="chart-title">{{ d.day_label }} 24 小时 <span>按小时均值</span></div>
+        <div class="chart-title">{{ d.resources.hour_label }} 24 小时 <span>按小时均值</span></div>
         {{ legend(d.resources.charts.hourly) }}
         {{ chart_svg(d.resources.charts.hourly) }}
       </div>
@@ -137,7 +139,7 @@
     <section class="section">
       <div class="section-head">
         <h2>QQ 趋势</h2>
-        <span>{{ d.window_label }} · 最近 {{ d.history_days }} 天</span>
+        <span>{{ d.qq.scope_label }}</span>
       </div>
       {% if not d.qq.available %}
       <div class="empty">{{ d.qq.empty_reason }}</div>

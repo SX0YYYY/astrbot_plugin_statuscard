@@ -9,7 +9,6 @@ import shutil
 import socket
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 
@@ -414,15 +413,10 @@ async def _probe_websites(sites: list[WebsiteTarget]) -> list[ConnTest]:
         start = time.perf_counter()
 
         async def fetch() -> tuple[int, str]:
-            # Let the status-card probe finish as soon as the headers are in.
-            # Reading the body with a hard cap and a total timeout prevents a
-            # slow-drip server from parking the whole collect pass.
+            # Return as soon as the headers are in. The body used to be read
+            # up to 256 KB and then thrown away (nothing consumes ``reason``),
+            # which inflated the reported "delay" with the transfer time.
             async with cli.stream("GET", site.url, timeout=site.timeout) as resp:
-                body = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) >= 262144:
-                        break
                 return resp.status_code, resp.reason_phrase or "OK"
 
         try:
@@ -644,7 +638,16 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
     return {"counts": counts, "top": top}
 
 
-def _pick_network_interface() -> str:
+def _pick_network_interface(state: Any = None) -> str:
+    if state is not None:
+        try:
+            saved = str((state.get("net", {}) or {}).get("interface") or "")
+            if saved:
+                # The sampler already decided which interface the rates come
+                # from; the card must label and total that same one.
+                return saved
+        except Exception:
+            pass
     try:
         stats = psutil.net_if_stats()
         addrs = psutil.net_if_addrs()
@@ -771,6 +774,50 @@ def _save_sysinfo_cache(state: Any, updates: dict[str, Any]) -> None:
     cache.update(updates)
 
 
+def _pip_package_count() -> int | None:
+    """Count installed distributions without spawning pip.
+
+    ``pip list`` took up to eight seconds and blocked the first card render
+    after every cache expiry. Counting ``*.dist-info`` directories in the
+    interpreter's site-packages gives the same number in milliseconds.
+    """
+
+    try:
+        import site
+        import sysconfig
+
+        roots: list[str] = []
+        paths = sysconfig.get_paths()
+        for key in ("purelib", "platlib"):
+            value = paths.get(key)
+            if value:
+                roots.append(value)
+        try:
+            roots.extend(site.getsitepackages())
+        except Exception:
+            pass
+        try:
+            user_site = site.getusersitepackages()
+            if user_site:
+                roots.append(user_site)
+        except Exception:
+            pass
+        seen: set[str] = set()
+        for root in dict.fromkeys(roots):
+            if not root or not os.path.isdir(root):
+                continue
+            try:
+                entries = os.listdir(root)
+            except OSError:
+                continue
+            for name in entries:
+                if name.endswith(".dist-info"):
+                    seen.add(name[: -len(".dist-info")].lower())
+        return len(seen) or None
+    except Exception:
+        return None
+
+
 def _package_counts(
     state: Any = None,
 ) -> tuple[int | None, int | None]:
@@ -800,14 +847,7 @@ def _package_counts(
         out = _run_command(["dpkg-query", "-W", "-f", "${Package}\n"], timeout=6)
         if out is not None:
             dpkg = len([line for line in out.splitlines() if line.strip()])
-    try:
-        out = _run_command(
-            [sys.executable, "-m", "pip", "list", "--format=freeze"], timeout=8
-        )
-        if out is not None:
-            pip = len([line for line in out.splitlines() if line.strip()])
-    except Exception:
-        pass
+    pip = _pip_package_count()
     # Only a fully successful probe earns the 24h cache. A failed package
     # manager used to leave "Packages --" on the card for a whole day.
     ok = (not has_dpkg or dpkg is not None) and pip is not None
@@ -1410,7 +1450,8 @@ async def fetch_avatar_bytes(
     cached = _read_avatar_cache(cache_path, AVATAR_CACHE_TTL)
     if cached is not None:
         return cached
-    try:
+
+    async def _download() -> bytes:
         async with (
             httpx.AsyncClient(follow_redirects=True, timeout=5) as cli,
             cli.stream("GET", url) as resp,
@@ -1421,9 +1462,15 @@ async def fetch_avatar_bytes(
                 data.extend(chunk)
                 if len(data) > MAX_IMAGE_BYTES:
                     raise ValueError("头像超过 10 MB")
-            payload = bytes(data)
-            _write_avatar_cache(cache_path, payload)
-            return payload
+            return bytes(data)
+
+    try:
+        # httpx's ``timeout=5`` bounds every single read, not the request: a
+        # slow-drip server could park the card render (and the 20:00 daily
+        # image) indefinitely. Cap the whole download.
+        payload = await asyncio.wait_for(_download(), timeout=15)
+        _write_avatar_cache(cache_path, payload)
+        return payload
     except Exception as exc:
         logger.warning("获取头像失败 %s: %s", url, exc)
         # A stale cached avatar is still better than dropping to the built-in
@@ -1556,6 +1603,25 @@ def build_network_chart(
         x, y = down_coords[down_peak_idx]
         peak_down = {"x": x, "y": y, "text": format_speed(points[down_peak_idx][2])}
 
+    # Break the polylines where the sampler stopped. A three-hour outage used
+    # to be drawn as one smooth ramp between the last point before it and the
+    # first one after, which looked like a real traffic surge.
+    gap_threshold = max(60.0, interval * 3.0)
+    breaks = {i for i in range(1, n) if points[i][0] - points[i - 1][0] > gap_threshold}
+
+    def _segments(coords: list[tuple[float, float]]) -> list[str]:
+        if not breaks:
+            return [" ".join(f"{x},{y}" for x, y in coords)]
+        out: list[str] = []
+        start = 0
+        for index in sorted(breaks):
+            if index - start >= 2:
+                out.append(" ".join(f"{x},{y}" for x, y in coords[start:index]))
+            start = index
+        if len(coords) - start >= 2:
+            out.append(" ".join(f"{x},{y}" for x, y in coords[start:]))
+        return out
+
     return {
         "width": width,
         "height": height,
@@ -1567,6 +1633,8 @@ def build_network_chart(
         "plot_h": plot_h,
         "up_points": up_points,
         "down_points": down_points,
+        "up_segments": _segments(up_coords),
+        "down_segments": _segments(down_coords),
         "up_area": up_area,
         "down_area": down_area,
         "y_labels": y_labels,
@@ -1754,13 +1822,18 @@ async def collect_all(
         usage = disk_usage([str(x) for x in disk_paths])
         if usage and all(item.exception for item in usage):
             usage = disk_usage(_default_disk_paths())
-        return (
-            memory,
-            swap_value,
-            usage,
-            _pick_network_interface(),
-            psutil.net_io_counters(),
-        )
+        interface = _pick_network_interface(state)
+        counters = None
+        try:
+            counters = (psutil.net_io_counters(pernic=True) or {}).get(interface)
+        except Exception:
+            counters = None
+        if counters is None:
+            # No per-interface counter (odd platform or the interface vanished
+            # between the two calls): fall back to the total, and say so.
+            interface = "--"
+            counters = psutil.net_io_counters()
+        return (memory, swap_value, usage, interface, counters)
 
     mem, swap, disks, net_interface, net_counters = await asyncio.to_thread(
         _local_snapshot

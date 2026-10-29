@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import threading
 import time
 from collections.abc import Iterator
@@ -49,10 +50,34 @@ class StateStore:
                 self.data = {}
         except Exception as exc:
             logger.warning("读取状态文件失败 %s: %s", self.path, exc)
-            self._backup_bad_file()
-            with self._lock:
-                self.data = {}
+            restored = self._restore_from_backup()
+            if not restored:
+                self._backup_bad_file()
+                with self._lock:
+                    self.data = {}
         self._migrate(existed)
+
+    def _restore_from_backup(self) -> bool:
+        """Try the previous good copy before falling back to an empty state.
+
+        A truncated write used to wipe the network history, the month
+        counters, every monitor latch and the report catch-up markers in one
+        go; the previous file is almost always still intact.
+        """
+
+        backup = self.path.with_name(self.path.name + ".bak")
+        try:
+            if not backup.is_file():
+                return False
+            parsed = json.loads(backup.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                return False
+            with self._lock:
+                self.data = parsed
+            logger.warning("状态文件损坏，已从备份恢复: %s", backup)
+            return True
+        except Exception:
+            return False
 
     def _migrate(self, existed: bool) -> None:
         with self._lock:
@@ -111,6 +136,21 @@ class StateStore:
                     f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
                 )
                 tmp.write_text(payload, encoding="utf-8")
+                # fsync before the rename: os.replace only guarantees that a
+                # reader sees the old or the new file, not that the bytes
+                # reached the disk. A power loss could otherwise leave a
+                # truncated JSON, and the previous copy is what load() needs.
+                try:
+                    with open(tmp, "rb+") as handle:
+                        os.fsync(handle.fileno())
+                except Exception:
+                    pass
+                backup = self.path.with_name(self.path.name + ".bak")
+                try:
+                    if self.path.is_file():
+                        shutil.copy2(self.path, backup)
+                except Exception:
+                    pass
                 os.replace(tmp, self.path)
                 try:
                     os.chmod(self.path, 0o600)

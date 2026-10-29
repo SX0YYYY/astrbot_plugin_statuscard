@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.18.5-blue)
+![Version](https://img.shields.io/badge/version-2.18.6-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -481,7 +481,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `display.language` | `zh-CN` | QQ 命令提示语言，`zh-CN` 或 `en-US`；页面跟随 WebUI 语言 |
 | `display.compact` | `false` | 手机紧凑模式；隐藏系统信息表、进程最多 5 行、放大资源百分比 |
 | `display.process_top_n` | `8` | 状态卡进程表展示的 CPU 最高进程数量，1–30 |
-| `display.render_timeout` | `180` | 渲染超时（秒）；超时后回退为文字摘要 |
+| `display.render_timeout` | `180` | 渲染超时（秒）；状态卡超时降级为本地简化卡，日报/周报先延迟重试 2 次、仍失败才发文字版 |
 | `display.t2i_benchmark` | `false` | 开启后每次状态卡/日报渲染完成记录一条耗时日志 |
 | `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
 | `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删；清空即关闭探测 |
@@ -656,6 +656,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.18.6**：A/B 两批待办（38 项）一次性收口——多挂载点磁盘告警、恢复通知补发上限、Webhook 开关语义、停机不记假速率、导出保留最新、周报口径、体检新增时间校验等
 - **v2.18.5**：全面审计后修复 18 项缺陷——磁盘口径在日报/告警/看板三处补齐、聚合器并发丢告警、告警恢复与冷却的边界、监测配置错误不再当故障、周报补发、网站可用率按 2xx/3xx 统计等
 - **v2.18.4**：修正两处读数口径——磁盘百分比改为与「已用/总容量」同分母（此前含 ext4 保留块，会多半 2–3 点）、状态卡流量改名为「累计上传/累计下载」并注明累计量按本次开机以来
 - **v2.18.3**：重拍配置页三张截图，与当前界面（v2.18.2 的分组顺序与文案）一致

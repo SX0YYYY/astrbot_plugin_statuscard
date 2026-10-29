@@ -560,6 +560,8 @@ def test_package_failure_uses_short_retry_ttl(monkeypatch, tmp_path: Path) -> No
     collectors_module._pkg_cache.clear()
     monkeypatch.setattr(collectors_module.shutil, "which", lambda name: None)
     monkeypatch.setattr(collectors_module, "_run_command", lambda *args, **kwargs: None)
+    # pip is counted by scanning *.dist-info now, not by running pip.
+    monkeypatch.setattr(collectors_module, "_pip_package_count", lambda: None)
     state = StateStore(tmp_path / "state.json")
     assert collectors_module._package_counts(state) == (None, None)
     stamp = collectors_module._pkg_cache["pkg_ts"]
