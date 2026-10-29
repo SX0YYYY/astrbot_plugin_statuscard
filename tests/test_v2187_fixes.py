@@ -12,6 +12,7 @@ masking and the reports cache key.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -464,6 +465,9 @@ def test_dashboard_shows_worst_mount(monkeypatch, tmp_path: Path) -> None:
     assert disk["path"] == "/data"
     assert disk["percent"] == 90.0
     assert len(disk["disks"]) == 2
+    # The response is serialised to JSON. The first cut attached the list to
+    # its own element (a cycle), which blew the stack on /overview.
+    assert json.dumps(disk)
 
 
 # ----------------------------------------------------------------------

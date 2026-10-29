@@ -244,10 +244,11 @@ class PageApi:
             }
         # The disk alert watches every mount, so the card shows the worst one
         # instead of silently reporting the first (a filling second disk used
-        # to stay invisible here).
+        # to stay invisible here). ``worst`` is an element of ``mounts``, so
+        # the list must be attached to a copy -- putting it on the element
+        # itself created a cycle and the JSON response blew the stack.
         worst = max(mounts, key=lambda item: item["percent"])
-        worst["disks"] = mounts
-        return worst
+        return {**worst, "disks": mounts}
 
     async def _latest_processes(self, top_n: int) -> list[dict[str, Any]]:
         """Return the same ten-second snapshot the status card renders.
