@@ -37,6 +37,7 @@ from .provider_quality import (
 )
 from .redactor import Redactor, read_rules
 from .report_store import ReportStore
+from .utils import redact_url
 
 RESOURCE_KEYS = ("cpu", "ram", "swap", "disk", "load1")
 RESOURCE_LABELS = {
@@ -454,9 +455,14 @@ class DailyReportBuilder:
     def _resource_section(
         self, day: date, previous: date, history_days: int, span: int = 1
     ) -> dict[str, Any]:
-        start_day = day - timedelta(days=history_days - 1)
+        span = max(1, int(span or 1))
+        # A weekly report compares against the previous period, so the query
+        # window must reach back at least two spans; otherwise "较上期" can
+        # never be computed (it silently disappeared with history_days=7).
+        lookback = max(history_days, 2 * span)
+        query_start = day - timedelta(days=lookback - 1)
         start_ts = int(
-            datetime.combine(start_day, time.min, tzinfo=self.tz).timestamp()
+            datetime.combine(query_start, time.min, tzinfo=self.tz).timestamp()
         )
         end_ts = int(
             datetime.combine(
@@ -474,8 +480,20 @@ class DailyReportBuilder:
             by_day.setdefault(local.strftime("%Y-%m-%d"), []).append(row)
 
         first_day = min(by_day) if by_day else None
-        yesterday_rows = by_day.get(day.isoformat(), [])
-        prev_rows = by_day.get(previous.isoformat(), [])
+        # The report window itself: one day for a daily report, the last
+        # ``span`` days for a weekly one. A weekly report used to average only
+        # its last day while labelling the figure "较上期".
+        window_days = [
+            day - timedelta(days=offset) for offset in range(span - 1, -1, -1)
+        ]
+        yesterday_rows = [
+            row for item in window_days for row in by_day.get(item.isoformat(), [])
+        ]
+        prev_rows = [
+            row
+            for offset in range(span)
+            for row in by_day.get((previous - timedelta(days=offset)).isoformat(), [])
+        ]
         available = len(yesterday_rows) >= 2
         if not rows:
             first_ts = self.store.first_resource_ts()
@@ -489,7 +507,8 @@ class DailyReportBuilder:
             else:
                 empty_reason = "暂无资源采样数据"
         elif not available:
-            empty_reason = f"资源采样从 {first_day or '--'} 开始，暂无完整昨日数据"
+            scope = "昨日" if span == 1 else f"近 {span} 天"
+            empty_reason = f"资源采样从 {first_day or '--'} 开始，暂无完整{scope}数据"
         else:
             empty_reason = None
 
@@ -509,24 +528,43 @@ class DailyReportBuilder:
             )
         yesterday["samples"] = len(yesterday_rows)
 
-        hourly_rows: dict[int, list[dict[str, Any]]] = {hour: [] for hour in range(24)}
-        for row in yesterday_rows:
-            local = datetime.fromtimestamp(int(row["ts"]), self.tz)
-            hourly_rows[local.hour].append(row)
+        if span == 1:
+            # 24 hourly buckets for a daily report.
+            buckets: dict[str, list[dict[str, Any]]] = {
+                f"{hour:02d}": [] for hour in range(24)
+            }
+            for row in yesterday_rows:
+                local = datetime.fromtimestamp(int(row["ts"]), self.tz)
+                buckets[f"{local.hour:02d}"].append(row)
+            hour_labels = list(buckets)
+            hour_label = "昨日 24 小时"
+            hour_note = "按小时均值"
+        else:
+            # One bucket per day for a weekly report: averaging the last day
+            # only and calling it the week was the original defect.
+            buckets = {item.strftime("%m-%d"): [] for item in window_days}
+            for row in yesterday_rows:
+                local = datetime.fromtimestamp(int(row["ts"]), self.tz)
+                key = local.strftime("%m-%d")
+                if key in buckets:
+                    buckets[key].append(row)
+            hour_labels = list(buckets)
+            hour_label = f"近 {span} 天"
+            hour_note = "按日均值"
 
         def hourly_values(key: str) -> list[float | None]:
             out: list[float | None] = []
-            for hour in range(24):
+            for label in hour_labels:
                 values = [
                     float(item[key])
-                    for item in hourly_rows[hour]
+                    for item in buckets[label]
                     if item.get(key) is not None
                 ]
                 out.append(sum(values) / len(values) if values else None)
             return out
 
         hourly_chart = _line_chart(
-            [f"{hour:02d}" for hour in range(24)],
+            hour_labels,
             [
                 {"name": "CPU", "color": "#2ecc71", "values": hourly_values("cpu")},
                 {"name": "RAM", "color": "#4f8cff", "values": hourly_values("ram")},
@@ -536,7 +574,8 @@ class DailyReportBuilder:
             y_formatter=lambda value: f"{value:.0f}%",
         )
 
-        days = [start_day + timedelta(days=i) for i in range(history_days)]
+        chart_start = day - timedelta(days=history_days - 1)
+        days = [chart_start + timedelta(days=i) for i in range(history_days)]
         labels = [item.strftime("%m-%d") for item in days]
 
         def daily_values(key: str) -> list[float | None]:
@@ -560,7 +599,7 @@ class DailyReportBuilder:
             y_formatter=lambda value: f"{value:.0f}%",
         )
         days_with_data = sum(1 for item in days if by_day.get(item.isoformat()))
-        if first_day and first_day > start_day.isoformat():
+        if first_day and first_day > chart_start.isoformat():
             history_note = (
                 f"资源历史从 {first_day} 开始，{history_days} 天趋势仍在积累。"
             )
@@ -577,7 +616,7 @@ class DailyReportBuilder:
                 cfg_int(self.config, "daily_report.resource_sample_seconds", 300),
             ),
         )
-        expected = max(1, 86400 // interval)
+        expected = max(1, 86400 // interval) * span
         coverage = len(yesterday_rows) / expected
         gaps = detect_resource_gaps(
             [int(row.get("ts") or 0) for row in yesterday_rows],
@@ -590,8 +629,10 @@ class DailyReportBuilder:
                 f"{len(gaps)} 段共约 {total_minutes} 分钟"
                 "（采样缺失，期间插件或 Bot 停机、无法监测）"
             )
+        scope_text = "昨日" if span == 1 else f"近 {span} 天"
         coverage_note = (
-            f"昨日资源采样 {len(yesterday_rows)} 个点（约覆盖 {coverage * 100:.0f}%），"
+            f"{scope_text}资源采样 {len(yesterday_rows)} 个点"
+            f"（约覆盖 {coverage * 100:.0f}%），"
             "均值和峰值为已有数据口径。"
             + (f"停机盲区：{gaps_text}。" if gaps_text else "")
             if available and (coverage < 0.9 or gaps)
@@ -605,7 +646,8 @@ class DailyReportBuilder:
             # report compares against the previous period (or shows nothing
             # when that window has no samples).
             "delta_label": "较前日" if span == 1 else "较上期",
-            "hour_label": "昨日" if span == 1 else "最后一天",
+            "hour_label": hour_label,
+            "hour_note": hour_note,
             "first_day": first_day,
             "history_note": history_note,
             "coverage_note": coverage_note,
@@ -738,13 +780,18 @@ class DailyReportBuilder:
                     # retry succeeded). They are the same episode: keep the
                     # earlier row and count it once.
                     continue
-                episode_open.add(key)
                 count += 1
                 if resolved_ts:
+                    # The episode ended after the report day (its recovery
+                    # event belongs to the next day, but resolved_ts was
+                    # written back). It is complete, so it must not inflate
+                    # "未恢复 N 项" while showing a finished duration.
+                    episode_open.discard(key)
                     duration_text = format_duration(
                         int(resolved_ts) - int(event.get("ts") or 0)
                     )
                 else:
+                    episode_open.add(key)
                     duration_text = "进行中"
             # A weekly window spans several days, so a bare "HH:MM" cannot
             # locate the event inside it.
@@ -759,7 +806,9 @@ class DailyReportBuilder:
                     "name": name or "--",
                     "status": self._status_text(status),
                     "status_key": status,
-                    "detail": str(event.get("detail") or "")[:80],
+                    "detail": self.redactor.mask_addresses(
+                        str(event.get("detail") or "")
+                    )[:80],
                     "duration": duration_text,
                 }
             )
@@ -1133,6 +1182,14 @@ class DailyReportBuilder:
             ).timestamp()
         )
         rows = self.store.list_website_samples(start_ts, end_ts)
+        # Old rows stored the full URL as the target name when the operator
+        # left the name blank, so a query token could reach the report image
+        # and the dashboard. Strip it on read as well; new samples are
+        # already stored redacted.
+        for row in rows:
+            raw_name = str(row.get("name") or "")
+            if raw_name:
+                row["name"] = redact_url(raw_name)
         names = sorted({str(row.get("name") or "") for row in rows if row.get("name")})
         by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in rows:

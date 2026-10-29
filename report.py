@@ -22,6 +22,7 @@ from .collectors import (
     now_in_timezone,
     resolve_targets,
     swap_stat,
+    website_ok,
 )
 from .delivery import DeliveryResult
 from .i18n import tr
@@ -53,20 +54,15 @@ def _delivered(result: Any) -> bool:
 
 
 def _website_ok(status: Any) -> bool:
-    """Available means 2xx/3xx.
+    """Available means 2xx/3xx (same rule as the status card).
 
     A 502/500 is the server answering while the endpoint is broken; the old
     rule only treated a transport error as downtime, so a dead backend behind
-    a live proxy still reported "可用率 100%".
+    a live proxy still reported "可用率 100%". The status card used to keep the
+    old rule, so one probe could be green there and 0% in the report.
     """
 
-    text = str(status or "")
-    if text == "ERR":
-        return False
-    try:
-        return 200 <= int(text) < 400
-    except ValueError:
-        return False
+    return website_ok(status)
 
 
 def _uncertain(result: Any) -> bool:
@@ -235,15 +231,17 @@ class ReportCollector:
         disk_pct: float | None = None
         try:
             disk_paths = cfg_get(self.config, "display.disk_paths", None)
-            if isinstance(disk_paths, list) and disk_paths:
-                disk_path = str(disk_paths[0])
-            else:
-                disk_path = os.path.abspath(os.sep)
-            # Same denominator as the status card, the disk alert and the
-            # dashboard: used/total. psutil's own percent drops the
-            # filesystem's root-reserved blocks and reads 2-3 points higher.
-            rows = disk_usage([disk_path])
-            disk_pct = rows[0].percent if rows else None
+            paths: list[str] = []
+            if isinstance(disk_paths, list):
+                paths = [str(item) for item in disk_paths if str(item).strip()]
+            if not paths:
+                paths = [os.path.abspath(os.sep)]
+            # Every mount is watched by the disk alert, so the trend must
+            # follow the worst one: a filling second disk used to stay
+            # invisible in the report while the alert fired.
+            rows = disk_usage(paths)
+            percents = [row.percent for row in rows if row.percent is not None]
+            disk_pct = max(percents) if percents else None
         except Exception:
             disk_pct = None
         load1: float | None = None
@@ -471,7 +469,7 @@ class DailyReporter:
         self.builder = DailyReportBuilder(store, config)
         self._task: asyncio.Task | None = None
         self._running = False
-        self._pending_retry: tuple[str, float] | None = None
+        self._pending_retry: tuple[str | None, float] | None = None
         self._pending_retry_count = 0
         self._pending_retry_day: str | None = None
         self._next_run_text: str | None = None
@@ -541,10 +539,13 @@ class DailyReporter:
         )
         self._weekly_image_report_day = saved.get("weekly_image_report_day") or None
         pending = saved.get("pending_retry")
-        if isinstance(pending, dict) and pending.get("day") is not None:
+        if isinstance(pending, dict):
             try:
+                # ``day`` may legitimately be null: the scheduled path queues
+                # a retry for "yesterday" and must be restored as such.
+                day_value = pending.get("day")
                 self._pending_retry = (
-                    str(pending["day"]),
+                    str(day_value) if day_value is not None else None,
                     float(pending.get("due") or 0),
                 )
             except (TypeError, ValueError):
@@ -865,7 +866,7 @@ class DailyReporter:
                         # An unexpected error must not eat this retry slot;
                         # put the day back on the retry plan.
                         logger.exception("日报重试发送意外失败，重新排入重试")
-                        if _day and not self._schedule_retry(_day):
+                        if not self._schedule_retry(_day):
                             await self._notify_give_up(self._targets(), _day)
                     await asyncio.sleep(60)
                     continue
@@ -944,6 +945,7 @@ class DailyReporter:
 
     async def _weekly_loop(self) -> None:
         last_logged = None
+        weekly_warned = False
         while self._weekly_running:
             try:
                 if not self._weekly_enabled():
@@ -1013,11 +1015,16 @@ class DailyReporter:
                     hour, minute = [int(part) for part in time_text.split(":", 1)]
                     if not (0 <= hour <= 23 and 0 <= minute <= 59):
                         raise ValueError("out of range")
+                    weekly_warned = False
                 except Exception:
-                    logger.warning(
-                        "周报发送时间格式非法：%s（应为 HH:MM）",
-                        time_text,
-                    )
+                    # Warn once per bad value, not every minute: an unhandled
+                    # loop here filled the journal with 1440 warnings a day.
+                    if not weekly_warned:
+                        logger.warning(
+                            "周报发送时间格式非法：%s（应为 HH:MM）",
+                            time_text,
+                        )
+                        weekly_warned = True
                     await asyncio.sleep(60)
                     continue
                 now = now_in_timezone(self.config)
@@ -1260,8 +1267,13 @@ class DailyReporter:
         except Exception:
             logger.debug("发送放弃重试提示失败", exc_info=True)
 
-    def _schedule_retry(self, day: str) -> bool:
+    def _schedule_retry(self, day: str | None) -> bool:
         """Remember a failed delivery and queue the next attempt.
+
+        ``day`` is ``None`` for the scheduled run, which resolves "yesterday"
+        itself. Callers used to pass ``day or ""``, so a build failure queued
+        an empty string and every retry then died in ``date.fromisoformat("")``
+        -- the retry budget was spent without ever producing a report.
 
         Returns ``True`` when another attempt was scheduled and ``False``
         when the retry budget for today is exhausted. The counter is scoped
@@ -1371,7 +1383,7 @@ class DailyReporter:
         except Exception:
             logger.exception("日报数据聚合失败")
             self._record(day or "", False, "build failed")
-            if not self._schedule_retry(day or ""):
+            if not self._schedule_retry(day):
                 await self._notify_give_up(targets, day or "", weekly=False)
             return
         day = str(view.get("day") or "")

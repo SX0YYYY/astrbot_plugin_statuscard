@@ -12,6 +12,7 @@ compared case-insensitively.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .utils import cfg_get
@@ -22,6 +23,17 @@ RULES: tuple[str, ...] = ("hostname", "process", "network", "qq_stats")
 # Placeholder shown wherever a value was removed.
 HIDDEN = "已隐藏"
 HIDDEN_NUMBER = "--"
+
+# Address-shaped tokens that must not reach a chat or the dashboard when the
+# hostname rule is on. Plain words and codes ("HTTP 500", "ReadTimeout") stay
+# readable: hiding every non-empty error text made the monitor cards useless.
+_ADDRESS_RE = re.compile(
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
+    r"|https?://[^\s'\"）)]+"  # URL
+    r"|(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
+    r"|\b(?=[0-9a-f:]*[a-f])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,}\b",  # IPv6
+    re.IGNORECASE,
+)
 
 
 def normalize_rules(raw: Any) -> set[str]:
@@ -173,6 +185,23 @@ class Redactor:
         """Return the host name the dashboard may show."""
 
         return HIDDEN if self.hostname else hostname
+
+    def mask_addresses(self, text: Any) -> str:
+        """Hide probe errors that embed a host, address or URL.
+
+        Only applied when the ``hostname`` rule is on, and only when the text
+        actually contains an address-shaped token. Replacing every non-empty
+        error with a placeholder also hid "HTTP 500 (expected 200)" and
+        "probe timed out", which made the monitor cards useless for
+        diagnosis while adding no privacy.
+        """
+
+        value = str(text or "")
+        if not value or not self.hostname:
+            return value
+        if not _ADDRESS_RE.search(value):
+            return value
+        return "已隐藏（错误详情含主机或地址信息）"
 
 
 def _empty_chart() -> dict[str, Any]:

@@ -850,7 +850,15 @@ class StatusCardPlugin(Star):
         audit = self.audit_issues()
         actionable = [item for item in audit if item.level in ("error", "warning")]
         if actionable:
+            # Listing only a count left the administrator unable to act from
+            # QQ ("2 项待处理" -- which two?). Show the same details the info
+            # branch already prints.
             lines.append(f"配置体检: {len(actionable)} 项待处理")
+            for issue in actionable[:4]:
+                tag = "错误" if issue.level == "error" else "提醒"
+                lines.append(f"  [{tag}] {issue.message}")
+            if len(actionable) > 4:
+                lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
         elif audit:
             lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
             for issue in audit[:4]:

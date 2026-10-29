@@ -198,44 +198,56 @@ class PageApi:
     def _mask_host_text(self, text: str) -> str:
         """Hide probe errors that embed an internal host or address.
 
-        ``asyncio.open_connection`` failures read like
-        ``ConnectionRefusedError: [Errno 111] Connect call failed ('10.0.0.12', 9000)``
-        and used to reach the browser verbatim even with hostname redaction on.
+        Delegates to the shared redactor: only address-shaped text is
+        replaced, so "HTTP 500 (expected 200)" and "probe timed out" stay
+        readable while ``10.0.0.12:9000`` and URLs do not reach the browser.
         """
 
-        value = str(text or "")
-        if not value or "hostname" not in self._redact():
-            return value
-        return "已隐藏（错误详情含主机或地址信息）"
+        return self._redactor().mask_addresses(text)
 
     def _disk(self) -> dict[str, Any]:
         paths = cfg_get(self.plugin.config, "display.disk_paths", None)
-        if isinstance(paths, list) and paths:
-            path = str(paths[0])
+        if isinstance(paths, list):
+            configured = [str(item) for item in paths if str(item).strip()]
         else:
-            path = os.path.abspath(os.sep)
+            configured = []
+        if not configured:
+            configured = [os.path.abspath(os.sep)]
         try:
             # Keep the dashboard on the same used/total scale as the card.
-            usage = disk_usage([path])[0]
-            if usage.percent is None or usage.used is None or usage.total is None:
-                raise RuntimeError(usage.exception or "磁盘信息不可用")
-            return {
-                "path": path,
-                "percent": round(float(usage.percent), 1),
-                "used": int(usage.used),
-                "total": int(usage.total),
-                "used_text": format_bytes(usage.used),
-                "total_text": format_bytes(usage.total),
-            }
+            usages = disk_usage(configured)
         except Exception:
+            usages = []
+        mounts: list[dict[str, Any]] = []
+        for usage in usages:
+            if usage.percent is None or usage.used is None or usage.total is None:
+                continue
+            mounts.append(
+                {
+                    "path": str(usage.name or ""),
+                    "percent": round(float(usage.percent), 1),
+                    "used": int(usage.used),
+                    "total": int(usage.total),
+                    "used_text": format_bytes(usage.used),
+                    "total_text": format_bytes(usage.total),
+                }
+            )
+        if not mounts:
             return {
-                "path": path,
+                "path": configured[0],
                 "percent": None,
                 "used": None,
                 "total": None,
                 "used_text": "--",
                 "total_text": "--",
+                "disks": [],
             }
+        # The disk alert watches every mount, so the card shows the worst one
+        # instead of silently reporting the first (a filling second disk used
+        # to stay invisible here).
+        worst = max(mounts, key=lambda item: item["percent"])
+        worst["disks"] = mounts
+        return worst
 
     async def _latest_processes(self, top_n: int) -> list[dict[str, Any]]:
         """Return the same ten-second snapshot the status card renders.
@@ -528,7 +540,7 @@ class PageApi:
                 return {
                     "name": item.get("name"),
                     "ok": bool(ok),
-                    "detail": detail,
+                    "detail": self._mask_host_text(str(detail or "")),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 }
 
@@ -677,7 +689,7 @@ class PageApi:
                     "day": row.get("day"),
                     "kind": row.get("kind"),
                     "name": row.get("name"),
-                    "detail": row.get("detail"),
+                    "detail": self._mask_host_text(str(row.get("detail") or "")),
                     "status": row.get("status"),
                     "resolved_ts": row.get("resolved_ts"),
                 }
@@ -761,11 +773,11 @@ class PageApi:
                         "up": float(item[1]),
                         "down": float(item[2]),
                     }
-                    for item in history[-120:]
+                    for item in history[-60:]
                     if isinstance(item, (list, tuple)) and len(item) >= 3
                 ]
                 network_note = (
-                    "网络折线来自插件 state.json（仅最近约 2 小时）；"
+                    "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）；"
                     "开启「记录日报历史数据」后可按所选范围显示。"
                 )
                 network_note_kind = "state"
@@ -836,7 +848,7 @@ class PageApi:
                 "day": event.get("day"),
                 "kind": event.get("kind"),
                 "name": event.get("name"),
-                "detail": str(event.get("detail") or "")[:200],
+                "detail": self._mask_host_text(str(event.get("detail") or "")[:200]),
                 "status": event.get("status"),
                 "resolved_ts": event.get("resolved_ts"),
             }
@@ -873,12 +885,16 @@ class PageApi:
         plugin = self.plugin
         now_ts = time.time()
         fresh = str(_query_value("fresh", "0")) == "1"
-        # The cache key carries the date and the redaction rules: a single
-        # slot used to serve yesterday's report right after midnight, or an
-        # unredacted payload for a minute after page_redact was turned on.
+        # The cache key carries the date, the redaction rules and the report
+        # content selection: a single slot used to serve yesterday's report
+        # right after midnight, an unredacted payload for a minute after
+        # page_redact was turned on, or old sections after the operator
+        # changed daily_report.sections.
+        sections_cfg = cfg_get(plugin.config, "daily_report.sections", None)
         cache_key = (
             now_in_timezone(plugin.config).date().isoformat(),
             tuple(sorted(self._redact())),
+            repr(sections_cfg),
         )
         cached = self._reports_cache
         if (
@@ -893,7 +909,7 @@ class PageApi:
             builder = DailyReportBuilder(
                 plugin.report_store, plugin.config, redact=self._redactor().rules
             )
-            sections = cfg_get(plugin.config, "daily_report.sections", None)
+            sections = sections_cfg
             view = await asyncio.to_thread(
                 builder.build,
                 day=None,
@@ -927,7 +943,9 @@ class PageApi:
             "provider_quality": view.get("provider_quality"),
             "website": view.get("website"),
             "process": view.get("process"),
-            "runs": plugin.report_store.list_report_runs(limit=30),
+            "runs": await asyncio.to_thread(
+                plugin.report_store.list_report_runs, limit=30
+            ),
         }
         self._reports_cache = (now_ts, payload, cache_key)
         return jsonify(payload)

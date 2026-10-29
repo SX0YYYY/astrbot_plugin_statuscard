@@ -85,7 +85,7 @@
         {% endfor %}
       </div>
       <div class="chart-block">
-        <div class="chart-title">{{ d.resources.hour_label }} 24 小时 <span>按小时均值</span></div>
+        <div class="chart-title">{{ d.resources.hour_label }} <span>{{ d.resources.hour_note }}</span></div>
         {{ legend(d.resources.charts.hourly) }}
         {{ chart_svg(d.resources.charts.hourly) }}
       </div>

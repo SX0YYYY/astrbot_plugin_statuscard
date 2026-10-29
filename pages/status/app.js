@@ -899,7 +899,12 @@
       $("provider-summary").textContent = "--";
     }
 
-    const audit = data.audit || [];
+    // ``info`` items are neutral notices ("notification center is active");
+    // rendering them as a "配置提醒" banner put a permanent, self-explaining
+    // warning on every overview load. They stay visible in 状态卡诊断.
+    const audit = (data.audit || []).filter(
+      (issue) => issue && issue.level !== "info",
+    );
     const banner = $("audit-banner");
     if (audit.length) {
       banner.hidden = false;
@@ -1109,7 +1114,7 @@
           : noteKind === "state"
             ? t(
                 "network_note_state",
-                "网络折线来自插件 state.json（仅最近约 2 小时）。",
+                "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）。",
               )
             : data.network_note || "";
     if (data.truncated) {
@@ -1822,6 +1827,17 @@
 
   let verifyArmTimer = 0;
 
+  const VERIFY_LABELS = {
+    targets: ["verify_targets", "验证推送目标"],
+    monitors: ["verify_monitors", "验证监测项"],
+    webhook: ["verify_webhook", "验证 Webhook"],
+  };
+
+  function verifyLabel(kind) {
+    const entry = VERIFY_LABELS[kind] || VERIFY_LABELS.targets;
+    return t(entry[0], entry[1]);
+  }
+
   async function runVerify(kind, button) {
     if (!button || button.disabled) return;
     // The dashboard iframe sandbox has no allow-modals, so window.confirm is
@@ -1835,7 +1851,7 @@
       verifyArmTimer = setTimeout(() => {
         button.dataset.armed = "";
         button.classList.remove("verify-armed");
-        button.textContent = t("verify_targets", "验证推送目标");
+        button.textContent = verifyLabel(kind);
       }, 5000);
       return;
     }
@@ -1860,9 +1876,10 @@
       }
     } finally {
       button.disabled = false;
-      // Restore the real label, not whatever the arm step last wrote: it was
-      // captured after arming, so the button stayed "再点一次确认发送".
-      button.textContent = t("verify_targets", "验证推送目标");
+      // Restore this button's own label, not a fixed one: the old code wrote
+      // "验证推送目标" for every kind, so after checking monitors the page
+      // showed two "push targets" buttons and the second one did not send.
+      button.textContent = verifyLabel(kind);
     }
   }
 

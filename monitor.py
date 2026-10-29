@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import psutil
@@ -52,9 +54,26 @@ _CONFIG_ERROR_HINTS = (
     "command not found",
     "docker: not found",
     "cannot connect to the docker daemon",
+    # ``docker inspect`` on a wrong container name answers with
+    # "Error: No such object: <name>" (or "No such container"), which is a
+    # typo in the config, not an outage.
+    "no such object",
+    "no such container",
+    # ``systemctl`` reports "Unit x.service not found." / "Failed to get
+    # properties" for a wrong unit name; without these the monitor raised a
+    # fake outage every cooldown forever.
+    "not found",
+    "failed to get properties",
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
+
+# A permanently unreachable push target must not keep the monitor retrying
+# forever: every attempt costs a full send timeout plus a state write. Alert
+# retries are wider than recovery retries because the outage is still real,
+# but both are bounded (the resource engine gives up after three).
+MAX_ALERT_RETRIES = 10
+MAX_RECOVERY_RETRIES = 5
 
 
 def _looks_like_config_error(text: str) -> bool:
@@ -593,10 +612,16 @@ class ServiceMonitor:
                     st["fails"] = 0
                     st["pending"] = not delivered and not buffered
                     if buffered:
-                        # Covered by the aggregator summary; still a real
-                        # alert episode, so the event log stays complete.
+                        # Covered by the aggregator summary, which does reach
+                        # the chat: start the cooldown now and keep a single
+                        # "alert" event. Treating a buffered alert as a failed
+                        # push also wrote a duplicate "failed" row for one
+                        # outage and skipped the cooldown entirely.
+                        st["last_sent"] = now
+                        st["retry_count"] = 0
+                        st["next_attempt"] = 0
                         self._record_event(name, target_text, detail, "alert")
-                    if delivered:
+                    elif delivered:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
@@ -627,8 +652,22 @@ class ServiceMonitor:
                         self._record_event(name, target_text, detail, "alert")
                     else:
                         retry_count = int(st.get("retry_count") or 0) + 1
-                        st["retry_count"] = retry_count
-                        st["next_attempt"] = now + retry_delay(retry_count)
+                        if retry_count > MAX_ALERT_RETRIES:
+                            # The operator never received this outage, so keep
+                            # the episode latched but silent and suppress the
+                            # recovery notice later.
+                            st["pending"] = False
+                            st["alerted"] = False
+                            st["retry_count"] = 0
+                            st["next_attempt"] = 0
+                            logger.warning(
+                                "监测项 %s 告警连续 %d 次发送失败，已停止重试",
+                                name,
+                                MAX_ALERT_RETRIES,
+                            )
+                        else:
+                            st["retry_count"] = retry_count
+                            st["next_attempt"] = now + retry_delay(retry_count)
         else:
             st["fails"] = 0
             st["last_checked"] = now
@@ -646,8 +685,25 @@ class ServiceMonitor:
                         st.pop("recovery_retry_count", None)
                     else:
                         retry_count = int(st.get("recovery_retry_count") or 0) + 1
-                        st["recovery_retry_count"] = retry_count
-                        st["recovery_next_attempt"] = now + retry_delay(retry_count)
+                        if retry_count > MAX_RECOVERY_RETRIES:
+                            # A permanently unreachable target would otherwise
+                            # retry this notice every ten minutes until the
+                            # process restarts.
+                            for stale_key in (
+                                "pending_recovery",
+                                "recovery_attempt",
+                                "recovery_next_attempt",
+                                "recovery_retry_count",
+                            ):
+                                st.pop(stale_key, None)
+                            logger.warning(
+                                "监测项 %s 恢复通知连续 %d 次发送失败，已停止重试",
+                                name,
+                                MAX_RECOVERY_RETRIES,
+                            )
+                        else:
+                            st["recovery_retry_count"] = retry_count
+                            st["recovery_next_attempt"] = now + retry_delay(retry_count)
             if alerting:
                 stale = bool(st.pop("stale", False))
                 # Only announce a recovery for an episode that actually
@@ -848,6 +904,37 @@ class ServiceMonitor:
                         f"{CONFIG_ERROR_PREFIX}{unit}: {state_text[:180]}",
                         unit,
                     )
+                if state_text != "active":
+                    # ``is-active`` answers "inactive" both for a stopped
+                    # service and for a unit that does not exist, so only
+                    # LoadState can tell a typo from a real outage.
+                    try:
+                        show = await asyncio.to_thread(
+                            subprocess.run,
+                            [
+                                "systemctl",
+                                "show",
+                                "-p",
+                                "LoadState",
+                                "--value",
+                                unit,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                        )
+                        load_state = (show.stdout or "").strip()
+                    except Exception:
+                        load_state = ""
+                    if load_state == "not-found":
+                        return (
+                            False,
+                            (
+                                f"{CONFIG_ERROR_PREFIX}{unit}: unit 不存在"
+                                "（LoadState=not-found）"
+                            ),
+                            unit,
+                        )
                 return state_text == "active", f"{unit}: {state_text}", unit
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", unit
@@ -860,7 +947,20 @@ class ServiceMonitor:
         name = str(item.get("name") or "")
         if kind == "http":
             target = str(item.get("url") or "")
-        elif kind == "tcp":
+            key_target = redact_url(target)
+            try:
+                query = urlsplit(target).query
+            except Exception:
+                query = ""
+            if query:
+                # Two probes on the same path with different query strings are
+                # different targets: they must not share one state slot (one
+                # success would otherwise reset the other's alerting latch).
+                # Only a short hash is persisted, so tokens stay out of
+                # state.json.
+                key_target += "#q" + hashlib.sha1(query.encode("utf-8")).hexdigest()[:8]
+            return f"{kind}:{name}:{key_target}"
+        if kind == "tcp":
             target = f"{item.get('host', '')}:{item.get('port', '')}"
         elif kind == "docker":
             target = str(item.get("container") or "")

@@ -27,7 +27,13 @@ import psutil
 from astrbot.api import logger
 
 from .redactor import Redactor, read_rules
-from .utils import CpuFreq, cfg_get, normalize_targets, readable_python_version
+from .utils import (
+    CpuFreq,
+    cfg_get,
+    normalize_targets,
+    readable_python_version,
+    redact_url,
+)
 from .version import resolve_astrbot_version
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -387,12 +393,33 @@ def _normalize_website_targets(raw: Any) -> list[WebsiteTarget]:
             # Keep in sync with the schema slider (1-15s); a wider clamp here
             # would silently accept values the dashboard cannot express.
             timeout = min(15.0, max(1.0, timeout))
-            out.append(WebsiteTarget(name or url, url, timeout))
+            out.append(WebsiteTarget(name or redact_url(url), url, timeout))
         elif isinstance(item, str):
             url = item.strip()
             if url:
-                out.append(WebsiteTarget(url, url, 3.0))
+                # A blank name used to fall back to the full URL, which put
+                # ``?token=...`` into report.db, the status card, the daily
+                # report image and the CSV export. The card only needs a
+                # readable label, so strip credentials/query here.
+                out.append(WebsiteTarget(redact_url(url), url, 3.0))
     return out
+
+
+def website_ok(status: Any) -> bool:
+    """Available means the server answered with 2xx/3xx.
+
+    Shared by the status card, the daily report and the dashboard: a 500 from
+    a live proxy used to be green on the card (only transport errors counted
+    as failures) while the same probe reported 0% availability in the report.
+    """
+
+    text = str(status or "")
+    if text == "ERR":
+        return False
+    try:
+        return 200 <= int(text) < 400
+    except ValueError:
+        return False
 
 
 def _copy_conn_tests(results: list[ConnTest]) -> list[ConnTest]:
@@ -1945,7 +1972,7 @@ async def collect_all(
                 "delay": (
                     f"{x.delay:.0f}ms" if x.delay < 1000 else f"{x.delay / 1000:.2f}s"
                 ),
-                "ok": not x.error,
+                "ok": website_ok(x.status),
                 "error": x.error,
             }
             for x in websites

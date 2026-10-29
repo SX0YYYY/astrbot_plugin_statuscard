@@ -84,6 +84,19 @@ MAX_RECOVERY_RETRIES = 5
 OFFLINE_ALERT_SAMPLES = 2
 
 
+def _webhook_bind_allowed(host: str, require_token: bool, token: str) -> bool:
+    """Whether the Komari webhook may bind ``host`` with these auth settings.
+
+    A wildcard bind without an enforced token turns the listener into an open
+    relay into the operator's chat, and a token that is configured but not
+    required is not checked at all, so both cases refuse to start.
+    """
+
+    if host not in {"0.0.0.0", "::", ""}:
+        return True
+    return bool(require_token and token)
+
+
 def _fmt_ts(ts: float, config: Any = None) -> str:
     """Format a Unix timestamp in the display timezone."""
 
@@ -544,7 +557,14 @@ class AlertEngine:
         try:
             configured = cfg_get(self.config, "display.disk_paths", None)
             if isinstance(configured, list):
-                disk_paths = [str(item) for item in configured if str(item).strip()]
+                # Duplicate entries would evaluate the same mount twice per
+                # sample, so a sustain_samples=3 rule fired after two cycles.
+                seen: list[str] = []
+                for entry in configured:
+                    path = str(entry).strip()
+                    if path and path not in seen:
+                        seen.append(path)
+                disk_paths = seen
         except Exception:
             disk_paths = []
         if not disk_paths:
@@ -1496,13 +1516,16 @@ class AlertEngine:
             )
             return
 
-        if host == "0.0.0.0" and not token:
-            # Exposing the webhook on every interface without a token would
-            # let anyone post to it and push arbitrary messages into the
-            # operator's chat, so the listener refuses to start.
+        if not _webhook_bind_allowed(host, require_token, token):
+            # Exposing the webhook on every interface without an enforced
+            # token would let anyone post to it and push arbitrary messages
+            # into the operator's chat. A token that is filled in but not
+            # required is equally open, because handle() only checks it when
+            # require_token is on, so the listener refuses to start.
             logger.error(
-                "Komari Webhook 绑定 0.0.0.0 但未配置 Token，已拒绝启动；"
-                "请改用 127.0.0.1，或填写 Token 后再启用"
+                "Komari Webhook 监听所有网卡（%s）但没有启用 Token 鉴权，已拒绝启动；"
+                "请改用 127.0.0.1，或勾选「强制要求 Token」并填写 Token 后再启用",
+                host,
             )
             return
 

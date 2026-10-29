@@ -242,13 +242,20 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "Webhook 会拒绝启动。请填写 Token 或关闭该开关。",
                 )
             )
-        elif webhook_host in ("0.0.0.0", "::", "") and not webhook_token:
+        elif webhook_host in ("0.0.0.0", "::", "") and not cfg_bool(
+            config, "alerts.komari_webhook.require_token", True
+        ):
+            # A token that is configured but not enforced leaves the listener
+            # open to anyone who can reach the port, so the runtime refuses to
+            # start it; report the same condition here instead of only
+            # checking whether a token string exists.
             issues.append(
                 AuditIssue(
                     "error",
                     "webhook_open_no_token",
-                    "Komari Webhook 监听所有网卡（0.0.0.0）却没有设置 Token，"
-                    "出于安全考虑会拒绝启动。请设置 Token 或改回 127.0.0.1。",
+                    "Komari Webhook 监听所有网卡（0.0.0.0）但没有启用 Token 鉴权"
+                    "（未勾选「强制要求 Token」），出于安全考虑会拒绝启动。"
+                    "请勾选并填写 Token，或改回 127.0.0.1。",
                 )
             )
     if cfg_bool(config, "alerts.offline_broadcast.enabled", False) and not cfg_bool(
@@ -269,6 +276,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     for enabled_key, time_key, label in (
         ("daily_report.enabled", "daily_report.time", "趋势日报"),
         ("alerts.daily_summary.enabled", "alerts.daily_summary.time", "每日定时状态图"),
+        ("daily_report.weekly_enabled", "daily_report.weekly_time", "周报"),
     ):
         if not cfg_bool(config, enabled_key, False):
             continue

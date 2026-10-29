@@ -75,9 +75,50 @@ class StateStore:
             with self._lock:
                 self.data = parsed
             logger.warning("状态文件损坏，已从备份恢复: %s", backup)
+            # Rewrite state.json immediately. Leaving the broken file in place
+            # made the next save() copy it over .bak, so a second corruption
+            # lost the whole state despite the backup.
+            try:
+                self._write_payload(json.dumps(parsed, ensure_ascii=False, indent=1))
+            except Exception as exc:
+                logger.warning("回写恢复后的状态文件失败: %s", exc)
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _is_readable_state(path: Path) -> bool:
+        """True when ``path`` currently holds a JSON object."""
+
+        try:
+            return isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
+        except Exception:
+            return False
+
+    def _write_payload(self, payload: str) -> None:
+        """Write ``payload`` to the state file atomically.
+
+        fsync before the rename: os.replace only guarantees that a reader
+        sees the old or the new file, not that the bytes reached the disk. A
+        power loss could otherwise leave a truncated JSON, and the previous
+        copy is what load() needs.
+        """
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(
+            f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        tmp.write_text(payload, encoding="utf-8")
+        try:
+            with open(tmp, "rb+") as handle:
+                os.fsync(handle.fileno())
+        except Exception:
+            pass
+        os.replace(tmp, self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except Exception:
+            pass
 
     def _migrate(self, existed: bool) -> None:
         with self._lock:
@@ -131,31 +172,17 @@ class StateStore:
                 if snapshot is None:  # pragma: no cover - defensive
                     raise RuntimeError("state snapshot unavailable")
                 payload = json.dumps(snapshot, ensure_ascii=False, indent=1)
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.path.with_name(
-                    f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-                )
-                tmp.write_text(payload, encoding="utf-8")
-                # fsync before the rename: os.replace only guarantees that a
-                # reader sees the old or the new file, not that the bytes
-                # reached the disk. A power loss could otherwise leave a
-                # truncated JSON, and the previous copy is what load() needs.
-                try:
-                    with open(tmp, "rb+") as handle:
-                        os.fsync(handle.fileno())
-                except Exception:
-                    pass
                 backup = self.path.with_name(self.path.name + ".bak")
                 try:
-                    if self.path.is_file():
+                    # Only refresh .bak with a file that still parses. After a
+                    # recovery state.json is valid again, but if a bad write
+                    # ever leaves it broken this keeps the last good copy
+                    # instead of overwriting it with garbage.
+                    if self.path.is_file() and self._is_readable_state(self.path):
                         shutil.copy2(self.path, backup)
                 except Exception:
                     pass
-                os.replace(tmp, self.path)
-                try:
-                    os.chmod(self.path, 0o600)
-                except Exception:
-                    pass
+                self._write_payload(payload)
         except Exception as exc:
             logger.warning("写入状态文件失败 %s: %s", self.path, exc)
 

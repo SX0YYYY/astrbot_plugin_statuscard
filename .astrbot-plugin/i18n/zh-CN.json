@@ -139,7 +139,7 @@
         "export_truncated": "数据量超出上限，仅导出最近的记录",
         "history_truncated": "范围数据超出上限，仅显示最近的记录",
         "network_note_redacted": "已按脱敏配置隐藏网络数据。",
-        "network_note_state": "网络折线来自插件 state.json（仅最近约 2 小时）。",
+        "network_note_state": "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）。",
         "network_note_db": "网络折线来自日报采样，与资源趋势同一时间窗口。",
         "history_loading": "加载中…",
         "history_range_note": "数据范围 {from} – {to}（{days} 天）",

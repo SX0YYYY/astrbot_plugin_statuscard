@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from astrbot_plugin_statuscard.alerts import AlertEngine
 from astrbot_plugin_statuscard.delivery import DeliveryService
@@ -92,7 +93,11 @@ def test_unresolved_alerts_visible_in_report(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     today = date(2026, 10, 26)
     yesterday = today - timedelta(days=1)
-    old_ts = int(time.time()) - 5 * 86400
+    tz = ZoneInfo("Asia/Shanghai")
+    # Fixed timestamps: mixing time.time() with a hard-coded report day made
+    # this test depend on the wall clock (it passed only while "now" was close
+    # to 2026-10-26) and broke as soon as the date moved on.
+    old_ts = int(datetime(2026, 10, 20, 12, 0, tzinfo=tz).timestamp())
     store.add_event(
         old_ts,
         (today - timedelta(days=5)).isoformat(),
@@ -111,7 +116,7 @@ def test_unresolved_alerts_visible_in_report(tmp_path: Path) -> None:
 
     # A recovery inside the window must hide the stale alert.
     store.add_event(
-        int(time.time()) - 86400,
+        int(datetime(2026, 10, 25, 12, 0, tzinfo=tz).timestamp()),
         yesterday.isoformat(),
         "service",
         "旧故障",

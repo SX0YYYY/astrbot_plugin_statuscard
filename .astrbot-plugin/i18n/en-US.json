@@ -139,7 +139,7 @@
         "export_truncated": "Volume exceeded the cap; only the most recent records were exported",
         "history_truncated": "Range data exceeded the cap; only the most recent records are shown",
         "network_note_redacted": "Network data is hidden by the dashboard redaction setting.",
-        "network_note_state": "The network chart comes from the plugin's state.json (last ~2 hours only).",
+        "network_note_state": "The network chart comes from the plugin's state.json (60 sample points, about 1 hour).",
         "network_note_db": "Network rates come from report samples, same window as the resource chart.",
         "history_loading": "Loading…",
         "history_range_note": "Data range {from} – {to} ({days}d)",
