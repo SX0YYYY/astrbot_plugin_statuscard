@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from astrbot_plugin_statuscard import alerts as alerts_module
 from astrbot_plugin_statuscard import collectors
@@ -194,7 +196,11 @@ def test_unresolved_counts_in_window_episodes(tmp_path: Path) -> None:
 
     store = ReportStore(tmp_path / "report.db")
     now = int(time.time()) - 86400
-    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    # The report groups by display.timezone, so the event's day must be
+    # derived from that zone too: time.localtime() made the test depend on the
+    # host zone (it failed on the UTC CI runner once the two dates differed).
+    tz = ZoneInfo("Asia/Shanghai")
+    day = datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d")
     # One alert inside the report window without a recovery.
     assert store.add_event(now, day, "resource", "内存使用率", "90%", "alert")
 
