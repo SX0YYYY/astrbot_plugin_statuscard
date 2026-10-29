@@ -267,8 +267,19 @@ def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
     for name in targets:
         try:
             u = psutil.disk_usage(name)
+            # Measure against ``total`` so the number matches the
+            # "used / total" text printed beside it. psutil's own percent
+            # divides by (used + avail), which leaves out the filesystem's
+            # root-reserved blocks; on ext4 that reads 2-3 points higher and
+            # looks like an arithmetic error to whoever reads the card.
+            percent = (u.used / u.total * 100.0) if u.total else 0.0
             ret.append(
-                DiskUsage(name=name, used=u.used, total=u.total, percent=u.percent)
+                DiskUsage(
+                    name=name,
+                    used=u.used,
+                    total=u.total,
+                    percent=round(percent, 1),
+                )
             )
         except Exception as exc:
             ret.append(

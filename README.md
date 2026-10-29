@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.18.3-blue)
+![Version](https://img.shields.io/badge/version-2.18.4-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -655,6 +655,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.18.4**：修正两处读数口径——磁盘百分比改为与「已用/总容量」同分母（此前含 ext4 保留块，会多半 2–3 点）、状态卡流量改名为「累计上传/累计下载」并注明累计量按本次开机以来
 - **v2.18.3**：重拍配置页三张截图，与当前界面（v2.18.2 的分组顺序与文案）一致
 - **v2.18.2**：配置页与文档打磨——通知类型名称去掉「每日」前缀（趋势日报/周报/定时状态图）、监测项说明补齐、README 首屏放效果图
 - **v2.18.1**：修复「内存恢复通知发两遍」——冷却窗口内被抑制的故障不再单独发恢复通知

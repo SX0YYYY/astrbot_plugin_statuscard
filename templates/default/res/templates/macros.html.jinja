@@ -30,7 +30,7 @@
       </div>
     </div>
   </div>
-  <div class="scope-note">统计口径：收 = {{ v.bot.recv_scope }} · 发 = {{ v.bot.sent_scope }} · 月流量按自然月累计，每月 1 日重置</div>
+  <div class="scope-note">统计口径：收 = {{ v.bot.recv_scope }} · 发 = {{ v.bot.sent_scope }} · 累计流量按本次开机以来，月流量按自然月累计（重启保留），每月 1 日重置</div>
 </div>
 {% endmacro %}
 
@@ -143,11 +143,11 @@
       <div class="net-stat-value down">{{ v.network.down }}</div>
     </div>
     <div class="net-stat">
-      <div class="net-stat-label">📤 上传量</div>
+      <div class="net-stat-label">📤 累计上传</div>
       <div class="net-stat-value">{{ v.network.up_total }}</div>
     </div>
     <div class="net-stat">
-      <div class="net-stat-label">📥 下载量</div>
+      <div class="net-stat-label">📥 累计下载</div>
       <div class="net-stat-value">{{ v.network.down_total }}</div>
     </div>
   </div>
