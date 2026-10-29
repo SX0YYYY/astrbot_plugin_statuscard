@@ -17,7 +17,7 @@ from typing import Any
 from astrbot.api import logger
 
 # The version of this plugin. Keep it in sync with ``metadata.yaml``.
-__version__ = "2.18.2"
+__version__ = "2.18.3"
 
 # Probing imports the package and consults its metadata, and it is called
 # from several render paths. A short cache keeps a burst of status cards or
