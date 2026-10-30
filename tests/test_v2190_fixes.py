@@ -749,3 +749,34 @@ def test_weekly_targets_empty_does_not_schedule_retry(tmp_path: Path) -> None:
 
     assert reporter._weekly_retry_count == 0
     assert not store.list_report_runs(limit=5)  # 与 v2.18.9 一致：不 record
+
+
+def test_shrink_image_bytes_keeps_data_url_small() -> None:
+    """上传背景压到安全体积：远程 T2I 以 JSON POST 收整份 HTML，
+    多 MB 的 data URL 会让背景加载失败（头像几十 KB 却正常）。"""
+    import io
+
+    from astrbot_plugin_statuscard.bg_provider import (
+        _detect_image_mime,
+        shrink_image_bytes,
+    )
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2200, 2800), (180, 40, 60)).save(buf, "PNG")
+    big = buf.getvalue()
+    assert _detect_image_mime(big) == "image/png"
+
+    small, mime = shrink_image_bytes(big)
+    assert mime == "image/jpeg"
+    assert len(small) < 1_200_000
+    assert _detect_image_mime(small) == "image/jpeg"
+    with Image.open(io.BytesIO(small)) as im:
+        assert im.size == (1170, 1489)  # 等比缩到目标宽（round 取整）
+
+    # 小图不放大
+    buf2 = io.BytesIO()
+    Image.new("RGB", (600, 400), (10, 120, 60)).save(buf2, "PNG")
+    small2, _ = shrink_image_bytes(buf2.getvalue())
+    with Image.open(io.BytesIO(small2)) as im2:
+        assert im2.size == (600, 400)

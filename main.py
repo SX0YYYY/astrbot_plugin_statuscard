@@ -16,7 +16,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from .aggregator import AlertAggregator
 from .alerts import AlertEngine
 from .audit import AuditIssue, run_audit
-from .bg_provider import MAX_IMAGE_BYTES, resolve_background
+from .bg_provider import MAX_IMAGE_BYTES, resolve_background, shrink_image_bytes
 from .collectors import (
     _call_action,
     _get_aiocqhttp_client,
@@ -586,6 +586,12 @@ class StatusCardPlugin(Star):
                 logger.warning(
                     "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
                 )
+            else:
+                # The HTML goes to the remote T2I service as one JSON POST;
+                # a multi-megabyte data URL made the rendered card fall back
+                # to the bare gradient (the background never loaded), while
+                # a small one renders fine.
+                bg_bytes, _ = shrink_image_bytes(bg_bytes)
 
         return await resolve_background(prefer_bytes=bg_bytes)
 

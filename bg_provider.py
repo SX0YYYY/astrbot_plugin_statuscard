@@ -16,6 +16,41 @@ class BgBytesData:
     mime: str
 
 
+def shrink_image_bytes(
+    data: bytes, target_width: int = 1170, quality: int = 85
+) -> tuple[bytes, str]:
+    """Downscale and re-encode an uploaded background before embedding.
+
+    The rendered HTML is shipped to the remote T2I service as one JSON POST;
+    a multi-megabyte data URL either blows the service's body budget or makes
+    its browser skip the background image -- while the avatar (a few dozen
+    KB data URL) renders fine in the very same card. Resize to the card's
+    logical pixel width and re-encode as JPEG so the data URL stays small.
+    GIF/WebP animations flatten to their first frame, which is what a
+    background needs anyway.
+    """
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(data)) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        if width > target_width:
+            image = image.resize(
+                (target_width, max(1, round(height * target_width / width))),
+                Image.LANCZOS,
+            )
+        for attempt_quality in (quality, 75, 60):
+            out = BytesIO()
+            image.save(out, "JPEG", quality=attempt_quality, optimize=True)
+            encoded = out.getvalue()
+            if len(encoded) <= 1_200_000:
+                break
+    return encoded, "image/jpeg"
+
+
 def _detect_image_mime(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
