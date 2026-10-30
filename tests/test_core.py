@@ -521,6 +521,11 @@ def test_build_default_html_inlines_assets() -> None:
     assert "data:image/png;base64," in html
     assert "init-global.js" not in html
     assert "width=650" in html
+    # v2.19.4: the undecodable fake bg falls back to the neutral fade
+    # colour, injected as the gradient layer before the image layer.
+    assert 'style="background-image: linear-gradient' in html
+    assert "rgba(90, 84, 80, 0) 559px" in html
+    assert ", url('data:image/jpeg;base64," in html
 
 
 def test_build_default_html_compact_hides_system_info() -> None:

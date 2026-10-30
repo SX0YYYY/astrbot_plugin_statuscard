@@ -53,6 +53,28 @@ def shrink_image_bytes(
     return encoded, "image/jpeg"
 
 
+def fade_color_from_bytes(data: bytes) -> tuple[int, int, int] | None:
+    """Average colour of a (usually already shrunk) background image.
+
+    Used as the underlay the card fades into below the background photo
+    (v2.19.4): the photo shows once at full width, then dissolves into
+    its own dominant tone instead of repeating down the page. Returns
+    None when the image cannot be decoded; callers apply a neutral
+    fallback.
+    """
+
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            pixel = image.convert("RGB").resize((1, 1)).getpixel((0, 0))
+        return int(pixel[0]), int(pixel[1]), int(pixel[2])
+    except Exception:
+        return None
+
+
 def _detect_image_mime(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"

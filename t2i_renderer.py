@@ -7,6 +7,8 @@ from typing import Any
 import jinja2
 from markupsafe import Markup, escape
 
+from .bg_provider import fade_color_from_bytes
+
 ROOT = Path(__file__).parent
 TPL_DIR = ROOT / "templates" / "default" / "res" / "templates"
 CSS_FILE = ROOT / "templates" / "default" / "res" / "css" / "index.css"
@@ -67,6 +69,37 @@ def _br_filter(value: Any) -> Markup:
     return Markup(str(escape(str(value))).replace("\n", "<br />"))
 
 
+def _fade_overlay(bg_bytes: bytes) -> str:
+    """Gradient that dissolves the single background photo into its own
+    dominant tone below the fold (v2.19.4).
+
+    The photo is shown once at full card width (no vertical tiling --
+    tiling repeated portrait photos down the long page); under it a
+    linear gradient fades to the image's average colour so the lower
+    half of the card keeps the photo's palette without repeating it.
+    Fade bounds scale with the photo's displayed height (650px wide).
+    """
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    color = fade_color_from_bytes(bg_bytes) or (90, 84, 80)
+    try:
+        with Image.open(BytesIO(bg_bytes)) as image:
+            width, height = image.size
+        display_h = max(1, round(650 * height / width))
+    except Exception:
+        display_h = 650
+    start = round(display_h * 0.86)
+    end = round(display_h * 1.21)
+    r, g, b = color
+    return (
+        f"linear-gradient(180deg, rgba({r}, {g}, {b}, 0) {start}px, "
+        f"rgb({r}, {g}, {b}) {end}px)"
+    )
+
+
 def build_default_html(
     collected: dict[str, Any],
     bg_bytes: bytes,
@@ -76,6 +109,7 @@ def build_default_html(
 ) -> str:
     view = collected.setdefault("view", {})
     view["background_data_url"] = _data_url(bg_bytes, bg_mime)
+    view["background_overlay"] = _fade_overlay(bg_bytes)
     width = max(650, min(1600, int(render_width or 650)))
 
     if avatar_bytes is None:

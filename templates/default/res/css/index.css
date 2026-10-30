@@ -34,13 +34,14 @@ body {
 
 .main-background {
   width: 650px;
-  /* Fill the card width at the image's natural aspect ratio and tile it
-     down the page (v2.19.3, user's choice): downscaling stays sharp,
-     nothing gets cropped out, and no white veil sits on top of the
-     picture. "cover" scaled a portrait photo ~3x to span the whole page
-     height and showed one blurry vertical sliver of it. */
+  /* The photo shows once at full card width; a gradient overlay built
+     into the template (v2.19.4) dissolves it into the photo's own
+     dominant tone below the fold, so the long page keeps the photo's
+     palette without tiling it (tiling repeated portrait photos ~2.5x
+     down the page) and without the blurry cover crop or the old white
+     veil. */
   background-position: center top;
-  background-repeat: repeat-y;
+  background-repeat: no-repeat;
   background-size: 100% auto;
 }
 
