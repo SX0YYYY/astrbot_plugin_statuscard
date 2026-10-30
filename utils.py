@@ -156,14 +156,18 @@ def redact_url(url: Any) -> str:
     if not parts.netloc:
         # A bare "example.com/api?token=abc" has no scheme, so urlsplit puts
         # everything in path and the query survives. Strip it explicitly --
-        # and credentials too: "user:pass@host/api" is a legal (if unusual)
-        # monitor target, and the user:pass part used to survive verbatim.
+        # and credentials too: "user[:pass]@host/api" is a legal (if
+        # unusual) monitor target, and the userinfo used to survive.
         bare = text.split("#", 1)[0].split("?", 1)[0]
         if "@" in bare:
             head, _, tail = bare.rpartition("@")
-            # Only treat it as credentials when the part before "@" looks
-            # like a userinfo (no slashes); otherwise it is just a path.
-            if head and "/" not in head and ":" in head:
+            # Credentials only when the part before "@" looks like userinfo
+            # (no slashes); otherwise the "@" is just part of the path. A
+            # "user:" prefix is indistinguishable from a scheme here, but a
+            # scheme-less URL with a netloc-less "@" is a userinfo in
+            # practice -- and over-stripping a hypothetical mailto: probe
+            # only mangles the display, it never leaks.
+            if head and "/" not in head:
                 return tail
         return bare
     host = parts.hostname or ""

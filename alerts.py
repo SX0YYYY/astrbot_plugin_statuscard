@@ -479,6 +479,9 @@ class AlertEngine:
                 if label and label in labels:
                     st["alerted"] = False
                     st.pop("last_sent", None)
+                    # The window died with the abandon; leaving this set
+                    # would delay a future recovery for no reason.
+                    st.pop("awaiting_summary", None)
                     changed = True
         # Abandon can be the last write before a reload (stop() runs after
         # the aggregator is cancelled); persist it or the new instance reads
@@ -632,12 +635,15 @@ class AlertEngine:
                 if isinstance(rules, dict):
                     legacy_key = f"disk:{disk_paths[0]}"
                     legacy = rules.get(legacy_key)
-                    if isinstance(legacy, dict):
-                        if "disk" not in rules:
-                            rules["disk"] = dict(legacy)
-                        # Drop the old key in the same write: leaving it for
-                        # _prune_rules made it close the same disk twice --
-                        # one "已移除" recovery for a rule that still exists.
+                    if isinstance(legacy, dict) and "disk" not in rules:
+                        rules["disk"] = dict(legacy)
+                        # Drop the old key in the same write -- but only when
+                        # we actually migrated. When "disk" already exists
+                        # (the user once had this mount in first position and
+                        # reordered later), popping it used to discard a
+                        # possibly still-alerting episode without any
+                        # recovery event; pruning handles that leftover
+                        # instead.
                         rules.pop(legacy_key, None)
         valid_keys = {"cpu", "ram", "swap", "load"}
         for index, disk_path in enumerate(disk_paths):
@@ -1048,10 +1054,19 @@ class AlertEngine:
                         # episode happened.
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
-                        st["recovery_next_attempt"] = now + 15.0
+                        # Schedule after the window actually closes: a fixed
+                        # 15s raced the flush whenever the sampling interval
+                        # was shorter than the window.
+                        remaining = (
+                            self._aggregator.window_remaining("resource")
+                            if self._aggregator is not None
+                            else 0.0
+                        )
+                        st["recovery_next_attempt"] = now + max(15.0, remaining + 3.0)
                         logger.info(
-                            "告警 %s 在聚合窗口内恢复，恢复通知延后 15 秒发送",
+                            "告警 %s 在聚合窗口内恢复，恢复通知延后 %.0f 秒发送",
                             name,
+                            max(15.0, remaining + 3.0),
                         )
                         return
                     result = await self._send(text)

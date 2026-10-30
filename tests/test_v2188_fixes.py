@@ -157,11 +157,12 @@ def test_fmt_compact_rejects_non_finite() -> None:
 
 def test_mask_umo_hides_chat_id() -> None:
     masked = page_api_module._mask_umo("default:GroupMessage:461961169")
-    assert masked.endswith("1169")
-    assert "461961169" not in masked
+    # v2.19.0：保留末 2 位（更紧的打码；验证结果仍可区分两个目标）
+    assert masked.endswith("69")
+    assert "461961169" not in masked and "61169" not in masked
     assert masked.startswith("default:GroupMessage:")
-    # v2.19.0：短 ID 也打码（此前 ≤4 位原样返回，泄漏 UMO 契约的边缘）
-    assert page_api_module._mask_umo("1234") == "***4"
+    # v2.19.0：短 ID 也打码（保留末 2 位，区分度与打码的折中）
+    assert page_api_module._mask_umo("1234") == "**34"
     assert page_api_module._mask_umo("default:FriendMessage:abc") == (
         "default:FriendMessage:abc"
     )  # 无数字不入打码逻辑

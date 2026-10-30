@@ -688,6 +688,12 @@ class ServiceMonitor:
                         # The alert itself is still waiting for the summary:
                         # a recovery inside the window must queue behind it.
                         st["awaiting_summary"] = True
+                        # Identifies THIS item as the buffered one: two
+                        # monitors may share a name (keys differ by target),
+                        # and the abandon callback matches by name -- without
+                        # the marker it also withdrew the item whose alert
+                        # was delivered on its own.
+                        st["summary_buffered"] = True
                         self._record_event(name, target_text, detail, "alert")
                     elif delivered:
                         st["last_sent"] = now
@@ -806,8 +812,12 @@ class ServiceMonitor:
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
                 self._record_event(name, target_text, detail, "recovery")
+                # Pop unconditionally: leaving it set across a
+                # recover_notify=False recovery made the NEXT healthy
+                # recovery claim an undelivered alert out of nowhere.
+                exhausted = bool(st.pop("send_exhausted", False))
                 if self.recover_notify and not stale and notified:
-                    had_failed = bool(st.pop("send_exhausted", False)) or bool(pending)
+                    had_failed = exhausted or bool(pending)
                     extra = "\n（异常告警此前未能送达）" if had_failed else ""
                     text = (
                         f"✅ 服务恢复 · {name}\n"
@@ -827,10 +837,16 @@ class ServiceMonitor:
                         # episode happened.
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
-                        st["recovery_next_attempt"] = now + 15.0
+                        remaining = (
+                            self._aggregator.window_remaining("service")
+                            if self._aggregator is not None
+                            else 0.0
+                        )
+                        st["recovery_next_attempt"] = now + max(15.0, remaining + 3.0)
                         logger.info(
-                            "监测项 %s 在聚合窗口内恢复，恢复通知延后 15 秒发送",
+                            "监测项 %s 在聚合窗口内恢复，恢复通知延后 %.0f 秒发送",
                             name,
+                            max(15.0, remaining + 3.0),
                         )
                     else:
                         result = await self._send(text)
@@ -1150,8 +1166,14 @@ class ServiceMonitor:
                 if not isinstance(st, dict) or not st.get("alerting"):
                     continue
                 if str(st.get("name") or "") in labels:
+                    # Only withdraw items that were actually buffered: a
+                    # same-named item whose alert went out on its own keeps
+                    # its "notified" state.
+                    if not st.pop("summary_buffered", None):
+                        continue
                     st["alerted"] = False
                     st.pop("last_sent", None)
+                    st.pop("awaiting_summary", None)
                     changed = True
         # Abandon can be the last write before a reload (stop() runs after
         # the flush tasks are cancelled); persist it or the new instance

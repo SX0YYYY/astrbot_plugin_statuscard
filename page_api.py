@@ -124,7 +124,10 @@ def _mask_umo(target: Any) -> str:
     # class docstring promises never to expose; mask anything digit-bearing.
     if not digits:
         return text
-    keep = min(4, max(1, len(digits) - 4)) if len(digits) > 4 else 1
+    # Keep the last two digits: enough to tell two targets apart in the
+    # verify result, never enough to identify an account (old behaviour kept
+    # four for long IDs and none for very short ones).
+    keep = min(2, len(digits) - 1)
     masked = "*" * (len(digits) - keep) + digits[len(digits) - keep :]
     return f"{head}:{masked}" if head else masked
 
@@ -141,6 +144,9 @@ class PageApi:
         self.plugin = plugin
         self._reports_cache: tuple[float, dict[str, Any], tuple] | None = None
         self._reports_cache_seconds = 60.0
+        # Strong references for the fire-and-forget recovery tasks: asyncio
+        # may garbage-collect an unreferenced task mid-flight.
+        self._recovery_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # degraded store gate
@@ -161,9 +167,11 @@ class PageApi:
         if store.available:
             return None
         try:
-            asyncio.get_running_loop().create_task(
+            task = asyncio.get_running_loop().create_task(
                 asyncio.to_thread(store.ensure_ready)
             )
+            self._recovery_tasks.add(task)
+            task.add_done_callback(self._recovery_tasks.discard)
         except Exception:
             logger.debug("报表库后台恢复任务创建失败", exc_info=True)
         return {

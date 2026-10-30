@@ -28,7 +28,7 @@
         "history_gaps": "检测到 {count} 段停机盲区（灰色区域）：期间插件或 Bot 停机，无采样数据。",
         "history_loading": "加载中…",
         "history_range_note": "数据范围 {from} – {to}（{days} 天）",
-        "history_range_short": "数据仅 {days} 天，{range} 视图不完整",
+        "history_range_short": "数据仅 {days} 天，不足 {range}",
         "history_truncated": "范围数据超出上限，仅显示最近的记录",
         "kind_event": "事件",
         "kind_offline": "掉线",

@@ -79,6 +79,19 @@ class AlertAggregator:
             and time.time() < bucket.until
         )
 
+    def window_remaining(self, kind: str) -> float:
+        """Seconds until the open window for ``kind`` closes (0 if none).
+
+        Queued recovery notices use this to schedule themselves *after* the
+        summary: a fixed 15-second delay raced the flush whenever the
+        sampling interval was shorter than the window.
+        """
+
+        bucket = self._buckets.get(str(kind))
+        if bucket is None:
+            return 0.0
+        return max(0.0, bucket.until - time.time())
+
     def _bucket(self, kind: str) -> _Bucket:
         return self._buckets.setdefault(str(kind), _Bucket())
 
@@ -291,6 +304,11 @@ class AlertAggregator:
             if getattr(result, "uncertain_targets", None):
                 # Possibly already in the chat: retrying would duplicate it.
                 logger.warning("告警汇总发送未确认（%s，%d 项）", key, len(pending))
+                # The episode is over either way: a fresh window must start
+                # with a clean retry budget and counter, or the next summary
+                # inherits this one's leftovers.
+                bucket.retries = 0
+                bucket.retry_at = 0.0
                 bucket.dropped_count = 0
                 return
             self._requeue(bucket, pending, key, "发送失败")
@@ -330,6 +348,13 @@ class AlertAggregator:
             logger.warning("告警汇总%s，%d 项放弃重试（%s）", why, len(pending), key)
             if bucket.on_abandon is not None:
                 bucket.on_abandon(list(pending))
+            # Reset the bucket: without this, the next episode's summary
+            # inherits retries=2 and gives up on its FIRST failure (zero
+            # retries for the rest of the process), and dropped_count leaks
+            # into its totals.
+            bucket.retries = 0
+            bucket.retry_at = 0.0
+            bucket.dropped_count = 0
             return
         bucket.retries += 1
         bucket.retry_at = time.time() + retry_delay(bucket.retries)

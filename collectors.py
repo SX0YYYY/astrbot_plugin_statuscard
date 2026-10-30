@@ -325,7 +325,14 @@ def disk_usage_bounded(
     """Read disk usage without letting a hung mount block forever."""
 
     targets = [str(path) for path in (paths or _default_disk_paths())]
-    futures = {name: _DISK_POOL.submit(_disk_usage_one, name) for name in targets}
+    # Dedupe while keeping order: a duplicated path in disk_paths used to
+    # have its first future overwritten in the dict below -- an orphaned
+    # job that no one waits for or cancels, leaking one hung worker per
+    # call until the pool was full and every disk read timed out.
+    unique_targets = list(dict.fromkeys(targets))
+    futures = {
+        name: _DISK_POOL.submit(_disk_usage_one, name) for name in unique_targets
+    }
     done, _not_done = wait(futures.values(), timeout=timeout)
     results: dict[str, DiskUsage] = {}
     for name, future in futures.items():

@@ -664,3 +664,88 @@ def test_audit_accepts_good_notification_rule_target(tmp_path: Path) -> None:
     }
     issues = run_audit(config)
     assert all(issue.code != "target_format_suspect" for issue in issues)
+
+
+def test_disk_usage_bounded_dedupes_paths(monkeypatch) -> None:
+    """重复路径不再泄漏 worker：dict 覆盖会孤儿化先提交的挂死 future。"""
+    import threading
+
+    from astrbot_plugin_statuscard import collectors as collectors_module
+    from astrbot_plugin_statuscard.collectors import disk_usage_bounded
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_one(name: str):
+        class _U:
+            used, total, exception = 1.0, 10.0, None
+
+        class _U2:
+            used, total, exception = 2.0, 10.0, None
+
+        if name == "hung-mount":
+            started.set()
+            release.wait(30)
+            return _U()
+        return _U2()
+
+    monkeypatch.setattr(collectors_module, "_disk_usage_one", fake_one)
+    rows = disk_usage_bounded(["ok-mount", "hung-mount", "hung-mount"], timeout=1.0)
+    release.set()
+    # 3 个调用位、去重后 2 个 job：挂死盘只占 1 个 worker，结果仍保序保长
+    assert len(rows) == 3
+    assert rows[1].name == "hung-mount" and rows[2].name == "hung-mount"
+    assert rows[1].exception == "读取超时" and rows[0].exception is None
+    assert started.is_set()
+
+
+def test_daily_targets_empty_records_once_without_retry(tmp_path: Path) -> None:
+    """targets 空是配置问题不会自愈：只记一次，不再烧 3 轮重试。"""
+    from astrbot_plugin_statuscard.report import DailyReporter
+    from astrbot_plugin_statuscard.report_store import ReportStore
+
+    class _Plugin:
+        context = None
+
+        async def render_report_image(self, view):
+            return None
+
+        async def send_text(self, targets, text, source="unknown"):
+            raise AssertionError("targets 为空时不应尝试发送")
+
+    store = ReportStore(tmp_path / "report.db")
+    config = {"daily_report": {"enabled": True, "with_image": False}}
+    reporter = DailyReporter(_Plugin(), store, config)
+    reporter._build_view = lambda day=None: {"day": "2026-10-31", "sections": []}
+    reporter._last_sent_day = ""
+
+    asyncio.run(reporter._send_scheduled())
+
+    runs = store.list_report_runs(limit=5)
+    assert [r["detail"] for r in runs] == ["targets empty"]
+    assert reporter._pending_retry is None  # 不再排重试
+
+
+def test_weekly_targets_empty_does_not_schedule_retry(tmp_path: Path) -> None:
+    from astrbot_plugin_statuscard.report import DailyReporter
+    from astrbot_plugin_statuscard.report_store import ReportStore
+
+    class _Plugin:
+        context = None
+
+        async def render_report_image(self, view):
+            return None
+
+        async def send_text(self, targets, text, source="unknown"):
+            raise AssertionError("targets 为空时不应尝试发送")
+
+    store = ReportStore(tmp_path / "report.db")
+    config = {
+        "daily_report": {"enabled": True, "weekly_time": "21:30", "with_image": False}
+    }
+    reporter = DailyReporter(_Plugin(), store, config)
+
+    asyncio.run(reporter._send_weekly_scheduled())
+
+    assert reporter._weekly_retry_count == 0
+    assert not store.list_report_runs(limit=5)  # 与 v2.18.9 一致：不 record
