@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path
@@ -570,18 +569,6 @@ class StatusCardPlugin(Star):
             "background.bg_upload_files",
             self.data_dir,
         )
-        logger.info(
-            "[背景诊断] source=%s uploaded=%s config.background=%s",
-            source,
-            uploaded_file_path(
-                self.config, "background.bg_upload_files", self.data_dir
-            ),
-            json.dumps(
-                (cfg_get(self.config, "background", {}) or {}),
-                ensure_ascii=False,
-                default=str,
-            )[:200],
-        )
         bg_bytes = None
         if source == "upload":
             uploaded = uploaded_file_path(
@@ -600,11 +587,13 @@ class StatusCardPlugin(Star):
                     "背景来源为自定义上传，但没有可用的上传文件，回退内置背景"
                 )
             else:
-                logger.info("[背景诊断] 读取上传图成功: %d bytes", len(bg_bytes))
-                # The HTML goes to the remote T2I service as one JSON POST;
-                # a multi-megabyte data URL made the rendered card fall back
-                # to the bare gradient (the background never loaded), while
-                # a small one renders fine.
+                # The whole HTML goes to the remote T2I service as one JSON
+                # POST. Downscaling + JPEG keeps the background's data URL
+                # around 0.3 MB instead of several MB, so the request body
+                # stays small and uploads stay fast. (2026-10-31 probing:
+                # the remote service renders even a 3 MB data URL fine --
+                # size was never the cause of the "washed out" look; that
+                # was the white mask + cover scaling, both since removed.)
                 bg_bytes, _ = shrink_image_bytes(bg_bytes)
 
         return await resolve_background(prefer_bytes=bg_bytes)

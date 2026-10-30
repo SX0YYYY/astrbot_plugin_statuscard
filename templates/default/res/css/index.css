@@ -34,22 +34,18 @@ body {
 
 .main-background {
   width: 650px;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
+  /* Fill the card width at the image's natural aspect ratio and tile it
+     down the page (v2.19.3, user's choice): downscaling stays sharp,
+     nothing gets cropped out, and no white veil sits on top of the
+     picture. "cover" scaled a portrait photo ~3x to span the whole page
+     height and showed one blurry vertical sliver of it. */
+  background-position: center top;
+  background-repeat: repeat-y;
+  background-size: 100% auto;
 }
 
 .main-background-mask {
   padding: 14px;
-  /* All text lives inside opaque cards; the mask only softens the slivers
-     of background between them. At 0.68-0.78 opacity it washed any
-     uploaded background out to near-white (looked like "background not
-     applied"). */
-  background: linear-gradient(
-    180deg,
-    rgba(248, 248, 253, 0.3),
-    rgba(244, 245, 252, 0.42)
-  );
 }
 
 .main {

@@ -21,13 +21,15 @@ def shrink_image_bytes(
 ) -> tuple[bytes, str]:
     """Downscale and re-encode an uploaded background before embedding.
 
-    The rendered HTML is shipped to the remote T2I service as one JSON POST;
-    a multi-megabyte data URL either blows the service's body budget or makes
-    its browser skip the background image -- while the avatar (a few dozen
-    KB data URL) renders fine in the very same card. Resize to the card's
-    logical pixel width and re-encode as JPEG so the data URL stays small.
-    GIF/WebP animations flatten to their first frame, which is what a
-    background needs anyway.
+    The rendered HTML is shipped to the remote T2I service as one JSON
+    POST, so an uncompressed multi-megabyte photo turns the request body
+    into several MB. Downscale to the card's pixel width and re-encode as
+    JPEG to keep the data URL around 0.3 MB. (2026-10-31 probing: the
+    remote service renders even a 3 MB data URL fine -- size was never
+    the cause of the "washed out" look; that was the white mask plus
+    cover scaling, both since removed. Shrink anyway: smaller body,
+    faster upload.) GIF/WebP animations flatten to their first frame,
+    which is what a background needs anyway.
     """
 
     from io import BytesIO
