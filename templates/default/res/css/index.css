@@ -41,10 +41,14 @@ body {
 
 .main-background-mask {
   padding: 14px;
+  /* All text lives inside opaque cards; the mask only softens the slivers
+     of background between them. At 0.68-0.78 opacity it washed any
+     uploaded background out to near-white (looked like "background not
+     applied"). */
   background: linear-gradient(
     180deg,
-    rgba(248, 248, 253, 0.68),
-    rgba(244, 245, 252, 0.78)
+    rgba(248, 248, 253, 0.3),
+    rgba(244, 245, 252, 0.42)
   );
 }
 
