@@ -105,7 +105,7 @@
 ### 测试
 
 - 新增 `tests/test_v2187_fixes.py` 22 例；`test_v2130_reliability` 的孤儿告警用例改用固定时间（原先混用 `time.time()` 与硬编码日期，跨到 10-30 后失败）。
-- 318 → 353 passed；ruff check/format 全绿。
+- 318 → 340 passed；ruff check/format 全绿。
 
 ### 已知问题（P3，已记入 AGENTS 待办）
 
