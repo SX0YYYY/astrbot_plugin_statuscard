@@ -107,12 +107,12 @@
       {% for x in v.network.chart.x_labels %}
       <text class="axis-text" x="{{ x.x }}" y="{{ v.network.chart.height - 6 }}" text-anchor="middle">{{ x.text }}</text>
       {% endfor %}
-      {% if v.network.chart.up_area %}
-      <polygon class="area-up" points="{{ v.network.chart.up_area }}" />
-      {% endif %}
-      {% if v.network.chart.down_area %}
-      <polygon class="area-down" points="{{ v.network.chart.down_area }}" />
-      {% endif %}
+      {% for area in v.network.chart.up_areas or [] %}
+      <path class="area-up" d="{{ area }}" />
+      {% endfor %}
+      {% for area in v.network.chart.down_areas or [] %}
+      <path class="area-down" d="{{ area }}" />
+      {% endfor %}
       {% for seg in v.network.chart.up_segments or [] %}
       <polyline class="line-up" points="{{ seg }}" />
       {% endfor %}
@@ -190,7 +190,7 @@
 {% macro process(v) %}
 <div class="card section">
   <div class="section-title"><span class="section-icon">📋</span>进程信息</div>
-  <div class="scope-line">采集范围：宿主机；CPU 为采样区间平均（占整机 %）</div>
+  <div class="scope-line">采集范围：宿主机；CPU 为采样区间平均（占整机 %）{% if v.process.redacted %}；进程名已按脱敏配置隐藏{% endif %}</div>
   <div class="status-chips">
     <span class="status-chip">全部：{{ v.process.counts.all }}</span>
     <span class="status-chip chip-green">运行中：{{ v.process.counts.running }}</span>

@@ -28,8 +28,10 @@ jobs:
           version_py = re.search(r'__version__\s*=\s*"([^"]+)"', (root / "version.py").read_text(encoding="utf-8")).group(1)
           metadata = re.search(r"^version:\s*(\S+)\s*$", (root / "metadata.yaml").read_text(encoding="utf-8"), re.M).group(1)
           badge = re.search(r"version-([\d.]+)-blue", (root / "README.md").read_text(encoding="utf-8")).group(1)
-          assert version_py == metadata == badge, (
-              f"version mismatch: version.py={version_py} metadata.yaml={metadata} README badge={badge}"
+          changelog = re.search(r"^## v([0-9][^\s]*)", (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.M).group(1)
+          assert version_py == metadata == badge == changelog, (
+              f"version mismatch: version.py={version_py} metadata.yaml={metadata} "
+              f"README badge={badge} CHANGELOG={changelog}"
           )
           print("version consistent:", version_py)
           PY

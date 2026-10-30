@@ -108,6 +108,24 @@ RANGE_SECONDS = {
 }
 
 
+def _mask_umo(target: Any) -> str:
+    """Hide the middle of a chat id inside a UMO.
+
+    ``default:GroupMessage:461961169`` becomes
+    ``default:GroupMessage:*****1169``: the verification list still tells
+    targets apart, but the browser never receives a full UMO (the class
+    docstring promises no UMO is exposed).
+    """
+
+    text = str(target or "")
+    head, _, tail = text.rpartition(":")
+    digits = "".join(ch for ch in tail if ch.isdigit())
+    if len(digits) <= 4:
+        return text
+    masked = "*" * (len(digits) - 4) + digits[-4:]
+    return f"{head}:{masked}" if head else masked
+
+
 class PageApi:
     """Dashboard page API for the statuscard plugin page.
 
@@ -442,7 +460,7 @@ class PageApi:
         exercised end to end.
         """
 
-        kind = str(await _request_value("kind", "targets")).lower()
+        kind = str(await _request_value("kind", "monitors")).lower()
         plugin = self.plugin
         if kind == "targets":
             platform_id = str(
@@ -501,7 +519,9 @@ class PageApi:
                     state = "failed"
                 per_target.append(
                     {
-                        "target": target,
+                        # Keep enough to tell targets apart without echoing
+                        # full UMOs (the class contract promises no UMO).
+                        "target": _mask_umo(target),
                         "state": state,
                         "retcode": receipt.get("retcode"),
                         "message_id": receipt.get("message_id"),
@@ -572,12 +592,20 @@ class PageApi:
             path = str(cfg_get(cfg, "path", "/webhook") or "/webhook")
             if not path.startswith("/"):
                 path = "/" + path
+            # Probe the address the listener actually binds. A wildcard bind
+            # is reachable through loopback, but a listener pinned to one NIC
+            # used to fail this check even though the chain was healthy.
+            host = str(cfg_get(cfg, "host", "127.0.0.1") or "127.0.0.1").strip()
+            if host in {"0.0.0.0", "::", ""}:
+                host = "127.0.0.1"
+            elif ":" in host and not host.startswith("["):
+                host = f"[{host}]"
             token = str(cfg_get(cfg, "token", "") or "")
             headers = {"Authorization": f"Bearer {token}"} if token else {}
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(
-                        f"http://127.0.0.1:{port}{path}",
+                        f"http://{host}:{port}{path}",
                         json={"message": "🔔 Komari Webhook 链路验证（看板模拟事件）"},
                         headers=headers,
                     )
@@ -728,7 +756,10 @@ class PageApi:
             self.plugin.report_store.list_resources, start, 20001
         )
         truncated = len(fetched) > 20000
-        rows = [row for row in fetched[:20000] if int(row.get("ts") or 0) <= end]
+        # list_resources returns ascending rows, so the newest sample is at
+        # the end: slicing from the front dropped "now" from the chart. Keep
+        # the tail, matching the export endpoint.
+        rows = [row for row in fetched[-20000:] if int(row.get("ts") or 0) <= end]
         sampled = self._downsample(rows)
         points = [
             {
@@ -871,6 +902,10 @@ class PageApi:
             {
                 "ok": True,
                 "counts_limit": 2000,
+                # The counters are computed from the same capped query, so the
+                # frontend can say "statistics cover the latest 2000 rows"
+                # instead of showing a silently low total.
+                "counts_truncated": len(events) >= 2000,
                 "days": days,
                 "items": items[:page_size],
                 "counts": counts,

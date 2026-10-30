@@ -190,7 +190,10 @@
         "kind_event": "Event",
         "quality_reason_no_db": "AstrBot database (data_v4.db) not found",
         "quality_reason_query_failed": "provider_stats query failed",
-        "quality_reason_no_data_today": "No LLM calls today yet"
+        "quality_reason_no_data_today": "No LLM calls today yet",
+        "report_unavailable": "Some content is unavailable",
+        "report_sections_empty": "No report content selected: daily_report.sections is empty. Pick the sections in the config page.",
+        "events_counts_truncated": "Statistics cover the latest 2000 rows"
       }
     }
   }

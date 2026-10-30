@@ -23,7 +23,14 @@ from .collectors import (
 )
 from .delivery import DeliveryResult
 from .state import StateStore
-from .utils import clamp_config, normalize_targets, redact_url, retry_delay
+from .utils import (
+    clamp_config,
+    normalize_targets,
+    redact_url,
+    retry_delay,
+    safe_float,
+    safe_int,
+)
 
 KIND_LABELS = {
     "http": "HTTP",
@@ -215,7 +222,9 @@ class ServiceMonitor:
             for key, st in items.items():
                 if not isinstance(st, dict) or not st.get("alerting"):
                     continue
-                last_checked = float(st.get("last_checked") or st.get("since") or 0)
+                last_checked = safe_float(
+                    st.get("last_checked") or st.get("since") or 0
+                )
                 if last_checked and now - last_checked > 86400:
                     st["stale"] = True
                     logger.warning(
@@ -318,7 +327,15 @@ class ServiceMonitor:
             if not stale_keys:
                 return
             for key in stale_keys:
-                states.pop(key, None)
+                state = states.pop(key, None)
+                if not isinstance(state, dict) or not state.get("alerting"):
+                    continue
+                # Close the episode before dropping its state: the old alert
+                # row never got resolved_ts, so the daily report kept showing
+                # an "未恢复" entry for up to 30 days.
+                parts = str(key).split(":")
+                name = parts[1] if len(parts) > 1 and parts[1] else "服务"
+                self._record_event(name, "", "监测项已移除，自动关闭", "recovery")
         self.state.save()
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
@@ -463,12 +480,23 @@ class ServiceMonitor:
         target_text = redact_url(target_text)
         now = time.time()
         monitors = self.state.data.setdefault("monitors", {})
-        states = monitors.setdefault("items", {})
-        st = states.setdefault(key, {})
-        fails = int(st.get("fails") or 0)
+        if not isinstance(monitors, dict):
+            monitors = {}
+            self.state.data["monitors"] = monitors
+        states = monitors.get("items")
+        if not isinstance(states, dict):
+            # A hand-edited state.json holding a list here made every probe
+            # raise, which silently disabled monitoring.
+            states = {}
+            monitors["items"] = states
+        st = states.get(key)
+        if not isinstance(st, dict):
+            st = {}
+            states[key] = st
+        fails = safe_int(st.get("fails") or 0)
         alerting = bool(st.get("alerting"))
         pending = bool(st.get("pending"))
-        last_sent = float(st.get("last_sent") or 0)
+        last_sent = safe_float(st.get("last_sent") or 0)
         name = str(item.get("name") or item.get("__template_key") or "服务")
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
 
@@ -556,7 +584,7 @@ class ServiceMonitor:
             st["last_error"] = detail
             st["last_checked"] = now
             if will_alert:
-                next_attempt = float(st.get("next_attempt") or 0)
+                next_attempt = safe_float(st.get("next_attempt") or 0)
                 if last_sent and now - last_sent < self.cooldown:
                     # Inside the cooldown: latch the episode and record one
                     # event (with the suppression noted) instead of vanishing.
@@ -627,12 +655,12 @@ class ServiceMonitor:
                         st["next_attempt"] = 0
                         self._record_event(name, target_text, detail, "alert")
                     else:
-                        retry_count = int(st.get("retry_count") or 0) + 1
+                        retry_count = safe_int(st.get("retry_count") or 0) + 1
                         st["retry_count"] = retry_count
                         st["next_attempt"] = now + retry_delay(retry_count)
                         self._record_event(name, target_text, detail, "failed")
             elif alerting and pending:
-                next_attempt = float(st.get("next_attempt") or 0)
+                next_attempt = safe_float(st.get("next_attempt") or 0)
                 if now >= next_attempt:
                     text = (
                         f"🔴 服务异常 · {name}\n"
@@ -651,7 +679,7 @@ class ServiceMonitor:
                         st["next_attempt"] = 0
                         self._record_event(name, target_text, detail, "alert")
                     else:
-                        retry_count = int(st.get("retry_count") or 0) + 1
+                        retry_count = safe_int(st.get("retry_count") or 0) + 1
                         if retry_count > MAX_ALERT_RETRIES:
                             # The operator never received this outage, so keep
                             # the episode latched but silent and suppress the
@@ -675,7 +703,7 @@ class ServiceMonitor:
             st["last_error"] = ""
             pending_text = st.get("pending_recovery")
             if pending_text:
-                next_recovery = float(st.get("recovery_next_attempt") or 0)
+                next_recovery = safe_float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
                     result = await self._send(str(pending_text))
                     if self._delivered(result):
@@ -684,7 +712,7 @@ class ServiceMonitor:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = int(st.get("recovery_retry_count") or 0) + 1
+                        retry_count = safe_int(st.get("recovery_retry_count") or 0) + 1
                         if retry_count > MAX_RECOVERY_RETRIES:
                             # A permanently unreachable target would otherwise
                             # retry this notice every ten minutes until the
@@ -710,7 +738,7 @@ class ServiceMonitor:
                 # reached the operator; a cooldown-suppressed one is logged
                 # but stays silent (same rule as the resource alerts).
                 notified = bool(st.pop("alerted", True))
-                duration = now - float(st.get("since") or now)
+                duration = now - safe_float(st.get("since") or now)
                 st["alerting"] = False
                 st["since"] = 0
                 st["retry_count"] = 0
@@ -985,11 +1013,20 @@ class ServiceMonitor:
             return DeliveryResult(ok=False)
         try:
             value = await self.plugin.send_text(targets, text, source="monitor")
-            return (
+            result = (
                 value
                 if isinstance(value, DeliveryResult)
                 else DeliveryResult(ok=bool(value))
             )
+            if result.partial:
+                # Some targets received it: retrying would post twice to
+                # those, so surface the partial delivery instead.
+                logger.warning(
+                    "服务监测部分送达：成功 %d 个、失败 %d 个目标（不重发）",
+                    len(result.ok_targets),
+                    len(result.failed_targets),
+                )
+            return result
         except Exception:
             logger.exception("服务监测推送失败")
             return DeliveryResult(ok=False)

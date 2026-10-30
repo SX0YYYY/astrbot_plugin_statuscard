@@ -119,6 +119,12 @@ def cfg_bool(config: Any, path: str, default: bool) -> bool:
     value = cfg_get(config, path, default)
     if isinstance(value, bool):
         return value
+    # A hand-edited ``0``/``1`` used to fall through to the default, so
+    # ``alerts.enabled: 1`` left alerting off and ``recover_notify: 0`` kept
+    # sending recoveries. AstrBot writes real booleans; this only guards
+    # hand-edited or migrated configs.
+    if isinstance(value, (int, float)):
+        return bool(value)
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return default
@@ -1557,6 +1563,8 @@ def build_network_chart(
             "down_points": "",
             "up_area": "",
             "down_area": "",
+            "up_areas": [],
+            "down_areas": [],
             "y_labels": [],
             "x_labels": [],
             "peak_up": None,
@@ -1578,28 +1586,65 @@ def build_network_chart(
     max_value = max(max(p[1], p[2]) for p in points)
     max_value = _nice_ceil(max_value * 1.12)
     n = len(points)
-    denom = max(1, n - 1)
+    # Position by timestamp, not by sample index: an outage used to shift the
+    # following points left and made the axis read as if the gap never
+    # happened.
+    t_first = points[0][0]
+    t_last = points[-1][0]
+    time_span = max(1.0, t_last - t_first)
 
-    def xy(index: int, value: float) -> tuple[float, float]:
-        x = left + plot_w * (index / denom)
+    def xy(ts: float, value: float) -> tuple[float, float]:
+        x = left + plot_w * ((ts - t_first) / time_span)
         y = top + plot_h * (1 - min(1.0, value / max_value))
         return round(x, 1), round(y, 1)
 
-    up_coords = [xy(i, p[1]) for i, p in enumerate(points)]
-    down_coords = [xy(i, p[2]) for i, p in enumerate(points)]
+    up_coords = [xy(p[0], p[1]) for p in points]
+    down_coords = [xy(p[0], p[2]) for p in points]
     up_points = " ".join(f"{x},{y}" for x, y in up_coords)
     down_points = " ".join(f"{x},{y}" for x, y in down_coords)
     bottom_y = top + plot_h
-    up_area = (
-        f"M {up_coords[0][0]},{bottom_y} "
-        + " ".join(f"L {x},{y}" for x, y in up_coords)
-        + f" L {up_coords[-1][0]},{bottom_y} Z"
-    )
-    down_area = (
-        f"M {down_coords[0][0]},{bottom_y} "
-        + " ".join(f"L {x},{y}" for x, y in down_coords)
-        + f" L {down_coords[-1][0]},{bottom_y} Z"
-    )
+
+    # Break the polylines where the sampler stopped. A three-hour outage used
+    # to be drawn as one smooth ramp between the last point before it and the
+    # first one after, which looked like a real traffic surge.
+    gap_threshold = max(60.0, interval * 3.0)
+    breaks = {i for i in range(1, n) if points[i][0] - points[i - 1][0] > gap_threshold}
+
+    def _runs() -> list[tuple[int, int]]:
+        if not breaks:
+            return [(0, n)]
+        out: list[tuple[int, int]] = []
+        start = 0
+        for index in sorted(breaks):
+            if index - start >= 2:
+                out.append((start, index))
+            start = index
+        if n - start >= 2:
+            out.append((start, n))
+        return out
+
+    runs = _runs()
+
+    def _segment(coords: list[tuple[float, float]], start: int, stop: int) -> str:
+        return " ".join(f"{x},{y}" for x, y in coords[start:stop])
+
+    def _area(coords: list[tuple[float, float]], start: int, stop: int) -> str:
+        if stop - start < 2:
+            return ""
+        return (
+            f"M {coords[start][0]},{bottom_y} "
+            + " ".join(f"L {x},{y}" for x, y in coords[start:stop])
+            + f" L {coords[stop - 1][0]},{bottom_y} Z"
+        )
+
+    up_segments = [_segment(up_coords, a, b) for a, b in runs]
+    down_segments = [_segment(down_coords, a, b) for a, b in runs]
+    # The filled area must break with the line: keeping one polygon over the
+    # whole series drew a wedge straight across the outage.
+    up_areas = [path for a, b in runs if (path := _area(up_coords, a, b))]
+    down_areas = [path for a, b in runs if (path := _area(down_coords, a, b))]
+    up_area = up_areas[0] if up_areas else ""
+    down_area = down_areas[0] if down_areas else ""
 
     y_labels = []
     for i in range(5):
@@ -1609,12 +1654,11 @@ def build_network_chart(
 
     x_labels = []
     for i in range(5):
-        idx = round((n - 1) * i / 4)
-        ts = points[idx][0]
-        x = left + plot_w * (idx / denom)
+        fraction = i / 4
+        ts = t_first + time_span * fraction
         x_labels.append(
             {
-                "x": round(x, 1),
+                "x": round(left + plot_w * fraction, 1),
                 "text": datetime.fromtimestamp(ts, tz).strftime("%H:%M"),
             }
         )
@@ -1633,21 +1677,7 @@ def build_network_chart(
     # Break the polylines where the sampler stopped. A three-hour outage used
     # to be drawn as one smooth ramp between the last point before it and the
     # first one after, which looked like a real traffic surge.
-    gap_threshold = max(60.0, interval * 3.0)
-    breaks = {i for i in range(1, n) if points[i][0] - points[i - 1][0] > gap_threshold}
-
-    def _segments(coords: list[tuple[float, float]]) -> list[str]:
-        if not breaks:
-            return [" ".join(f"{x},{y}" for x, y in coords)]
-        out: list[str] = []
-        start = 0
-        for index in sorted(breaks):
-            if index - start >= 2:
-                out.append(" ".join(f"{x},{y}" for x, y in coords[start:index]))
-            start = index
-        if len(coords) - start >= 2:
-            out.append(" ".join(f"{x},{y}" for x, y in coords[start:]))
-        return out
+    # (runs/breaks are computed above so the filled areas break with the line)
 
     return {
         "width": width,
@@ -1660,10 +1690,12 @@ def build_network_chart(
         "plot_h": plot_h,
         "up_points": up_points,
         "down_points": down_points,
-        "up_segments": _segments(up_coords),
-        "down_segments": _segments(down_coords),
+        "up_segments": up_segments,
+        "down_segments": down_segments,
         "up_area": up_area,
         "down_area": down_area,
+        "up_areas": up_areas,
+        "down_areas": down_areas,
         "y_labels": y_labels,
         "x_labels": x_labels,
         "peak_up": peak_up,

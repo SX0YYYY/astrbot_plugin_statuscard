@@ -108,6 +108,14 @@ class AlertAggregator:
                 if self.window_seconds > 0:
                     bucket.until = 0.0
                     bucket.send = None
+                    dropped = len(bucket.pending)
+                    bucket.pending.clear()
+                    if dropped:
+                        logger.warning(
+                            "首条告警发送异常，已丢弃 %d 项缓冲（%s）",
+                            dropped,
+                            key,
+                        )
                 raise
         bucket.pending.append((label, reason))
         # Keep a bounded buffer (max_items are listed, the rest are counted).
@@ -182,7 +190,16 @@ class AlertAggregator:
         ):
             bucket.flush_task.cancel()
         sender = send or bucket.send
-        if not pending or sender is None:
+        if not pending:
+            return
+        if sender is None:
+            # The first send raised before the window could be reused: the
+            # buffered items would otherwise be dropped without a trace while
+            # their rules stay latched (the user gets a recovery, never an
+            # alert).
+            logger.warning(
+                "告警汇总缺少发送函数，丢弃 %d 项缓冲（%s）", len(pending), key
+            )
             return
         lines = [f"⚠️ 告警汇总 · {len(pending)} 项异常", "──────────────"]
         for label, reason in pending[: self.max_items]:

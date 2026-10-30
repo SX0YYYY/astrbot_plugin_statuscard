@@ -891,7 +891,10 @@ class StatusCardPlugin(Star):
         if self._diag.get("last_error"):
             lines.append(f"最近错误: {self._diag.get('last_error')}")
 
-        delivery = self.state.get("delivery", {})
+        # Prefer the last real notification: a dashboard "verify" click used
+        # to overwrite the single delivery slot, so the diagnosis showed a
+        # successful verify_targets while the real alert had failed.
+        delivery = self.state.get("delivery_real") or self.state.get("delivery", {})
         if isinstance(delivery, dict) and delivery.get("ts"):
             age = max(0, int(time.time() - float(delivery["ts"])))
             uncertain_targets = delivery.get("uncertain_targets") or []

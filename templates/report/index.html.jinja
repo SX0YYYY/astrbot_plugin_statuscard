@@ -39,7 +39,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=650, initial-scale=1.0" />
   <title>{{ d.title }} · {{ d.day }}</title>
-  <style>__REPORT_CSS__</style>
+  <style>{{ report_css | safe }}</style>
 </head>
 <body>
   <div class="report-shell">
@@ -57,10 +57,10 @@
     </header>
 
     <section class="summary">
-      <div class="summary-item"><span>异常 / 失败</span><strong>{{ d.summary.anomaly_count }}</strong></div>
-      <div class="summary-item"><span>Token</span><strong>{{ d.summary.token_total_text }}</strong></div>
-      <div class="summary-item"><span>发送</span><strong>{{ d.summary.sent_text }}</strong></div>
-      <div class="summary-item"><span>接收</span><strong>{{ d.summary.recv_text }}</strong></div>
+      <div class="summary-item"><span>异常 / 失败{% if d.summary.span_days > 1 %}（{{ d.summary.window_label }}）{% endif %}</span><strong>{{ d.summary.anomaly_count }}</strong></div>
+      <div class="summary-item"><span>Token{% if d.summary.span_days > 1 %}（{{ d.summary.window_label }}）{% endif %}</span><strong>{{ d.summary.token_total_text }}</strong></div>
+      <div class="summary-item"><span>发送{% if d.summary.span_days > 1 %}（{{ d.summary.last_day_label }}）{% endif %}</span><strong>{{ d.summary.sent_text }}</strong></div>
+      <div class="summary-item"><span>接收{% if d.summary.span_days > 1 %}（{{ d.summary.last_day_label }}）{% endif %}</span><strong>{{ d.summary.recv_text }}</strong></div>
     </section>
 
     {% if "resource" in d.sections and d.resources %}

@@ -234,18 +234,39 @@ class Sampler:
         if interface and interface in per_nic:
             counters = per_nic[interface]
         elif per_nic:
-            # Pick the busiest non-loopback interface once and keep it: the
+            # Pick the busiest *physical, up* interface once and keep it: the
             # card labels the line with a single name, while totalling every
             # interface (docker bridges, loopback) reads about twice as high
-            # on a containerised bot.
+            # on a containerised bot. A virtual bridge with the largest
+            # counters used to win permanently, so the card and the month
+            # totals showed container-internal traffic.
+            try:
+                nic_stats = psutil.net_if_stats() or {}
+            except Exception:
+                nic_stats = {}
+            virtual_prefixes = (
+                "docker",
+                "br-",
+                "veth",
+                "virbr",
+                "tun",
+                "tap",
+                "vmnet",
+                "vboxnet",
+            )
+            physical_prefixes = ("eth", "enp", "ens", "eno", "en", "wlan", "wlp", "wlo")
             best = ""
-            best_total = -1
+            best_score: tuple[int, int] | None = None
             for name, item in per_nic.items():
-                if name.startswith("lo"):
+                if name.startswith("lo") or name.startswith(virtual_prefixes):
+                    continue
+                stats = nic_stats.get(name)
+                if stats is not None and not stats.isup:
                     continue
                 total = int(item.bytes_sent) + int(item.bytes_recv)
-                if total > best_total:
-                    best, best_total = name, total
+                score = (1 if name.startswith(physical_prefixes) else 0, total)
+                if best_score is None or score > best_score:
+                    best, best_score = name, score
             if best:
                 interface = best
                 counters = per_nic[best]
@@ -267,11 +288,17 @@ class Sampler:
             last_sent = int(net.get("last_sent") or 0)
             last_recv = int(net.get("last_recv") or 0)
 
-            # A wall-clock step back (NTP correction) would make dt tiny and
-            # blow the rate up a millionfold; the interval is >= 15s anyway.
-            dt = max(1.0, now - last_ts)
-            sent_delta = max(0, int(counters.bytes_sent) - last_sent)
-            recv_delta = max(0, int(counters.bytes_recv) - last_recv)
+            # A wall-clock step back (NTP correction) would make dt negative
+            # and the rate meaningless; reset the baseline and book no
+            # traffic this round instead of dividing a whole interval by 1s.
+            clock_back = now < last_ts
+            dt = 1.0 if clock_back else max(1.0, now - last_ts)
+            sent_delta = (
+                0 if clock_back else max(0, int(counters.bytes_sent) - last_sent)
+            )
+            recv_delta = (
+                0 if clock_back else max(0, int(counters.bytes_recv) - last_recv)
+            )
 
             # A restart leaves last_ts hours behind. The delta then covers the
             # whole downtime: the derived rate is meaningless, and crediting
@@ -323,9 +350,16 @@ class Sampler:
             last_read = int(disk.get("last_read") or 0)
             last_write = int(disk.get("last_write") or 0)
             # See _sample_network: keep the rate sane across clock steps.
-            dt = max(1.0, now - last_ts)
-            read_rate = max(0, int(counters.read_bytes) - last_read) / dt
-            write_rate = max(0, int(counters.write_bytes) - last_write) / dt
+            clock_back = now < last_ts
+            dt = 1.0 if clock_back else max(1.0, now - last_ts)
+            read_delta = (
+                0 if clock_back else max(0, int(counters.read_bytes) - last_read)
+            )
+            write_delta = (
+                0 if clock_back else max(0, int(counters.write_bytes) - last_write)
+            )
+            read_rate = read_delta / dt
+            write_rate = write_delta / dt
             disk["last_ts"] = now
             disk["last_read"] = int(counters.read_bytes)
             disk["last_write"] = int(counters.write_bytes)

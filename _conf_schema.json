@@ -99,7 +99,7 @@
                 "condition": {
                     "show_advanced": true
                 },
-                "hint": "状态卡和日报共用这些目标；默认只测百度，单个目标超时 3 秒。",
+                "hint": "状态卡和日报共用这些目标；默认只测百度；每个目标可在条目里设 1–15 秒超时（新建默认 3 秒）；名称留空时自动使用去掉 query 与凭据的 URL。",
                 "templates": {
                     "site": {
                         "name": "网站",
@@ -155,7 +155,7 @@
                 "condition": {
                     "show_advanced": true
                 },
-                "hint": "留空自动检测；Linux 通常填 `/`，Windows 填 `C:\\`。"
+                "hint": "留空自动检测根分区；可填多个挂载点：每块盘分别告警，状态卡分行显示，日报与看板取使用率最高的那块盘。"
             },
             "timezone": {
                 "description": "时区",
@@ -231,7 +231,7 @@
                 "condition": {
                     "show_advanced": true
                 },
-                "hint": "超时后回退为文字摘要；T2I 慢时可适当调大。"
+                "hint": "状态卡超时降级为本地简化卡；日报/周报先延迟重试 2 次，仍失败才回退文字版；T2I 慢时可适当调大。"
             },
             "t2i_benchmark": {
                 "description": "记录 T2I 渲染耗时",
@@ -372,7 +372,7 @@
                         "condition": {
                             "enabled": true
                         },
-                        "hint": "关闭后只发文字摘要；图片渲染失败也会自动回退文字。"
+                        "hint": "关闭后只发文字摘要；图片渲染失败会先降级为本地简化卡，再失败才回退文字。"
                     }
                 }
             },
@@ -568,7 +568,7 @@
                         "items": {
                             "type": "string"
                         },
-                        "hint": "填 QQ 群号（纯数字），这些群不参与广播。"
+                        "hint": "填 QQ 群号（纯数字），这些群不参与广播；正式恢复通知的目标群会自动跳过。"
                     },
                     "interval_seconds": {
                         "description": "每群广播间隔（秒）",

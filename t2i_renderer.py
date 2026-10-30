@@ -144,10 +144,12 @@ def build_report_html(
         '<html lang="zh-CN">',
         f'<html lang="zh-CN" data-theme="{theme}">',
     )
-    template_text = template_text.replace("__REPORT_CSS__", css)
     template_text = template_text.replace(
         'content="width=650, initial-scale=1.0"',
         f'content="width={width}, initial-scale=1.0"',
     )
     env = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"]))
-    return env.from_string(template_text).render(d=view)
+    # CSS goes in as a template variable, not through a string replace: a
+    # future rule containing ``{{`` or ``{#`` would otherwise be parsed as
+    # Jinja syntax and break the render.
+    return env.from_string(template_text).render(d=view, report_css=css)

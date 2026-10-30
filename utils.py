@@ -18,6 +18,29 @@ class CpuFreq:
     max: float | None
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert ``value`` to float, falling back instead of raising.
+
+    ``state.json`` is hand-editable and older versions wrote different types,
+    so a single bad scalar must not make the alert/monitor loops raise on
+    every sample (which silently disabled the whole engine).
+    """
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """Convert ``value`` to int, falling back instead of raising."""
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def cfg_get(config: Any, path: str, default: Any = None) -> Any:
     """Read a dotted path out of a nested configuration.
 
@@ -133,9 +156,7 @@ def redact_url(url: Any) -> str:
     if not parts.netloc:
         # A bare "example.com/api?token=abc" has no scheme, so urlsplit puts
         # everything in path and the query survives. Strip it explicitly.
-        stripped = text.split("#", 1)[0].split("?", 1)[0]
-        return stripped
-        return text
+        return text.split("#", 1)[0].split("?", 1)[0]
     host = parts.hostname or ""
     if ":" in host and not host.startswith("["):
         # Keep IPv6 literals readable.

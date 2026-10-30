@@ -134,7 +134,7 @@
       number /= 1024;
       index += 1;
     }
-    const digits = index === 0 ? 0 : number >= 100 ? 0 : 1;
+    const digits = index === 0 ? 0 : 2;
     return number.toFixed(digits) + " " + units[index];
   }
 
@@ -257,10 +257,10 @@
     });
   }
 
-  function labelForTs(ts, range) {
+  function labelForTs(ts, range, withDate) {
     const date = safeDate(ts);
     if (!date) return "--";
-    if (range === "24h") {
+    if (range === "24h" && !withDate) {
       return date.toLocaleTimeString(currentLocale(), {
         hour12: false,
         hour: "2-digit",
@@ -268,11 +268,21 @@
         timeZone: tzName(),
       });
     }
-    return date.toLocaleDateString(currentLocale(), {
+    const day = date.toLocaleDateString(currentLocale(), {
       month: "2-digit",
       day: "2-digit",
       timeZone: tzName(),
     });
+    if (range !== "24h") return day;
+    // A 24h window can cross midnight; printing only HH:MM made it read as
+    // "15:33 – 05:26", which looks backwards.
+    const time = date.toLocaleTimeString(currentLocale(), {
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: tzName(),
+    });
+    return day + " " + time;
   }
 
   function rangeLabel(range) {
@@ -295,12 +305,15 @@
     if (!Number.isFinite(first) || !Number.isFinite(last)) return "";
     const days = Math.max(0, (last - first) / 86400);
     const shownDays = Math.max(1, Math.round(days));
+    const sameDay =
+      new Date(first * 1000).toDateString() ===
+      new Date(last * 1000).toDateString();
     const text = t(
       "history_range_note",
       "数据范围 {from} – {to}（{days} 天）",
       {
-        from: labelForTs(first, range),
-        to: labelForTs(last, range),
+        from: labelForTs(first, range, !sameDay),
+        to: labelForTs(last, range, !sameDay),
         days: shownDays,
       },
     );
@@ -779,7 +792,13 @@
     const swap = data.swap || {};
     const disk = data.disk || {};
     const host = data.host || "--";
-    $("subtitle").textContent = host + " · " + (data.platform || "default");
+    // "default" is the plugin's internal platform key, not something a user
+    // recognises; showing "host · default" read like a broken value.
+    const platform =
+      data.platform && String(data.platform) !== "default"
+        ? String(data.platform)
+        : "";
+    $("subtitle").textContent = platform ? host + " · " + platform : host;
     $("subtitle").removeAttribute("data-i18n");
     $("plugin-version").textContent = "v" + (data.plugin_version || "--");
 
@@ -837,8 +856,12 @@
     ].join("");
 
     const network = data.network || {};
+    // Keep the translated heading and append the month: the month alone used
+    // to replace "本月流量" entirely (and stayed Chinese-only "2026-10" in the
+    // English UI).
     $("network-month").textContent =
-      network.month || t("label_month_flow", "本月流量");
+      t("label_month_flow", "本月流量") +
+      (network.month ? " · " + network.month : "");
     if (data.network_redacted) {
       $("network").innerHTML =
         '<div class="network-item"><span>' +
@@ -1239,6 +1262,10 @@
       ["alert", "recovery", "failed"]
         .map((key) => statusText(key) + " " + (counts[key] ?? 0))
         .join(" · ") +
+      (data.counts_truncated
+        ? " · " +
+          t("events_counts_truncated", "统计仅覆盖最近 2000 条")
+        : "") +
       (data.truncated
         ? " · " + t("events_truncated", "仅显示最近 200 条")
         : "");
@@ -1585,6 +1612,16 @@
     $("report-day").textContent = data.day
       ? t("report_data_day", "数据日 {day}", { day: data.day })
       : t("report_no_data", "暂无数据");
+    // An empty selection used to render as a page of "未开启" values with no
+    // explanation of why nothing was built.
+    const sectionsEmpty =
+      !Array.isArray(data.sections) || data.sections.length === 0;
+    if (sectionsEmpty) {
+      $("report-day").textContent = t(
+        "report_sections_empty",
+        "未选择日报内容：daily_report.sections 为空，请在配置页勾选要显示的内容",
+      );
+    }
     const summary = data.summary || {};
     const notEnabled = t("report_not_enabled", "未开启");
     const anomalyValue =
@@ -2008,6 +2045,23 @@
     activateTab(state.tab, true).catch(() => {});
   }
 
+  function applyThemeFallback() {
+    // Older bridges never call onContext, so the page used to stay light on
+    // a dark system. Follow the OS until the bridge provides a real theme.
+    const root = document.documentElement;
+    if (root.dataset.theme) return;
+    let dark = false;
+    try {
+      dark = !!(
+        window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+      );
+    } catch (error) {
+      dark = false;
+    }
+    root.dataset.theme = dark ? "dark" : "light";
+  }
+
   function bindTheme() {
     const bridge = getBridge();
     if (!bridge || typeof bridge.onContext !== "function") return;
@@ -2021,6 +2075,7 @@
   }
 
   async function init() {
+    applyThemeFallback();
     bind();
     const bridge = await waitForBridge();
     if (!bridge) {

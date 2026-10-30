@@ -34,35 +34,24 @@ from .delivery import DeliveryResult
 from .provider_quality import recent_streak as provider_recent_streak
 from .redactor import HIDDEN, read_rules
 from .state import StateStore
-from .utils import clamp_config, normalize_targets, retry_delay, truncate_text
+from .utils import (
+    clamp_config,
+    normalize_targets,
+    retry_delay,
+    truncate_text,
+)
+from .utils import (
+    safe_float as _safe_float,
+)
+from .utils import (
+    safe_int as _safe_int,
+)
 
 
 def _now_text(config: Any = None) -> str:
     if config is None:
         return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    """Parse a state field without letting one bad value stop the loop.
-
-    ``int("abc")`` used to escape ``_evaluate`` entirely, and because the
-    sampling loop caught it at the top level the remaining rules, the offline
-    check and ``alerts_last_sample`` were skipped on every round -- one
-    corrupted value disabled the whole alert system.
-    """
-
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 BROADCAST_TEMPLATE_DEFAULT = (
@@ -209,6 +198,7 @@ class AlertEngine:
         self._webhook_runner: Any = None
         self._webhook_site: Any = None
         self._broadcast_task: asyncio.Task | None = None
+        self._client_missing_warned = False
         self._primed = False
         self._disk_warned: set[str] = set()
         self._daily_last_sent_day: str | None = None
@@ -428,6 +418,16 @@ class AlertEngine:
                 )
             else:
                 logger.warning("告警发送失败：%s", headline)
+        elif result.partial:
+            # Some targets received the message, others did not. Retrying
+            # would post it twice to the successful ones, so surface the
+            # partial result instead of recording a clean delivery.
+            logger.warning(
+                "告警部分送达：成功 %d 个、失败 %d 个目标（不重发）：%s",
+                len(result.ok_targets),
+                len(result.failed_targets),
+                text.splitlines()[0] if text else "",
+            )
         return result
 
     async def _push_alert(self, name: str, reason: str, text: str) -> Any | None:
@@ -573,16 +573,20 @@ class AlertEngine:
         # Every configured mount gets its own rule. Watching only the first
         # one meant a second disk could fill up silently while the card and
         # the report showed it.
+        valid_keys = {"cpu", "ram", "swap", "load"}
         for disk_path in disk_paths:
             # A single mount keeps the historical key so the cooldown and the
             # existing state survive the upgrade; extra mounts are keyed.
             rule_key = "disk" if len(disk_paths) == 1 else f"disk:{disk_path}"
+            valid_keys.add(rule_key)
             try:
                 # One implementation shared with the card, the report and the
                 # dashboard: used/total. psutil's percent excludes the ext4
                 # root-reserved blocks and would alert on a different scale
                 # than the number the user reads on the card.
-                disk = disk_usage([disk_path])[0]
+                # statvfs blocks on a hung network mount; keep it off the
+                # event loop (the card path already did).
+                disk = (await asyncio.to_thread(disk_usage, [disk_path]))[0]
                 if disk.percent is None or disk.used is None or disk.total is None:
                     raise RuntimeError(disk.exception or "磁盘信息不可用")
                 await self._evaluate(
@@ -626,8 +630,47 @@ class AlertEngine:
         await self._check_offline()
         if self.provider_watch_enabled:
             await self._check_provider_quality()
+        self._prune_rules(valid_keys)
         self.state.set("alerts_last_sample", now)
         self.state.save()
+
+    def _prune_rules(self, valid_keys: set[str]) -> None:
+        """Drop state for rules that no longer exist and close their episodes.
+
+        A removed disk mount or a renamed rule kept ``alerting=True`` in
+        state.json forever, so the daily report kept showing an "未恢复" row
+        for up to 30 days and re-adding the mount produced a bogus multi-day
+        duration. The monitor already pruned its items; the resource rules had
+        no equivalent.
+        """
+
+        alerts = self.state.get("alerts", {})
+        if not isinstance(alerts, dict):
+            return
+        rules = alerts.get("rules")
+        if not isinstance(rules, dict):
+            return
+        stale = [key for key in rules if key not in valid_keys]
+        if not stale:
+            return
+        labels = {
+            "cpu": "CPU 使用率",
+            "ram": "内存使用率",
+            "swap": "SWAP 使用率",
+            "load": "系统负载",
+            "disk": "磁盘使用率",
+        }
+        for key in stale:
+            state = rules.pop(key, None)
+            if not isinstance(state, dict) or not state.get("alerting"):
+                continue
+            base, _, suffix = key.partition(":")
+            name = labels.get(base, base)
+            if suffix:
+                name = f"{name} ({suffix})"
+            self._record_event("resource", name, "规则已移除，自动关闭", "recovery")
+        self.state.save()
+        logger.info("资源告警清理了 %d 个已失效规则状态", len(stale))
 
     async def _evaluate(
         self,
@@ -639,8 +682,16 @@ class AlertEngine:
         value_text: str,
     ) -> None:
         alerts = self.state.setdefault("alerts", {})
-        rules = alerts.setdefault("rules", {})
-        st = rules.setdefault(key, {})
+        rules = alerts.get("rules")
+        if not isinstance(rules, dict):
+            # A hand-edited state.json could hold a list here; the old code
+            # raised on every sample, which silently disabled alerting.
+            rules = {}
+            alerts["rules"] = rules
+        st = rules.get(key)
+        if not isinstance(st, dict):
+            st = {}
+            rules[key] = st
         now = time.time()
         st["last_seen"] = now
         count = _safe_int(st.get("count"))
@@ -650,10 +701,12 @@ class AlertEngine:
             # The process was reloaded or crashed while this alert was being
             # sent. The message may already be in the chat, so treat the
             # episode as announced instead of firing the same alert again
-            # after ``sustain`` more samples.
+            # after ``sustain`` more samples. ``alerted=False`` keeps the
+            # recovery notice quiet: if the alert never arrived, an
+            # unexplained "已恢复" is worse than the missing row.
             alerting = True
             st["alerting"] = True
-            st["alerted"] = True
+            st["alerted"] = False
             st["alert_since"] = _safe_float(st.get("last_attempt")) or now
             st["count"] = 0
 
@@ -806,6 +859,15 @@ class AlertEngine:
             st["retry_count"] = 0
             st["next_attempt"] = 0
             pending_text = st.get("pending_recovery")
+            if pending_text and not self.recover_notify:
+                # The operator turned recovery notices off after this one was
+                # queued for retry; honouring the switch means dropping the
+                # backlog instead of delivering it later anyway.
+                st.pop("pending_recovery", None)
+                st.pop("recovery_attempt", None)
+                st.pop("recovery_next_attempt", None)
+                st.pop("recovery_retry_count", None)
+                pending_text = None
             if pending_text:
                 next_recovery = _safe_float(st.get("recovery_next_attempt"))
                 if now >= next_recovery:
@@ -899,9 +961,19 @@ class AlertEngine:
             if str(item).strip()
         }
         interval = max(1, min(30, cfg_int(cfg, "interval_seconds", 3)))
-        # Match the schema slider (1-500). A hand-edited 10000 used to be
-        # taken literally and posted to every group the bot is in.
-        max_groups = max(0, min(500, cfg_int(cfg, "max_groups", 100)))
+        # Match the schema slider (1-500). A hand-edited 0 used to mean
+        # "unlimited" (the truthiness check skipped the cap) and a 10000 was
+        # taken literally, so a broken value posted to every group.
+        max_groups = max(1, min(500, cfg_int(cfg, "max_groups", 100)))
+        # The formal recovery notice goes to alerts.targets as well; those
+        # groups must not receive it twice (once from the broadcast, once from
+        # the reply above).
+        notify_groups: set[str] = set()
+        for target in self.targets:
+            text_target = str(target or "").strip()
+            tail = text_target.rsplit(":", 1)[-1]
+            if tail.isdigit():
+                notify_groups.add(tail)
         template = str(cfg.get("template") or BROADCAST_TEMPLATE_DEFAULT)
         offline_text = _fmt_ts(offline_ts, self.config)
         recover_text = _now_text(self.config)
@@ -910,10 +982,10 @@ class AlertEngine:
             group_id = (
                 str(group.get("group_id") or "") if isinstance(group, dict) else ""
             )
-            if not group_id or group_id in exclude:
+            if not group_id or group_id in exclude or group_id in notify_groups:
                 continue
             considered += 1
-            if max_groups and considered > max_groups:
+            if considered > max_groups:
                 logger.warning("掉线广播：群数超过上限 %d，剩余群未发送", max_groups)
                 break
             try:
@@ -961,6 +1033,18 @@ class AlertEngine:
             self.plugin.context, self.platform_id, self_id or None
         )
         if client is None:
+            # A platform_id that does not match the AstrBot instance id makes
+            # disconnect detection and OneBot direct sends silently no-op;
+            # warn once so the diagnosis is not "the bot just never alerts".
+            if not self._client_missing_warned:
+                self._client_missing_warned = True
+                logger.warning(
+                    "掉线检测：未找到 aiocqhttp 客户端（platform_id=%s、self_id=%s），"
+                    "掉线告警与 OneBot 直发不可用；请确认「告警平台 ID」与 AstrBot "
+                    "平台实例 ID 一致（或留空 self_id）",
+                    self.platform_id,
+                    self_id or "（空）",
+                )
             return
 
         online: bool | None = None
@@ -1450,6 +1534,10 @@ class AlertEngine:
                 "规则，alerts.targets 也未填写），跳过发送"
             )
             return True
+        # Record the attempt before sending: if the process is reloaded right
+        # after the image was delivered but before _mark_daily_sent, the
+        # restart saw "not attempted today" and sent a second copy.
+        self._mark_daily_attempt(today)
         with_image = cfg_bool(self.config, "alerts.daily_summary.with_image", True)
         if with_image:
             try:

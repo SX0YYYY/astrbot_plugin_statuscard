@@ -110,6 +110,13 @@ class StateStore:
         )
         tmp.write_text(payload, encoding="utf-8")
         try:
+            # Restrict the temporary file before it becomes state.json: after
+            # the rename the old code had a short window where the file kept
+            # the default umask permissions.
+            os.chmod(tmp, 0o600)
+        except Exception:
+            pass
+        try:
             with open(tmp, "rb+") as handle:
                 os.fsync(handle.fileno())
         except Exception:

@@ -810,7 +810,10 @@ class ReportStore:
             SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
             FROM events WHERE day = ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
-            (day, max(1, min(1000, limit))),
+            # 1000 was too low: a day with a flapping monitor can exceed it,
+            # and keeping only the newest rows dropped the earliest alerts
+            # that the recovery pairing needs.
+            (day, max(1, min(5000, limit))),
         )
         rows = list(reversed(rows or []))
         keys = (

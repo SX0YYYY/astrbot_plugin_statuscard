@@ -92,6 +92,8 @@ def _fmt_compact(value: Any) -> str:
         number = float(value)
     except (TypeError, ValueError):
         return "--"
+    if not math.isfinite(number):
+        return "--"
     units = ("", "K", "M", "G", "T")
     index = 0
     while abs(number) >= 1000 and index < len(units) - 1:
@@ -375,7 +377,7 @@ class DailyReportBuilder:
             view["process"] = self._process_section(
                 target, previous, history_days, span
             )
-        view["summary"] = self._summary(view)
+        view["summary"] = self._summary(view, span)
         return view
 
     # ------------------------------------------------------------------
@@ -391,7 +393,7 @@ class DailyReportBuilder:
             return value
         return date.fromisoformat(str(value))
 
-    def _summary(self, view: dict[str, Any]) -> dict[str, Any]:
+    def _summary(self, view: dict[str, Any], span: int = 1) -> dict[str, Any]:
         sections = view.get("sections") or []
         anomalies = view.get("anomalies") or {}
         token = view.get("token") or {}
@@ -401,6 +403,12 @@ class DailyReportBuilder:
         # A figure for a section the operator did not select would read as a
         # real "0" or "no data"; label it as not enabled instead.
         return {
+            # The four headline cards mix scopes in a weekly report (anomalies
+            # and tokens cover 7 days, sent/received only the last day); the
+            # template prints these labels so the numbers are not misread.
+            "span_days": max(1, int(span or 1)),
+            "window_label": "昨日" if span == 1 else f"近 {span} 天",
+            "last_day_label": "最后一天",
             "anomaly_count": (
                 anomalies.get("count", 0) if "anomaly" in sections else "未开启"
             ),
@@ -855,7 +863,11 @@ class DailyReportBuilder:
                 }
             )
         if unresolved_items:
-            items = unresolved_items + items
+            # Keep the unresolved rows visible: prepending them after the
+            # 20-row cut used to hide today's real events once 20 stale rows
+            # had accumulated.
+            head = items[: max(0, 20 - len(unresolved_items))]
+            items = unresolved_items + head
         return {
             "available": bool(items),
             "empty_reason": (
@@ -997,8 +1009,12 @@ class DailyReportBuilder:
         try:
             cur_ts = float(yesterday.get("captured_at") or 0)
             next_ts = float(next_day.get("captured_at") or 0)
-            gap_hours = abs(next_ts - cur_ts) / 3600.0 if cur_ts and next_ts else 24.0
-            recv_skewed = not (23.0 <= gap_hours <= 25.0)
+            if cur_ts and next_ts:
+                gap_hours = abs(next_ts - cur_ts) / 3600.0
+                recv_skewed = not (23.0 <= gap_hours <= 25.0)
+            # Missing captured_at (old rows) means the gap cannot be judged;
+            # defaulting to 24h claimed "the snapshot is on time" without
+            # evidence.
         except (TypeError, ValueError):
             recv_skewed = False
 

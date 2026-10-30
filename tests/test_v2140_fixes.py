@@ -95,7 +95,14 @@ def test_db_unavailable_skips_the_report(tmp_path: Path) -> None:
     assert store.list_report_runs(limit=5) == []
 
 
-def test_cross_day_retry_is_abandoned(tmp_path: Path) -> None:
+def test_cross_day_retry_keeps_report_day(tmp_path: Path) -> None:
+    """A text retry that crosses midnight keeps the pinned report day.
+
+    It used to be abandoned with a "cross-day" row even though the image path
+    had already been fixed to send the original day; the operator lost the
+    whole report for a one-off failure at 23:5x.
+    """
+
     store = ReportStore(tmp_path / "report.db")
     reporter = DailyReporter(
         _ResultPlugin(DeliveryResult(ok=True, ok_targets=[TARGET])),
@@ -105,6 +112,12 @@ def test_cross_day_retry_is_abandoned(tmp_path: Path) -> None:
     reporter._running = True
     reporter._pending_retry = ("2026-10-26", 0)
     reporter._pending_retry_day = "2000-01-01"
+    calls: list[object] = []
+
+    async def fake_send(day=None):
+        calls.append(day)
+
+    reporter._send_scheduled = fake_send
 
     with (
         mock.patch.object(
@@ -114,8 +127,9 @@ def test_cross_day_retry_is_abandoned(tmp_path: Path) -> None:
     ):
         asyncio.run(reporter._loop())
 
+    assert calls == ["2026-10-26"]
     runs = store.list_report_runs(limit=5)
-    assert runs[0]["detail"] == "send failed (cross-day)"
+    assert all(run["detail"] != "send failed (cross-day)" for run in runs)
 
 
 def test_resolve_event_close_all(tmp_path: Path) -> None:

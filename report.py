@@ -239,7 +239,9 @@ class ReportCollector:
             # Every mount is watched by the disk alert, so the trend must
             # follow the worst one: a filling second disk used to stay
             # invisible in the report while the alert fired.
-            rows = disk_usage(paths)
+            # statvfs blocks on a hung network mount, so it must not run on
+            # the event loop (the card path already used a thread).
+            rows = await asyncio.to_thread(disk_usage, paths)
             percents = [row.percent for row in rows if row.percent is not None]
             disk_pct = max(percents) if percents else None
         except Exception:
@@ -850,14 +852,14 @@ class DailyReporter:
                         self._pending_retry_day
                         and self._pending_retry_day != self._today()
                     ):
+                        # Keep the pinned report day instead of dropping the
+                        # retry: the same cross-midnight rule was already
+                        # fixed for images, and a text report is still the
+                        # same day's report.
                         logger.warning(
-                            "日报 %s 的重试已跨天，放弃本次重试（避免发送另一份报告）",
+                            "日报 %s 的重试已跨天，继续用原报告日发送",
                             _day or "--",
                         )
-                        self._record(_day, False, "send failed (cross-day)")
-                        self._clear_retry()
-                        await asyncio.sleep(60)
-                        continue
                     try:
                         await self._send_scheduled(_day)
                     except asyncio.CancelledError:
@@ -1002,7 +1004,7 @@ class DailyReporter:
                         logger.exception("周报重试发送意外失败，重新排入重试")
                         if not self._schedule_weekly_retry():
                             await self._notify_give_up(
-                                self._targets(), "--", weekly=True
+                                self._targets("weekly"), "--", weekly=True
                             )
                     await asyncio.sleep(60)
                     continue
@@ -1108,7 +1110,7 @@ class DailyReporter:
         except Exception:
             logger.exception("周报数据聚合失败")
             if not self._schedule_weekly_retry():
-                await self._notify_give_up(self._targets(), "--", weekly=True)
+                await self._notify_give_up(self._targets("weekly"), "--", weekly=True)
             return
         report_day = str(view.get("day") or "")
         self._weekly_pending_report_day = report_day
@@ -1368,21 +1370,21 @@ class DailyReporter:
         targets = self._targets()
         if self._sections() is not None and not self._sections():
             logger.warning("日报内容为空（daily_report.sections=[]），跳过发送")
-            self._record("", False, "sections empty")
+            self._record(self._default_report_day(), False, "sections empty")
             self._clear_retry()
             return
         if not self.store.available:
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
             logger.error("日报数据库不可用，跳过本次日报发送")
-            self._record(day or "", False, "db unavailable")
+            self._record(day or self._default_report_day(), False, "db unavailable")
             await self._notify_store_unavailable(targets)
             return
         try:
             view = await asyncio.to_thread(self._build_view, day)
         except Exception:
             logger.exception("日报数据聚合失败")
-            self._record(day or "", False, "build failed")
+            self._record(day or self._default_report_day(), False, "build failed")
             if not self._schedule_retry(day):
                 await self._notify_give_up(targets, day or "", weekly=False)
             return

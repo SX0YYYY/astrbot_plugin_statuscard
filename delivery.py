@@ -291,17 +291,21 @@ class DeliveryService:
         """Store the outcome of a delivery in the plugin state."""
 
         try:
-            self.state.set(
-                "delivery",
-                {
-                    "ts": time.time(),
-                    "kind": kind,
-                    "ok": result.ok,
-                    "target_count": len(targets),
-                    "source": source,
-                    **result.as_state(),
-                },
-            )
+            payload = {
+                "ts": time.time(),
+                "kind": kind,
+                "ok": result.ok,
+                "target_count": len(targets),
+                "source": source,
+                **result.as_state(),
+            }
+            self.state.set("delivery", payload)
+            # Keep the last *real* notification separately: a dashboard
+            # "verify" click used to overwrite the single slot, so the
+            # diagnostics command showed a successful verify while the real
+            # alert had failed.
+            if not str(source).startswith("verify"):
+                self.state.set("delivery_real", payload)
             self.state.save()
         except Exception as exc:
             logger.warning("记录主动推送结果失败: %s", exc)

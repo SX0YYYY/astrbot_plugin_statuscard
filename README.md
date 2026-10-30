@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.18.7-blue)
+![Version](https://img.shields.io/badge/version-2.18.8-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -16,7 +16,7 @@
 
 ![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.png)
 
-*示例图使用虚构数据生成，主机名显示为「已隐藏」；实际卡片会显示你的真实数据。*
+*示例图为线上实拍后脱敏（主机名与群号已替换）；实际卡片会显示你的真实数据。*
 
 > 如果这个插件对你有帮助，欢迎在 GitHub 点个 Star 支持一下——这是对维护者最直接的鼓励。
 
@@ -77,13 +77,13 @@
 
 ![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.png)
 
-示例图使用虚构的示例数据生成，主机名显示为「已隐藏」；实际卡片会显示你的真实数据。
+示例图为线上实拍后脱敏（主机名与群号已替换）；实际卡片会显示你的真实数据。
 
 ## 看板预览
 
 ![Web 看板概览](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/dashboard-overview.png)
 
-AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM 服务质量迷你卡与「立即验证」卡片）、历史趋势、异常事件、日报摘要四个标签，历史趋势可一键导出 CSV；页面文案跟随 WebUI 语言，主题跟随明暗模式。图为示例，界面以实际安装版本为准。
+AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM 服务质量迷你卡与「立即验证」卡片）、历史趋势、异常事件、日报摘要四个标签，历史趋势可一键导出 CSV；页面文案跟随 WebUI 语言，主题跟随明暗模式。图为线上实拍（主机名与群号已脱敏），界面以实际安装版本为准。
 
 ## 平台支持
 
@@ -484,9 +484,9 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `display.render_timeout` | `180` | 渲染超时（秒）；状态卡超时降级为本地简化卡，日报/周报先延迟重试 2 次、仍失败才发文字版 |
 | `display.t2i_benchmark` | `false` | 开启后每次状态卡/日报渲染完成记录一条耗时日志 |
 | `display.cooldown_seconds` | `10` | 同一会话冷却；0 表示不限制 |
-| `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删；清空即关闭探测 |
+| `display.website_targets` | Baidu | 网站测试目标；默认只测百度，可增删；每个目标可设 1–15 秒超时（默认 3）；名称留空时自动用去掉 query/凭据的 URL；清空即关闭探测 |
 | `display.website_cache_seconds` | `60` | 网站测试缓存；0 表示每次重新请求 |
-| `display.disk_paths` | 空 | 磁盘挂载点；留空自动检测，Linux 通常填 `/` |
+| `display.disk_paths` | 空 | 磁盘挂载点；留空自动检测根分区；可填多个：每块盘分别告警、卡片分行，日报与看板取使用率最高的那块 |
 | `display.timezone` | `Asia/Shanghai` | 卡片、告警、监测和日报统一使用的时区 |
 | `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
 | `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板。与 `display.redact` 完全独立，全部不勾即看板不脱敏 |
@@ -656,6 +656,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.18.8**：P3 批 44 项全部修复——孤儿告警自动收尾、广播与恢复通知去重、时钟回拨不再放大速率、网络折线按时间轴且缺口分段、网卡只选物理在线口、周报摘要标注范围、验证 UMO 打码、主题跟随系统、配置提示与 CI 校验补齐、包体瘦身与工作区清理
 - **v2.18.7**：全流程找茬修复批——Webhook 通配监听未强制 Token 时拒绝启动、容器/unit 名拼错不再当服务异常、监测恢复补发与告警重试加上限、周报资源按整周聚合、状态卡 4xx/5xx 标红、网站名不再泄露 URL 里的 token、`.bak` 可抵御二次损坏、验证按钮文案恢复
 - **v2.18.6**：A/B 两批待办（38 项）一次性收口——多挂载点磁盘告警、恢复通知补发上限、Webhook 开关语义、停机不记假速率、导出保留最新、周报口径、体检新增时间校验等
 - **v2.18.5**：全面审计后修复 18 项缺陷——磁盘口径在日报/告警/看板三处补齐、聚合器并发丢告警、告警恢复与冷却的边界、监测配置错误不再当故障、周报补发、网站可用率按 2xx/3xx 统计等
