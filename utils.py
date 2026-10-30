@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import platform
 import sys
 import time
@@ -104,6 +105,17 @@ def clamp_config(value: float, low: float, high: float, label: str):
     runtime behaviour silently diverge from what the page shows.
     """
 
+    # A hand-edited JSON may contain NaN/Infinity (Python's json accepts
+    # them); max/min would silently pin NaN to the upper bound, which also
+    # dodged the audit's zero-check. Clamp to low and warn (v2.20.0).
+    if isinstance(value, float) and math.isnan(value):
+        logger.warning(
+            "%s=%s 不是有效数字（NaN/Infinity），已按 %s 生效",
+            label,
+            value,
+            low,
+        )
+        return low
     clamped = max(low, min(high, value))
     if clamped != value:
         logger.warning(
@@ -216,3 +228,28 @@ def normalize_targets(raw: Any, platform_id: str) -> list[str]:
         if target not in out:
             out.append(target)
     return out
+
+
+def mask_umo(target: object) -> str:
+    """Hide the middle of a chat id inside a UMO.
+
+    default:GroupMessage:461961169 becomes
+    default:GroupMessage:*******69: the value still tells two targets
+    apart, but no full chat id is exposed -- shared by the dashboard API
+    (verify results), the status-card diagnostic command and anywhere else
+    a UMO could reach a human reader.
+    """
+
+    text = str(target or "")
+    head, _, tail = text.rpartition(":")
+    digits = "".join(ch for ch in tail if ch.isdigit())
+    # Short IDs used to pass through untouched, which leaked the UMO the
+    # callers promise never to expose; mask anything digit-bearing.
+    if not digits:
+        return text
+    # Keep the last two digits: enough to tell two targets apart, never
+    # enough to identify an account (old behaviour kept four for long IDs
+    # and none for very short ones).
+    keep = min(2, len(digits) - 1)
+    masked = "*" * (len(digits) - keep) + digits[len(digits) - keep :]
+    return f"{head}:{masked}" if head else masked

@@ -165,7 +165,7 @@ def test_audit_flags_invalid_schedule_time() -> None:
             "enabled": True,
             "weekly_enabled": False,
             "targets": ["1"],
-            "time": "9:00",
+            "time": "25:00",  # 运行时与 audit 都拒绝：小时超范围
         },
     }
     codes = [issue.code for issue in run_audit(config)]

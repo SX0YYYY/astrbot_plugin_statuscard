@@ -153,6 +153,7 @@ class ServiceMonitor:
         self._silence_active = False
         self._suppress_warned: set[str] = set()
         self._targets_warned = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     def _normalize_items(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
@@ -392,6 +393,31 @@ class ServiceMonitor:
         for result in results:
             if isinstance(result, Exception):
                 logger.error("服务监测检查异常: %s", result)
+        # Items skipped for config errors never reach _check_item; if one
+        # was already alerting when its config broke, close that episode
+        # here instead of freezing it in the "unresolved" list forever.
+        for item in self.items:
+            if not item.get("config_error"):
+                continue
+            key = self._item_key(item)
+            name = str(item.get("name") or item.get("__template_key") or "服务")
+            kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
+            with self.state.section("monitors") as monitors:
+                if not isinstance(monitors, dict):
+                    continue
+                states = monitors.get("items")
+                if not isinstance(states, dict):
+                    continue
+                st = states.get(key)
+                if not isinstance(st, dict) or not st.get("alerting"):
+                    continue
+                self._close_episode_for_config_error(
+                    st,
+                    name,
+                    redact_url(str(item.get("name") or name)),
+                    kind,
+                    f"配置不完整（{item.get('config_error')}）",
+                )
         with self.state.section("monitors") as monitors:
             monitors["last_run"] = time.time()
         self.state.save()
@@ -486,10 +512,10 @@ class ServiceMonitor:
         ok, detail, target_text = await self._probe(item)
         target_text = redact_url(target_text)
         now = time.time()
-        monitors = self.state.data.setdefault("monitors", {})
+        monitors = self.state.setdefault("monitors", {})
         if not isinstance(monitors, dict):
             monitors = {}
-            self.state.data["monitors"] = monitors
+            self.state.set("monitors", monitors)
         states = monitors.get("items")
         if not isinstance(states, dict):
             # A hand-edited state.json holding a list here made every probe
@@ -532,6 +558,10 @@ class ServiceMonitor:
 
         if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
             # Misconfiguration is not an outage: warn once, never alert.
+            # An episode that was already alerting must be closed here though:
+            # returning with alerting still set kept the item in the daily
+            # report's "unresolved" list (and the recovery notice silent)
+            # until the 30-day window rolled over -- fixed in v2.20.0.
             st["last_checked"] = now
             st["last_error"] = detail
             st["fails"] = 0
@@ -543,6 +573,10 @@ class ServiceMonitor:
                     name,
                     detail,
                 )
+            if alerting:
+                self._close_episode_for_config_error(
+                    st, name, target_text, kind, detail
+                )
             states[key] = st
             return
 
@@ -553,6 +587,9 @@ class ServiceMonitor:
             # reported the whole window as the outage duration.
             st["last_checked"] = now
             if ok:
+                # Capture the fault text before clearing it: the alert row
+                # should describe the outage, not the successful probe.
+                prev_error = str(st.get("last_error") or "服务异常")
                 st["last_ok"] = now
                 st["last_error"] = ""
                 started = float(st.pop("silent_since", 0) or 0)
@@ -560,7 +597,7 @@ class ServiceMonitor:
                     self._record_event(
                         name,
                         target_text,
-                        f"{detail}（维护静默期内，未推送）",
+                        f"{prev_error}（维护静默期内自愈，未推送）",
                         "alert",
                     )
                     self._record_event(
@@ -577,13 +614,17 @@ class ServiceMonitor:
             return
 
         # A fault that became healthy right at the end of the window: record
-        # it with the real start time instead of dropping the episode.
+        # it with the real start time instead of dropping the episode. A
+        # fault that outlives the window keeps its start time and simply
+        # rejoins the normal state machine below (v2.20.0: the start used
+        # to be dropped, so the pre-silence outage vanished from the log).
         silent_since = float(st.pop("silent_since", 0) or 0)
         if silent_since and ok:
+            prev_error = str(st.get("last_error") or "服务异常")
             self._record_event(
                 name,
                 target_text,
-                f"{detail}（维护静默期内，未推送）",
+                f"{prev_error}（维护静默期内自愈，未推送）",
                 "alert",
             )
             self._record_event(
@@ -592,6 +633,7 @@ class ServiceMonitor:
                 f"持续 {format_duration(now - silent_since)}（维护静默期内，未推送）",
                 "recovery",
             )
+            st["last_error"] = ""
 
         if not ok and not alerting:
             suppressed_by = self._suppress_alert(item)
@@ -699,6 +741,11 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        # The alert went out on its own; the buffered marker
+                        # (if a previous episode ever buffered) must go or a
+                        # later same-name abandon would withdraw this item's
+                        # "notified" state (v2.20.0).
+                        st.pop("summary_buffered", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
                         retry_count = safe_int(st.get("retry_count") or 0) + 1
@@ -723,6 +770,7 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        st.pop("summary_buffered", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
                         retry_count = safe_int(st.get("retry_count") or 0) + 1
@@ -808,6 +856,10 @@ class ServiceMonitor:
                 st["since"] = 0
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
+                # Episode is over: the buffered marker must not survive into
+                # the next one, or a later same-name abandon would withdraw
+                # this item's "notified" state (v2.20.0).
+                st.pop("summary_buffered", None)
                 # The event log does not depend on the notification pref: the
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
@@ -859,6 +911,68 @@ class ServiceMonitor:
                             )
                 st["pending"] = False
         states[key] = st
+
+    def _close_episode_for_config_error(
+        self,
+        st: dict[str, Any],
+        name: str,
+        target_text: str,
+        kind: str,
+        detail: str,
+    ) -> None:
+        """Close an in-flight alert because the target no longer exists.
+
+        Deleting a container/unit while its monitor is alerting used to
+        freeze the episode forever: the config-error branch returned
+        without clearing ``alerting``, so the daily report kept listing
+        the item as unresolved and no recovery notice was ever sent.
+        """
+
+        notified = bool(st.pop("alerted", True))
+        duration = time.time() - safe_float(st.get("since") or time.time())
+        st["alerting"] = False
+        st["since"] = 0
+        st["retry_count"] = 0
+        st["next_attempt"] = 0
+        st["pending"] = False
+        for stale_key in (
+            "awaiting_summary",
+            "summary_buffered",
+            "send_exhausted",
+            "stale",
+            "silent_since",
+        ):
+            st.pop(stale_key, None)
+        self._record_event(
+            name,
+            target_text,
+            f"目标已不存在或配置错误，告警自动关闭（{detail}）",
+            "recovery",
+        )
+        if notified and self.recover_notify:
+            text = (
+                f"✅ 服务告警关闭 · {name}\n"
+                "──────────────\n"
+                f"类型: {kind}\n"
+                f"目标: {target_text}\n"
+                f"原因: 目标已不存在或配置错误\n"
+                f"故障开始: {_fmt_ts(time.time() - duration, self.config)}\n"
+                f"中断时长: {format_duration(duration)}\n"
+                "（监测项配置已失效，请更新或删除该监测项）"
+            )
+            self._queue_send_now(text, name)
+
+    def _queue_send_now(self, text: str, name: str) -> None:
+        """Best-effort direct send for a notice that must not be aggregated."""
+
+        async def _send_task() -> None:
+            result = await self._send(text)
+            if not self._delivered(result):
+                logger.warning("监测项 %s 的通知发送未确认送达", name)
+
+        task = asyncio.create_task(_send_task())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _probe(self, item: dict[str, Any]) -> tuple[bool, str, str]:
         kind = str(item.get("__template_key") or "")
@@ -1209,7 +1323,13 @@ class ServiceMonitor:
                 "detail": detail,
             }
 
-        return list(await asyncio.gather(*(one(item) for item in self.items)))
+        sem = asyncio.Semaphore(6)
+
+        async def limited(it: dict[str, Any]) -> dict[str, Any]:
+            async with sem:
+                return await one(it)
+
+        return list(await asyncio.gather(*(limited(item) for item in self.items)))
 
     def status(self) -> dict[str, Any]:
         monitors = self.state.get("monitors", {}) or {}

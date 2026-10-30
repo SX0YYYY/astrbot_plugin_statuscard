@@ -7,7 +7,7 @@ from typing import Any
 import jinja2
 from markupsafe import Markup, escape
 
-from .bg_provider import fade_color_from_bytes
+from .bg_provider import _detect_image_mime, fade_color_from_bytes
 
 ROOT = Path(__file__).parent
 TPL_DIR = ROOT / "templates" / "default" / "res" / "templates"
@@ -15,21 +15,12 @@ CSS_FILE = ROOT / "templates" / "default" / "res" / "css" / "index.css"
 REPORT_DIR = ROOT / "templates" / "report"
 DEFAULT_AVATAR = ROOT / "res" / "assets" / "default_avatar.webp"
 
+# Neutral fallback when the background's average colour cannot be read.
+FADE_FALLBACK_COLOR = (90, 84, 80)
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
-
-
-def _detect_image_mime(data: bytes) -> str:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
-        return "image/webp"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    return "image/png"
 
 
 def _data_url(data: bytes, mime: str | None = None) -> str:
@@ -69,7 +60,20 @@ def _br_filter(value: Any) -> Markup:
     return Markup(str(escape(str(value))).replace("\n", "<br />"))
 
 
-def _fade_overlay(bg_bytes: bytes) -> str:
+# The same background bytes are rendered on every card while the config
+# stays unchanged; decoding + averaging the photo each time blocks the
+# event loop twice per render (v2.19.4 regression). Cache the computed
+# overlay keyed on a cheap fingerprint of the bytes.
+_FADE_CACHE: tuple[tuple[tuple[int, int], int], str, str] | None = None
+
+
+def _fade_fingerprint(bg_bytes: bytes, card_width: int) -> tuple[tuple[int, int], int]:
+    # card_width is part of the key: the same photo must re-derive its
+    # gradient when the user changes the configured output width.
+    return ((len(bg_bytes), hash(bytes(bg_bytes[:512]))), card_width)
+
+
+def _fade_overlay(bg_bytes: bytes, card_width: int = 650) -> tuple[str, str]:
     """Gradient that dissolves the single background photo into its own
     dominant tone below the fold (v2.19.4).
 
@@ -77,27 +81,43 @@ def _fade_overlay(bg_bytes: bytes) -> str:
     tiling repeated portrait photos down the long page); under it a
     linear gradient fades to the image's average colour so the lower
     half of the card keeps the photo's palette without repeating it.
-    Fade bounds scale with the photo's displayed height (650px wide).
+    Fade bounds scale with the photo's displayed height at *card_width*
+    (the configured render width), not a hardcoded 650: without this the
+    gradient ended mid-photo whenever the user raised the output width.
+
+    Returns ``(overlay_gradient, solid_background_color)`` -- the colour
+    doubles as the CSS ``background-color`` so the area below the photo
+    never shows the renderer's default white even if the gradient math
+    changes.
     """
 
     from io import BytesIO
 
     from PIL import Image
 
-    color = fade_color_from_bytes(bg_bytes) or (90, 84, 80)
-    try:
-        with Image.open(BytesIO(bg_bytes)) as image:
-            width, height = image.size
-        display_h = max(1, round(650 * height / width))
-    except Exception:
-        display_h = 650
-    start = round(display_h * 0.86)
-    end = round(display_h * 1.21)
-    r, g, b = color
-    return (
-        f"linear-gradient(180deg, rgba({r}, {g}, {b}, 0) {start}px, "
-        f"rgb({r}, {g}, {b}) {end}px)"
-    )
+    global _FADE_CACHE
+    fingerprint = _fade_fingerprint(bg_bytes, card_width)
+    cached = _FADE_CACHE
+    if cached is not None and cached[0] == fingerprint:
+        gradient, color_text = cached[1], cached[2]
+    else:
+        color = fade_color_from_bytes(bg_bytes) or FADE_FALLBACK_COLOR
+        try:
+            with Image.open(BytesIO(bg_bytes)) as image:
+                img_w, img_h = image.size
+            display_h = max(1, round(card_width * img_h / max(1, img_w)))
+        except Exception:
+            display_h = card_width
+        start = round(display_h * 0.86)
+        end = round(display_h * 1.21)
+        r, g, b = color
+        gradient = (
+            f"linear-gradient(180deg, rgba({r}, {g}, {b}, 0) {start}px, "
+            f"rgb({r}, {g}, {b}) {end}px)"
+        )
+        color_text = f"rgb({r}, {g}, {b})"
+        _FADE_CACHE = (fingerprint, gradient, color_text)
+    return gradient, color_text
 
 
 def build_default_html(
@@ -109,8 +129,10 @@ def build_default_html(
 ) -> str:
     view = collected.setdefault("view", {})
     view["background_data_url"] = _data_url(bg_bytes, bg_mime)
-    view["background_overlay"] = _fade_overlay(bg_bytes)
     width = max(650, min(1600, int(render_width or 650)))
+    overlay, bg_color = _fade_overlay(bg_bytes, width)
+    view["background_overlay"] = overlay
+    view["background_color"] = bg_color
 
     if avatar_bytes is None:
         try:
@@ -138,12 +160,6 @@ def build_default_html(
         'content="width=device-width, initial-scale=1.0"',
         f'content="width={width}, initial-scale=1.0"',
     )
-    for script in (
-        '<script src="/js/init-global.js"></script>',
-        '<script src="/js/lazy-load.js"></script>',
-        '<script src="/js/load-plugin.js"></script>',
-    ):
-        index = index.replace(script, "")
 
     css = css.replace("width: 650px", f"width: {width}px")
     page_fix = f"html,body{{margin:0;padding:0;width:{width}px;}}"

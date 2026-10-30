@@ -1111,13 +1111,15 @@
       // following CSV rows in Excel/WPS, so flatten every newline first.
       text = text.replace(/\r\n|\r|\n/g, " ");
       // Excel/WPS executes a cell starting with =,+,-,@ as a formula, and
-      // event details can carry text returned by probed services.
-      if (/^[=+\-@\t]/.test(text)) text = "'" + text;
+      // event details can carry text returned by probed services. The
+      // leading pipe covers the legacy DDE vector (v2.20.0).
+      if (/^[=+\-@\t|]/.test(text)) text = "'" + text;
       return /[",]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     };
     const lines = [headers.join(",")];
     for (const row of rows) lines.push(headers.map((h) => esc(row[h])).join(","));
-    const blob = new Blob(["\ufeff" + lines.join("\n")], {
+    // RFC 4180 line separator; some legacy spreadsheets ignored bare LF.
+    const blob = new Blob(["\ufeff" + lines.join("\r\n")], {
       type: "text/csv;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
@@ -1877,6 +1879,23 @@
     return '<li class="' + (bad ? "verify-bad" : "") + '">' + esc(text) + "</li>";
   }
 
+  function verifyNoteText(data) {
+    if (!data) return t("verify_none", "没有可验证的项");
+    if (data.note_code && data.note_code.code) {
+      const code = data.note_code.code;
+      if (code === "monitor_items_incomplete") {
+        return t(
+          "verify_monitor_items_incomplete",
+          "{count} 个监测项配置不完整（缺少 URL/端口等），请在配置页补全后重试",
+        ).replace("{count}", String(data.note_code.count || 0));
+      }
+      if (code === "monitor_items_empty") {
+        return t("verify_monitor_items_empty", "没有已启用的监测项");
+      }
+    }
+    return data.note || t("verify_none", "没有可验证的项");
+  }
+
   function renderVerifyResult(kind, data) {
     const box = $("verify-result");
     if (!box) return;
@@ -1917,7 +1936,7 @@
     if (!results.length) {
       box.innerHTML =
         '<ul class="verify-list">' +
-        verifyRow(data.note || t("verify_none", "没有可验证的项"), false) +
+        verifyRow(verifyNoteText(data), false) +
         "</ul>";
       return;
     }
@@ -1963,8 +1982,20 @@
     return t(entry[0], entry[1]);
   }
 
+  // One shared result box serves all three verify kinds; two concurrent
+  // runs used to race and the later response overwrote the earlier one
+  // out of order (v2.20.0). Serialize at the UI level.
+  let verifyInflight = false;
   async function runVerify(kind, button) {
     if (!button || button.disabled) return;
+    if (verifyInflight) {
+      const busyBox = $("verify-result");
+      if (busyBox) {
+        busyBox.innerHTML =
+          '<p class="muted">' + esc(t("verifying", "验证中…")) + "</p>";
+      }
+      return;
+    }
     // The dashboard iframe sandbox has no allow-modals, so window.confirm is
     // silently rejected there. Use a two-step arm button instead: the first
     // click arms the button, the second click (within 5s) really sends.
@@ -1994,6 +2025,7 @@
     button.dataset.armed = "";
     button.classList.remove("verify-armed");
     button.disabled = true;
+    verifyInflight = true;
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");
     if (box) {
@@ -2010,6 +2042,7 @@
           "</p></div>";
       }
     } finally {
+      verifyInflight = false;
       button.disabled = false;
       // Restore this button's own label, not a fixed one: the old code wrote
       // "验证推送目标" for every kind, so after checking monitors the page

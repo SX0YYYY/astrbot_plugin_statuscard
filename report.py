@@ -489,6 +489,12 @@ class DailyReporter:
         self._last_sent_day: str | None = None
         self._last_attempt_day: str | None = None
         self._weekly_last_sent_week: str | None = None
+        # Week the last weekly send was ATTEMPTED in (set before any slow
+        # work): a crash/reload mid-send then leaves a marker the catch-up
+        # check accepts, exactly like the daily last_attempt_day. Without
+        # it the very first weekly run was lost silently whenever the
+        # process died inside the Sunday window (v2.20.0).
+        self._weekly_attempt_week: str | None = None
         # Render retries: a short T2I outage should not turn the report into
         # text. The attempts and the next retry time survive reloads too.
         # The report day is pinned as well: a retry that crosses midnight must
@@ -533,6 +539,7 @@ class DailyReporter:
         self._last_sent_day = saved.get("last_sent_day") or None
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
+        self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = saved.get("pending_retry_day") or None
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
@@ -596,6 +603,7 @@ class DailyReporter:
                     "pending_retry_count": self._pending_retry_count,
                     "pending_retry_day": self._pending_retry_day,
                     "weekly_last_sent_week": self._weekly_last_sent_week,
+                    "weekly_attempt_week": self._weekly_attempt_week,
                     "weekly_pending": self._weekly_pending,
                     "weekly_pending_report_day": self._weekly_pending_report_day,
                     "weekly_retry_count": self._weekly_retry_count,
@@ -641,11 +649,10 @@ class DailyReporter:
         ).strip()
 
     def _sections(self) -> list[str] | None:
-        """Return selected sections, or None when the key is unset.
+        """Return the selected sections (never None).
 
-        ``None`` means "use the built-in defaults"; an empty list means the
-        user explicitly cleared every module, so nothing should be rendered
-        or sent.
+        An unset key yields the built-in defaults. v2.20.0: the docstring
+        used to promise a ``None`` return that no code path produced.
         """
 
         raw = cfg_get(self.config, "daily_report.sections", None)
@@ -812,10 +819,8 @@ class DailyReporter:
                         # when the user enables it again hours later.
                         self._pending_image_retry = None
                         self._image_retry_attempts = 0
-                        self._weekly_pending = None
-                        self._weekly_image_pending = None
                         self._weekly_image_attempts = 0
-                        self._clear_retry()
+                        self._clear_retry(clear_weekly=True)
                     await asyncio.sleep(60)
                     continue
                 self._disabled_logged = False
@@ -1094,9 +1099,15 @@ class DailyReporter:
         return True
 
     async def _send_weekly_scheduled(self, day: str | None = None) -> None:
+        # Mark this week as attempted before any slow work, mirroring the
+        # daily report's last_attempt_day (v2.20.0).
+        self._weekly_attempt_week = self._week_key(self._today())
+        self._save_delivery_state()
         weekly_sections = self._weekly_sections()
         if weekly_sections is not None and not weekly_sections:
             logger.warning("周报内容为空（daily_report.weekly_sections=[]），跳过发送")
+            self._record(self._default_report_day(), False, "weekly sections empty")
+            self._clear_retry()
             return
         if not self.store.available and not self.store.ensure_ready():
             logger.error("日报数据库不可用，跳过本次周报发送")
@@ -1308,7 +1319,7 @@ class DailyReporter:
         )
         return True
 
-    def _clear_retry(self) -> None:
+    def _clear_retry(self, clear_weekly: bool = False) -> None:
         changed = (
             self._pending_retry is not None
             or bool(self._pending_retry_count)
@@ -1321,6 +1332,22 @@ class DailyReporter:
         self._pending_retry_day = None
         self._pending_image_retry_report_day = None
         self._pending_image_retry_send_day = None
+        if clear_weekly:
+            # Only the disabled branch passes this: a weekly retry queued
+            # while the daily report got disabled used to survive the
+            # cleanup (the daily fields were clean, so nothing was saved)
+            # and resurrect itself after a reload (v2.20.0). A plain
+            # daily-success clear must NOT touch the weekly schedule.
+            changed = changed or (
+                self._weekly_pending is not None
+                or self._weekly_pending_report_day is not None
+                or self._weekly_image_pending is not None
+                or self._weekly_image_report_day is not None
+            )
+            self._weekly_pending = None
+            self._weekly_pending_report_day = None
+            self._weekly_image_pending = None
+            self._weekly_image_report_day = None
         if changed:
             self._save_delivery_state()
 
@@ -1340,12 +1367,13 @@ class DailyReporter:
             return False
         return not (self._last_sent_day == today or self._last_attempt_day == today)
 
-    @staticmethod
-    def _week_key(day: str) -> str:
+    def _week_key(self, day: str) -> str:
         try:
             iso = date.fromisoformat(day).isocalendar()
         except ValueError:
-            iso = date.today().isocalendar()
+            # Align with the rest of the scheduler: use the display
+            # timezone, not the server-local date (v2.20.0).
+            iso = now_in_timezone(self.config).date().isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
 
     def _weekly_catch_up_allowed(self) -> bool:
@@ -1358,7 +1386,11 @@ class DailyReporter:
         not deliver last week's report in the middle of a new week.
         """
 
-        if not self._weekly_last_sent_week:
+        if not self._weekly_last_sent_week and not self._weekly_attempt_week:
+            # Neither marker means a genuine first install/upgrade: sending
+            # then could duplicate a report the previous process already
+            # delivered. An attempt marker alone (crash mid-send) is enough
+            # to allow the catch-up on the trigger day (v2.20.0).
             return False
         now = now_in_timezone(self.config)
         if now.weekday() != 6:

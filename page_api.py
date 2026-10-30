@@ -39,7 +39,7 @@ from .collectors import (
 from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
-from .utils import normalize_targets, redact_url
+from .utils import mask_umo, normalize_targets, redact_url
 from .version import __version__, resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
@@ -109,27 +109,9 @@ RANGE_SECONDS = {
 
 
 def _mask_umo(target: Any) -> str:
-    """Hide the middle of a chat id inside a UMO.
+    """Thin wrapper over the shared :func:."""
 
-    ``default:GroupMessage:461961169`` becomes
-    ``default:GroupMessage:*****1169``: the verification list still tells
-    targets apart, but the browser never receives a full UMO (the class
-    docstring promises no UMO is exposed).
-    """
-
-    text = str(target or "")
-    head, _, tail = text.rpartition(":")
-    digits = "".join(ch for ch in tail if ch.isdigit())
-    # Short IDs used to pass through untouched, which leaked the UMO the
-    # class docstring promises never to expose; mask anything digit-bearing.
-    if not digits:
-        return text
-    # Keep the last two digits: enough to tell two targets apart in the
-    # verify result, never enough to identify an account (old behaviour kept
-    # four for long IDs and none for very short ones).
-    keep = min(2, len(digits) - 1)
-    masked = "*" * (len(digits) - keep) + digits[len(digits) - keep :]
-    return f"{head}:{masked}" if head else masked
+    return mask_umo(target)
 
 
 class PageApi:
@@ -144,6 +126,7 @@ class PageApi:
         self.plugin = plugin
         self._reports_cache: tuple[float, dict[str, Any], tuple] | None = None
         self._reports_cache_seconds = 60.0
+        self._reports_build_inflight = False
         # Strong references for the fire-and-forget recovery tasks: asyncio
         # may garbage-collect an unreferenced task mid-flight.
         self._recovery_tasks: set[asyncio.Task] = set()
@@ -166,6 +149,15 @@ class PageApi:
         store = self.plugin.report_store
         if store.available:
             return None
+        if any(not task.done() for task in self._recovery_tasks):
+            # A recovery attempt is already running; spawning another per
+            # refresh used to run concurrent init/rename passes on the same
+            # SQLite file (v2.20.0).
+            return {
+                "ok": True,
+                "db_unavailable": True,
+                "reason_code": "report_db_unavailable",
+            }
         try:
             task = asyncio.get_running_loop().create_task(
                 asyncio.to_thread(store.ensure_ready)
@@ -267,7 +259,10 @@ class PageApi:
     def _disk(self) -> dict[str, Any]:
         paths = cfg_get(self.plugin.config, "display.disk_paths", None)
         if isinstance(paths, list):
-            configured = [str(item) for item in paths if str(item).strip()]
+            # Deduplicate like the card does (v2.20.0).
+            configured = list(
+                dict.fromkeys(str(item).strip() for item in paths if str(item).strip())
+            )
         else:
             configured = []
         if not configured:
@@ -594,6 +589,13 @@ class PageApi:
                         "kind": kind,
                         "results": [],
                         "note": note,
+                        # Structured variant so the English UI can translate
+                        # instead of showing the Chinese sentence (v2.20.0).
+                        "note_code": (
+                            {"code": "monitor_items_incomplete", "count": broken}
+                            if broken
+                            else {"code": "monitor_items_empty"}
+                        ),
                     }
                 )
 
@@ -684,7 +686,12 @@ class PageApi:
                     "http_status": status,
                 }
             )
-        return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+        return jsonify(
+            {
+                "ok": False,
+                "error": f"unknown kind: {kind} (supported: monitors, targets, webhook)",
+            }
+        )
 
     # ------------------------------------------------------------------
     # GET /export
@@ -794,7 +801,12 @@ class PageApi:
                 for row in fetched[-limit:]
             ]
         else:
-            return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": f"unknown kind: {kind} (supported: resources, processes, websites, events)",
+                }
+            )
         return jsonify(
             {
                 "ok": True,
@@ -1041,10 +1053,31 @@ class PageApi:
             and cached[2] == cache_key
         ):
             return jsonify(cached[1])
+        if self._reports_build_inflight and cached and cached[2] == cache_key:
+            # A concurrent miss is already building the same payload; serve
+            # the stale copy instead of building it twice (v2.20.0).
+            return jsonify(cached[1])
+        self._reports_build_inflight = True
+        try:
+            return await self._build_reports_payload(
+                now_ts, cache_key, sections_cfg, fresh
+            )
+        finally:
+            self._reports_build_inflight = False
+
+    async def _build_reports_payload(
+        self,
+        now_ts: float,
+        cache_key: tuple,
+        sections_cfg: Any,
+        fresh: bool,
+    ):
         view: dict[str, Any] = {}
         try:
             builder = DailyReportBuilder(
-                plugin.report_store, plugin.config, redact=self._redactor().rules
+                self.plugin.report_store,
+                self.plugin.config,
+                redact=self._redactor().rules,
             )
             sections = sections_cfg
             view = await asyncio.to_thread(
@@ -1081,7 +1114,7 @@ class PageApi:
             "website": view.get("website"),
             "process": view.get("process"),
             "runs": await asyncio.to_thread(
-                plugin.report_store.list_report_runs, limit=30
+                self.plugin.report_store.list_report_runs, limit=30
             ),
         }
         self._reports_cache = (now_ts, payload, cache_key)

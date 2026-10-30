@@ -42,7 +42,12 @@ from .report_store import ReportStore
 from .sampler import Sampler
 from .state import StateStore
 from .t2i_renderer import build_default_html, build_report_html
-from .utils import clamp_config, clean_report_sections, is_supported_platform
+from .utils import (
+    clamp_config,
+    clean_report_sections,
+    is_supported_platform,
+    mask_umo,
+)
 from .version import __version__
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
@@ -105,14 +110,17 @@ class StatusCardPlugin(Star):
         )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
+        # Cached shrink result for the uploaded background: (path, mtime, bytes).
+        self._bg_shrink_cache: tuple[str, float, bytes] | None = None
         self._privacy_notified: set[str] = set()
         self._delivery: DeliveryService | None = None
         self._diag: dict[str, Any] = self._load_diag()
         self.page_api = PageApi(self)
         self.page_api.register()
-        self._audit_issues: list[AuditIssue] = run_audit(
-            self.config, monitor=self.monitor
-        )
+        # The audit runs in initialize() (to_thread): one of its checks is
+        # Path.exists() on user-configured mount points, which blocks the
+        # event loop on an unreachable NFS host (v2.20.0).
+        self._audit_issues: list[AuditIssue] = []
         self._check_config_permissions()
 
     def audit_issues(self) -> list[AuditIssue]:
@@ -205,13 +213,19 @@ class StatusCardPlugin(Star):
                     changed = True
 
             migration["media_source_v2"] = True
-        self.state.save()
         if changed and hasattr(self.config, "save_config"):
             try:
                 self.config.save_config()
                 logger.info("已将旧版上传头像/背景迁移为“自定义上传”来源")
             except Exception:
-                logger.exception("写入媒体来源迁移配置失败")
+                # Persisting the config failed: do NOT keep the migration
+                # marker, or the next start-up would never retry and the
+                # uploaded avatar/background would stay on "default"
+                # forever. Reset the flag so the migration re-runs.
+                logger.exception("写入媒体来源迁移配置失败，下次启动将重试迁移")
+                with self.state.section("migration") as migration:
+                    migration["media_source_v2"] = False
+        self.state.save()
 
     def _migrate_report_sections(self) -> None:
         """Remove the retired ``todo`` module from a legacy report config."""
@@ -239,6 +253,9 @@ class StatusCardPlugin(Star):
         self.state.save()
 
     async def initialize(self):
+        self._audit_issues = await asyncio.to_thread(
+            run_audit, self.config, monitor=self.monitor
+        )
         self.sampler.start()
         self.report.start()
         self.daily_report.start()
@@ -277,6 +294,7 @@ class StatusCardPlugin(Star):
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
         event.should_call_llm(False)
+        event.stop_event()
         platform_name = ""
         try:
             platform_name = str(event.get_platform_name() or "")
@@ -385,12 +403,9 @@ class StatusCardPlugin(Star):
         avatar = await fetch_avatar_bytes(
             collected["view"]["bot"], self.config, data_dir=self.data_dir
         )
-        render_width = max(
-            1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
-        )
         # The T2I service supports three fixed scale levels. "ultra" is 1.8x,
         # so a logical width of 650 CSS px produces a 1170 px wide image.
-        logical_width = max(650, min(1600, round(render_width / 1.8)))
+        logical_width = self._logical_render_width()
         html = build_default_html(
             collected,
             background.data,
@@ -497,10 +512,7 @@ class StatusCardPlugin(Star):
     async def render_report_image(self, view: dict) -> str:
         """Render a daily-report view through the same T2I options as the card."""
 
-        render_width = max(
-            1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
-        )
-        logical_width = max(650, min(1600, round(render_width / 1.8)))
+        logical_width = self._logical_render_width()
         theme_raw = str(
             cfg_get(self.config, "daily_report.theme", "light") or "light"
         ).strip()
@@ -594,9 +606,47 @@ class StatusCardPlugin(Star):
                 # the remote service renders even a 3 MB data URL fine --
                 # size was never the cause of the "washed out" look; that
                 # was the white mask + cover scaling, both since removed.)
-                bg_bytes, _ = shrink_image_bytes(bg_bytes)
+                bg_bytes = await self._shrink_background(uploaded, bg_bytes)
 
         return await resolve_background(prefer_bytes=bg_bytes)
+
+    async def _shrink_background(self, path, raw: bytes):
+        """Shrink the uploaded background off the event loop, with caching.
+
+        v2.19.1-v2.19.4 ran the PIL decode/resize/encode on the event loop
+        for every card; a broken or oversized image also took the whole
+        card down to the local fallback. Now: cached by (path, mtime),
+        executed in a thread, and any failure falls back to the built-in
+        background so only the background degrades -- the card still
+        renders normally.
+        """
+
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        cache = self._bg_shrink_cache
+        if cache is not None and cache[0] == str(path) and cache[1] == mtime:
+            return cache[2]
+        try:
+            shrunk, _ = await asyncio.to_thread(shrink_image_bytes, raw)
+        except Exception as exc:
+            logger.warning(
+                "压缩上传背景失败（%s: %s），本次改用内置背景",
+                exc.__class__.__name__,
+                exc,
+            )
+            return None
+        self._bg_shrink_cache = (str(path), mtime, shrunk)
+        return shrunk
+
+    def _logical_render_width(self) -> int:
+        """CSS width the T2I card is laid out at (render_width / 1.8)."""
+
+        render_width = max(
+            1170, min(2880, cfg_int(self.config, "display.render_width", 1170))
+        )
+        return max(650, min(1600, round(render_width / 1.8)))
 
     # ------------------------------------------------------------------
     # text / image helpers used by the alert engine
@@ -714,6 +764,7 @@ class StatusCardPlugin(Star):
         """发送一条测试通知到当前会话与实际推送目标，验证投递链路。"""
 
         event.should_call_llm(False)
+        event.stop_event()
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
             tr(self.config, "test_sent") if ok else tr(self.config, "test_failed")
@@ -725,6 +776,7 @@ class StatusCardPlugin(Star):
         """立即探测全部服务监测项，不影响告警状态。"""
 
         event.should_call_llm(False)
+        event.stop_event()
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
@@ -759,6 +811,7 @@ class StatusCardPlugin(Star):
     async def cmd_diag(self, event: AstrMessageEvent):
         """Return a compact diagnostic summary without rendering an image."""
         event.should_call_llm(False)
+        event.stop_event()
         lines = ["🩺 状态卡诊断", "──────────────"]
         platform = ""
         try:
@@ -926,7 +979,7 @@ class StatusCardPlugin(Star):
             if uncertain_targets:
                 lines.append(
                     "未确认目标: "
-                    + "、".join(str(item) for item in uncertain_targets[:3])
+                    + "、".join(mask_umo(item) for item in uncertain_targets[:3])
                 )
             failed_targets = [
                 item
@@ -935,7 +988,8 @@ class StatusCardPlugin(Star):
             ]
             if failed_targets:
                 lines.append(
-                    "失败目标: " + "、".join(str(item) for item in failed_targets[:3])
+                    "失败目标: "
+                    + "、".join(mask_umo(item) for item in failed_targets[:3])
                 )
             receipts = delivery.get("receipts") or {}
             if isinstance(receipts, dict) and receipts:
@@ -954,7 +1008,9 @@ class StatusCardPlugin(Star):
                     detail = f"retcode={retcode}"
                     if message_id is not None:
                         detail += f"，message_id={message_id}"
-                    parts.append(f"{target}（{receipt_state}，{detail}）")
+                    # 打码：诊断命令发在群里，完整 UMO 会对全部群成员可见
+                    # （与看板 verify 的 _mask_umo 同一口径）。
+                    parts.append(f"{mask_umo(target)}（{receipt_state}，{detail}）")
                 if parts:
                     lines.append("OneBot 回执: " + "；".join(parts))
         else:
@@ -1018,19 +1074,20 @@ class StatusCardPlugin(Star):
     async def cmd_preview_report(self, event: AstrMessageEvent):
         """Build and send yesterday's daily report to the current chat."""
         event.should_call_llm(False)
+        event.stop_event()
         # Rendering takes seconds; acknowledge immediately like 查看状态 does.
         yield event.plain_result(tr(self.config, "report_generating"))
         _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None)
         )
         yield event.plain_result(detail)
-        event.stop_event()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("预览周报")
     async def cmd_preview_weekly(self, event: AstrMessageEvent):
         """Build and send the last-7-days weekly report to the current chat."""
         event.should_call_llm(False)
+        event.stop_event()
         yield event.plain_result(tr(self.config, "weekly_generating"))
         _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None), span_days=7

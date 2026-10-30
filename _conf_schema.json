@@ -277,7 +277,7 @@
         "condition": {
           "avatar_source": "upload"
         },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。；GIF/WebP 动图只显示第一帧。"
       },
       "avatar_text": {
         "description": "状态图显示的 Bot 名称",
@@ -320,7 +320,7 @@
         "condition": {
           "background_source": "upload"
         },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。；GIF/WebP 动图只取第一帧作为静态背景。"
       }
     }
   },
@@ -342,7 +342,7 @@
         "items": {
           "type": "string"
         },
-        "hint": "所有通知默认发到这里：资源告警、掉线/恢复、每日定时状态图、服务监测、日报、周报。只填这一处即可，其他模块留空会自动复用。被通知中心对应规则勾选的类型会改发规则目标。"
+        "hint": "所有通知默认发到这里：资源告警、掉线/恢复、每日定时状态图、服务监测、日报、周报。只填这一处即可，其他模块留空会自动复用。被通知中心对应规则勾选的类型会改发规则目标。；要私聊接收告警时填完整格式 default:FriendMessage:你的QQ号（只填 QQ 号会被当作群号发送）。"
       },
       "daily_summary": {
         "description": "每日定时状态图",

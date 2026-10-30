@@ -511,6 +511,13 @@ class ReportStore:
                 WHERE {cond_sql}
             """
             return self._write(sql, (int(resolved_ts), *case_params))
+        # WARNING: production callers always pass close_all=True. The
+        # "close only the newest row" branch below disagrees with the
+        # daily-report pairing model (report_view keys recoveries by
+        # kind+name and pairs them with the earliest open alert), so using
+        # it renders a recovery with a duration inherited from an unrelated
+        # older episode. Keep for compatibility; do not call with
+        # close_all=False from new code (v2.20.0).
         sql = f"""
             UPDATE events
             SET resolved_ts = ?

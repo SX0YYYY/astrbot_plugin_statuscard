@@ -83,7 +83,11 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
         message_id = data.get("message_id")
     elif "message_id" in payload:
         message_id = payload.get("message_id")
-    if status == "failed" or (retcode_int is not None and retcode_int != 0):
+    # OneBot 11 retcode=1 means "accepted, async reply may follow". Treating
+    # it as a hard failure made every send on an async implementation log a
+    # warning and count as uncertain; keep the explicit failed status as the
+    # only hard-failure path (v2.20.0).
+    if status == "failed" or (retcode_int is not None and retcode_int not in (0, 1)):
         error = str(
             payload.get("message")
             or payload.get("wording")
@@ -101,7 +105,9 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
         # ``aiocqhttp`` already unwrapped the envelope: the returned dict is
         # the ``data`` field, so reaching here means the action succeeded.
         return OnebotReceipt(ok=True, retcode=0, message_id=message_id, attempted=True)
-    ok = retcode_int in (0, None) and status in ("", "ok", "async", "success")
+    # retcode=1 (async accepted) still counts as delivered-ish: the send
+    # was accepted by the protocol implementation (v2.20.0).
+    ok = retcode_int in (0, 1, None) and status in ("", "ok", "async", "success")
     error = ""
     if not ok:
         error = str(

@@ -576,7 +576,6 @@ class AlertEngine:
             await asyncio.sleep(self.interval)
 
     async def _sample_once(self) -> None:
-        now = time.time()
         cpu = cached_cpu_percent()
         mem = memory_stat()
         swap = swap_stat()
@@ -679,6 +678,38 @@ class AlertEngine:
                         disk_path,
                         exc,
                     )
+                # A rule left alerting by a vanished mount used to hang in
+                # the daily report's "unresolved" list for 30 days with no
+                # recovery event (U-disk unplugged, NFS gone). Close the
+                # episode here -- the mount coming back later just starts a
+                # fresh evaluation (v2.20.0).
+                with self.state.section("alerts") as alerts:
+                    rules = alerts.get("rules")
+                    st = rules.get(rule_key) if isinstance(rules, dict) else None
+                    if isinstance(st, dict) and st.get("alerting"):
+                        notified = bool(st.pop("alerted", True))
+                        st["alerting"] = False
+                        st["alert_since"] = 0
+                        st["count"] = 0
+                        st["retry_count"] = 0
+                        st["next_attempt"] = 0
+                        st.pop("awaiting_summary", None)
+                        self._record_event(
+                            "resource",
+                            f"磁盘使用率 ({disk_path})",
+                            "挂载点不可读（已拔出或掉线），告警自动关闭",
+                            "recovery",
+                        )
+                        if notified and self.recover_notify:
+                            text = (
+                                "✅ 告警已关闭 · 磁盘挂载点不可读\n"
+                                "──────────────\n"
+                                f"挂载点: {disk_path}\n"
+                                "原因: 挂载点无法读取（已拔出或掉线），"
+                                "之前的告警已自动关闭。\n"
+                                f"时间: {_now_text(self.config)}"
+                            )
+                            await self._send(text, source="resource", kind="resource")
 
         if hasattr(os, "getloadavg"):
             try:
@@ -707,7 +738,6 @@ class AlertEngine:
             # "unresolved" in the daily report forever.
             self._close_provider_watch("LLM 服务监控已关闭")
         self._prune_rules(valid_keys)
-        self.state.set("alerts_last_sample", now)
         self.state.save()
 
     def _prune_rules(self, valid_keys: set[str]) -> None:
@@ -811,6 +841,11 @@ class AlertEngine:
             st["alert_since"] = 0
             st["retry_count"] = 0
             st["next_attempt"] = 0
+            # An episode latched while the summary was pending must not keep
+            # that flag: with alerting now False it is an illegal combo and
+            # the next recovery would queue behind a window that no longer
+            # exists (v2.20.0).
+            st.pop("awaiting_summary", None)
             if was_alerting:
                 self._record_event(
                     "resource",
@@ -824,8 +859,12 @@ class AlertEngine:
             # Keep any unsent recovery notice: dropping it here would silently
             # lose the "recovered" message when the value crosses the threshold
             # again before the retry succeeds.
-            count += 1
-            st["count"] = count
+            # count only tracks the sustain run-up; once the rule is alerting
+            # it serves no purpose and used to grow unbounded for days-long
+            # episodes (v2.20.0).
+            if not alerting:
+                count += 1
+                st["count"] = count
             if not alerting and count >= self.sustain:
                 if last_sent and now - last_sent < self.cooldown:
                     # A second episode inside the cooldown used to vanish
@@ -877,6 +916,13 @@ class AlertEngine:
                     st["last_attempt"] = now
                     st.pop("send_inflight", None)
                     st["last_error"] = "" if delivered or buffered else "send_failed"
+                    # Persist the post-send state right away: the loop's
+                    # trailing save used to leave a reload window where the
+                    # disk still claimed send_inflight=True while the
+                    # in-memory aggregator bucket was already gone, so a
+                    # restart resurrected an episode whose summary could
+                    # never be delivered (v2.20.0).
+                    self.state.save()
                     if buffered:
                         # Covered by the aggregator summary; the rule is in
                         # alerting and the event log stays complete.
@@ -1121,17 +1167,20 @@ class AlertEngine:
         # "unlimited" (the truthiness check skipped the cap) and a 10000 was
         # taken literally, so a broken value posted to every group.
         max_groups = max(1, min(500, cfg_int(cfg, "max_groups", 100)))
-        # The formal recovery notice goes to alerts.targets as well; those
-        # groups must not receive it twice (once from the broadcast, once from
-        # the reply above).
         # The formal recovery notice goes to the targets that the notification
         # center actually resolves for ``offline``; those groups must not
-        # receive the broadcast as well. Using ``self.targets`` here missed
-        # the case where a rule routes offline notices to another group, so
-        # that group got two messages and the default target got none.
+        # receive the broadcast as well (once from the broadcast, once from
+        # the reply). Using ``self.targets`` here missed the case where a
+        # rule routes offline notices to another group, so that group got
+        # two messages and the default target got none.
         notify_groups: set[str] = set()
         for target in self._targets_for("offline"):
             text_target = str(target or "").strip()
+            # Only group targets contribute a group id to skip; a private
+            # chat whose QQ number happens to equal a group id must not
+            # suppress that group's broadcast (v2.20.0).
+            if "GroupMessage" not in text_target:
+                continue
             tail = text_target.rsplit(":", 1)[-1]
             if tail.isdigit():
                 notify_groups.add(tail)
@@ -1461,6 +1510,18 @@ class AlertEngine:
 
         # Retries for a recovery notice whose send failed earlier.
         pending_text = str(watch.get("pending_recovery") or "")
+        if pending_text and not self.recover_notify:
+            # The operator turned recovery notices off after this one was
+            # queued; drop the backlog like the resource/monitor rules do
+            # instead of delivering it later anyway (v2.20.0).
+            for stale_key in (
+                "pending_recovery",
+                "recovery_retry_count",
+                "recovery_next_attempt",
+            ):
+                watch.pop(stale_key, None)
+            self.state.save()
+            pending_text = ""
         if pending_text:
             next_attempt = _safe_float(watch.get("recovery_next_attempt"))
             if now >= next_attempt:
@@ -1488,7 +1549,9 @@ class AlertEngine:
                         watch["recovery_retry_count"] = retry_count
                         watch["recovery_next_attempt"] = now + retry_delay(retry_count)
                         self.state.save()
-            return
+            # Fall through to the streak check: a new LLM failure arriving
+            # while the old recovery notice was being retried used to be
+            # silent for up to ~30 minutes (v2.20.0).
 
         if not alerting and streak >= self.provider_watch_threshold:
             text = (
@@ -1813,8 +1876,13 @@ class AlertEngine:
             # documented "off" setting silently rejects every request.
             if require_token and token:
                 auth = request.headers.get("Authorization", "")
-                if not hmac.compare_digest(
-                    auth.encode("utf-8"), f"Bearer {token}".encode()
+                scheme, _, credentials = auth.partition(" ")
+                # Scheme match is case-insensitive per RFC 7235; older code
+                # rejected "bearer <token>" outright (v2.20.0). The token
+                # itself stays case-sensitive and constant-time compared.
+                if scheme.lower() != "bearer" or not hmac.compare_digest(
+                    credentials.strip().encode("utf-8"),
+                    token.encode("utf-8"),
                 ):
                     return web.json_response(
                         {"status": "error", "message": "unauthorized"},

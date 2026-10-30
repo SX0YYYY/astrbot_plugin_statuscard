@@ -132,7 +132,13 @@ def cfg_bool(config: Any, path: str, default: bool) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        stripped = value.strip()
+        if not stripped:
+            # An empty string reads as "unset"; returning False here
+            # silently disabled recover_notify/offline_notify on a
+            # hand-edited config (v2.20.0).
+            return default
+        return stripped.lower() in {"1", "true", "yes", "on"}
     return default
 
 
@@ -1352,6 +1358,29 @@ async def collect_bot_info(
     return bot
 
 
+def _warn_if_undecodable_image(data: bytes, label: str, path) -> None:
+    """Warn once when an uploaded image cannot be decoded by Pillow.
+
+    An undecodable avatar used to be embedded as-is and rendered as a card
+    with no avatar at all, with nothing in the logs pointing at the file
+    (v2.20.0). This is best-effort: a clean image costs one fast header
+    parse.
+    """
+
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        Image.open(BytesIO(data)).verify()
+    except Exception:
+        logger.warning(
+            "上传的%s似乎不是有效图片（%s），渲染时可能不显示；请重新上传",
+            label,
+            path,
+        )
+
+
 def uploaded_file_path(config: Any, key: str, data_dir: Any) -> Path | None:
     """Return the first existing file uploaded through the WebUI config page.
 
@@ -1554,6 +1583,7 @@ async def fetch_avatar_bytes(
                 else:
                     data = uploaded.read_bytes()
                     if data:
+                        _warn_if_undecodable_image(data, "头像", uploaded)
                         return data
             except Exception as exc:
                 logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
@@ -1978,6 +2008,10 @@ async def collect_all(
     disk_paths = cfg_get(config, "display.disk_paths", None)
     if not isinstance(disk_paths, list) or not disk_paths:
         disk_paths = _default_disk_paths()
+    else:
+        # Deduplicate: the alerts engine dedupes, and a repeated entry used
+        # to show the same disk twice on the card (v2.20.0).
+        disk_paths = list(dict.fromkeys(str(p) for p in disk_paths))
 
     def _local_snapshot() -> tuple[Any, Any, list[Any], str, Any]:
         # statvfs on a hung network mount blocks the whole event loop, which

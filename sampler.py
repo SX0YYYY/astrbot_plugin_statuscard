@@ -221,7 +221,6 @@ class Sampler:
         self._sample_network(now)
         self._sample_disk_io(now)
         self._sample_message_stats(now)
-        self.state.set("sampler_updated_at", now)
         self.state.save()
 
     def _sample_network(self, now: float) -> None:
@@ -372,15 +371,25 @@ class Sampler:
             last_write = safe_int(disk.get("last_write")) or 0
             # See _sample_network: keep the rate sane across clock steps.
             clock_back = now < last_ts
-            dt = 1.0 if clock_back else max(1.0, now - last_ts)
-            read_delta = (
-                0 if clock_back else max(0, int(counters.read_bytes) - last_read)
-            )
-            write_delta = (
-                0 if clock_back else max(0, int(counters.write_bytes) - last_write)
-            )
-            read_rate = read_delta / dt
-            write_rate = write_delta / dt
+            # A restart (or a long sampler stall) used to divide the whole
+            # downtime's IO by 1s, showing a rock-bottom average for one
+            # round; rebuild the baseline instead, like the network side
+            # does for its stale window (v2.20.0).
+            stale = (not clock_back) and (now - last_ts > self.interval_seconds * 3)
+            if stale:
+                read_delta = write_delta = 0
+                dt = 1.0
+                read_rate = write_rate = 0.0
+            else:
+                dt = 1.0 if clock_back else max(1.0, now - last_ts)
+                read_delta = (
+                    0 if clock_back else max(0, int(counters.read_bytes) - last_read)
+                )
+                write_delta = (
+                    0 if clock_back else max(0, int(counters.write_bytes) - last_write)
+                )
+                read_rate = read_delta / dt
+                write_rate = write_delta / dt
             disk["last_ts"] = now
             disk["last_read"] = int(counters.read_bytes)
             disk["last_write"] = int(counters.write_bytes)

@@ -39,7 +39,10 @@ _LOCAL_SEND_ERRORS: tuple[type[BaseException], ...] = (
     FileNotFoundError,
     IsADirectoryError,
     PermissionError,
-    ValueError,
+    # ValueError deliberately NOT in this list (v2.20.0): adapters can raise
+    # it while parsing a response that was already on the wire, so treating
+    # it as "definitely not sent" risks a duplicate message. It now counts
+    # as uncertain -- the module never repeats a delivery it cannot rule out.
 )
 
 

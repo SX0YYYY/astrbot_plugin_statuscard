@@ -10,7 +10,7 @@
   </style>
 </head>
 <body class="{{ 'compact' if d.compact else '' }}">
-  <div class="main-background" style="background-image: {{ d.background_overlay }}, url('{{ d.background_data_url }}')">
+  <div class="main-background" style="background-color: {{ d.background_color }}; background-image: {{ d.background_overlay }}, url('{{ d.background_data_url }}')">
     <div class="main-background-mask">
       <div class="main">
         {{ header(d) }}

@@ -202,7 +202,9 @@
         "table_status": "Status",
         "table_duration": "Duration",
         "db_unavailable": "The database is temporarily unavailable and is recovering automatically; what you see may be stale",
-        "db_unavailable_retry": "The database is temporarily unavailable and is recovering automatically; please retry the export later"
+        "db_unavailable_retry": "The database is temporarily unavailable and is recovering automatically; please retry the export later",
+        "verify_monitor_items_incomplete": "{count} monitor item(s) have incomplete config (missing URL/port etc.); complete them and retry",
+        "verify_monitor_items_empty": "No enabled monitor items"
       }
     }
   }

@@ -202,7 +202,9 @@
         "table_status": "状态",
         "table_duration": "时长",
         "db_unavailable": "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据",
-        "db_unavailable_retry": "数据库暂时不可用，正在自动恢复，请稍后重试导出"
+        "db_unavailable_retry": "数据库暂时不可用，正在自动恢复，请稍后重试导出",
+        "verify_monitor_items_incomplete": "{count} 个监测项配置不完整（缺少 URL/端口等），请在配置页补全后重试",
+        "verify_monitor_items_empty": "没有已启用的监测项"
       }
     }
   }

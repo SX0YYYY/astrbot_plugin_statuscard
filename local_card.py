@@ -138,6 +138,16 @@ def _percent_color(percent: float) -> tuple[int, int, int]:
     return BAD
 
 
+def _clip_text(draw: ImageDraw.ImageDraw, text: str, font: Any, max_width: int) -> str:
+    """Trim *text* with an ellipsis until it fits *max_width* pixels."""
+
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return text + "…"
+
+
 def _text_center(
     draw: ImageDraw.ImageDraw,
     xy: tuple[int, int],
@@ -284,6 +294,9 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
         f"↑ {network.get('up', '--')}   ↓ {network.get('down', '--')}"
         f"    月流量 ↑ {network.get('month_up', '--')} ↓ {network.get('month_down', '--')}"
     )
+    # Huge month counters could paint past the panel edge; clip to a safe
+    # width like the other long strings on this card (v2.20.0).
+    net_text = _clip_text(draw, net_text, _font(24), WIDTH - PADDING - 120 - 24)
     draw.text((PADDING + 120, net_y + 28), net_text, font=_font(24), fill=TEXT)
 
     proc_y = 710

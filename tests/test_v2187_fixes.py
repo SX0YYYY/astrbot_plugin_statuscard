@@ -484,7 +484,7 @@ def test_audit_flags_invalid_weekly_time() -> None:
             "daily_report": {
                 "enabled": True,
                 "weekly_enabled": True,
-                "weekly_time": "9:3",
+                "weekly_time": "9:61",  # 分钟超范围，运行时同样无法调度
             },
             "display": {"redact": []},
         }

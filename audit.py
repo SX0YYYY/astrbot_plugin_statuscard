@@ -285,7 +285,15 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         if not cfg_bool(config, enabled_key, False):
             continue
         raw = str(cfg_get(config, time_key, "") or "").strip()
-        if not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", raw):
+        # Runtime (alerts/report) parses int(hour)/int(minute), so "9:05"
+        # and "9:5" both schedule fine; the audit used to reject them with
+        # a false "定时任务不会触发" error (v2.20.0).
+        parts = str(raw).strip().split(":")
+        valid_time = False
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            hour, minute = int(parts[0]), int(parts[1])
+            valid_time = 0 <= hour <= 23 and 0 <= minute <= 59
+        if not valid_time:
             issues.append(
                 AuditIssue(
                     "error",
