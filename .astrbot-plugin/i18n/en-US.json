@@ -200,7 +200,9 @@
         "report_more_events": "{n} more not listed",
         "table_name": "Name",
         "table_status": "Status",
-        "table_duration": "Duration"
+        "table_duration": "Duration",
+        "db_unavailable": "The database is temporarily unavailable and is recovering automatically; what you see may be stale",
+        "db_unavailable_retry": "The database is temporarily unavailable and is recovering automatically; please retry the export later"
       }
     }
   }

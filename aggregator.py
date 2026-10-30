@@ -24,6 +24,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .utils import retry_delay
+
 SendFn = Callable[[str], Awaitable[Any]]
 
 
@@ -36,6 +38,13 @@ class _Bucket:
     flush_task: asyncio.Task | None = None
     send: SendFn | None = None
     retries: int = 0
+    # Earliest time a failed summary may be retried. A 1-second retry loop
+    # never survived a real channel outage, while the single-alert path waits
+    # through the same backoff schedule -- the summary must too.
+    retry_at: float = 0.0
+    # Overflow items trimmed off the buffer. They are withdrawn (never
+    # delivered), but the summary must still count them honestly.
+    dropped_count: int = 0
     # Called with the batch when a summary is abandoned for good. The caller
     # then withdraws "alerted" so the user does not receive a recovery notice
     # for an alert that never reached the chat.
@@ -120,20 +129,51 @@ class AlertAggregator:
                     bucket.until = 0.0
                     bucket.send = None
                     dropped = len(bucket.pending)
-                    bucket.pending.clear()
                     if dropped:
+                        orphaned = list(bucket.pending)
+                        bucket.pending.clear()
                         logger.warning(
                             "首条告警发送异常，已丢弃 %d 项缓冲（%s）",
                             dropped,
                             key,
                         )
+                        # Those rules will never be covered by a summary:
+                        # withdraw "alerted" or their recovery notice claims
+                        # an alert the user never saw.
+                        if bucket.on_abandon is not None:
+                            bucket.on_abandon(orphaned)
+                    else:
+                        bucket.pending.clear()
                 raise
         bucket.pending.append((label, reason))
         # Keep a bounded buffer (max_items are listed, the rest are counted).
-        del bucket.pending[: max(0, len(bucket.pending) - self.max_items * 2)]
+        self._trim_pending(bucket, key)
         return None
 
-    def _schedule_flush(self, kind: str) -> None:
+    def _trim_pending(self, bucket: _Bucket, key: str) -> list[tuple[str, str]]:
+        """Drop the oldest overflows and account for them honestly.
+
+        Dropped items can never reach the chat, so their rules must not claim
+        "notified"; the summary text still counts them (``另有 N 项未列出``),
+        otherwise the event log shows more failures than the message lists.
+        """
+
+        overflow = len(bucket.pending) - self.max_items * 2
+        if overflow <= 0:
+            return []
+        dropped = bucket.pending[:overflow]
+        del bucket.pending[:overflow]
+        bucket.dropped_count += len(dropped)
+        if bucket.on_abandon is not None:
+            bucket.on_abandon(dropped)
+        logger.warning(
+            "聚合缓冲已满，丢弃最早 %d 项汇总（%s，放弃后按未送达处理）",
+            len(dropped),
+            key,
+        )
+        return dropped
+
+    def _schedule_flush(self, kind: str, delay: float | None = None) -> None:
         if self._stopped:
             return
         bucket = self._buckets.get(kind)
@@ -141,7 +181,8 @@ class AlertAggregator:
             return
         if bucket.flush_task and not bucket.flush_task.done():
             return
-        delay = max(1.0, bucket.until - time.time())
+        if delay is None:
+            delay = max(1.0, bucket.until - time.time())
         bucket.flush_task = asyncio.create_task(self._flush_later(kind, delay))
 
     def _schedule_if_pending(self, kind: str) -> None:
@@ -155,15 +196,24 @@ class AlertAggregator:
         bucket = self._buckets.get(kind)
         if bucket is None or not bucket.pending or bucket.send is None:
             return
-        if bucket.until <= time.time():
-            bucket.until = time.time() + 1.0
+        now = time.time()
+        if bucket.until <= now:
+            bucket.until = now + 1.0
+        if bucket.retry_at > now:
+            # A failed summary is inside its backoff window. Retrying every
+            # second let a short channel blip exhaust all attempts before the
+            # channel recovered; wait as long as the single-alert path does.
+            self._schedule_flush(kind, bucket.retry_at - now)
+            return
         self._schedule_flush(kind)
 
     async def _flush_later(self, kind: str, delay: float) -> None:
+        cancelled = False
         try:
             await asyncio.sleep(delay)
             await self.flush(kind)
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception:
             logger.exception("告警汇总任务失败（%s）", kind)
@@ -171,11 +221,16 @@ class AlertAggregator:
             bucket = self._buckets.get(kind)
             if bucket is not None:
                 bucket.flush_task = None
-                # A new alert that arrived while the summary was being sent
-                # has already opened a fresh window; the send blocked this
-                # task from scheduling it (it was still running), so pick it
-                # up here.
-                self._schedule_if_pending(kind)
+                # A cancelled task must not reschedule itself: during event
+                # loop shutdown each new task would be cancelled again and
+                # spawn the next one, never draining. A stop() sets the flag
+                # anyway; this guards plain task cancellation too.
+                if not cancelled and not self._stopped:
+                    # A new alert that arrived while the summary was being
+                    # sent has already opened a fresh window; the send
+                    # blocked this task from scheduling it (it was still
+                    # running), so pick it up here.
+                    self._schedule_if_pending(kind)
 
     async def flush(
         self,
@@ -214,14 +269,15 @@ class AlertAggregator:
             if bucket.on_abandon is not None:
                 bucket.on_abandon(list(pending))
             return
-        lines = [f"⚠️ 告警汇总 · {len(pending)} 项异常", "──────────────"]
+        total = len(pending) + bucket.dropped_count
+        lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
         for label, reason in pending[: self.max_items]:
             lines.append(f"• {label}: {reason}")
-        extra = len(pending) - self.max_items
+        extra = total - self.max_items
         if extra > 0:
             lines.append(f"… 另有 {extra} 项未列出")
         lines.append(
-            f"以上 {len(pending)} 项在 {self.window_seconds} 秒聚合窗口内集中出现，"
+            f"以上 {total} 项在 {self.window_seconds} 秒聚合窗口内集中出现，"
             "已合并推送；各项均已单独记录，恢复时仍会照常通知。"
         )
         try:
@@ -229,12 +285,22 @@ class AlertAggregator:
             ok = bool(getattr(result, "ok", result))
             if ok:
                 bucket.retries = 0
+                bucket.retry_at = 0.0
+                bucket.dropped_count = 0
                 return
             if getattr(result, "uncertain_targets", None):
                 # Possibly already in the chat: retrying would duplicate it.
                 logger.warning("告警汇总发送未确认（%s，%d 项）", key, len(pending))
+                bucket.dropped_count = 0
                 return
             self._requeue(bucket, pending, key, "发送失败")
+        except asyncio.CancelledError:
+            # Reload/shutdown while the summary was in flight: the batch was
+            # already taken from bucket.pending, so put it back before
+            # propagating -- stop() would otherwise see an empty buffer and
+            # the rules would keep claiming "notified" after the restart.
+            self._requeue(bucket, pending, key, "任务被取消")
+            raise
         except Exception:
             self._requeue(bucket, pending, key, "发送异常")
             logger.exception("告警汇总发送失败（%s）", key)
@@ -254,8 +320,10 @@ class AlertAggregator:
 
         A failed summary used to be dropped silently while every rule had
         already latched ``alerting`` -- the user only ever saw the recovery
-        notices. Two retries are allowed, then the batch is abandoned with a
-        warning so a permanently broken channel cannot loop forever.
+        notices. Retries follow the same backoff as the single-alert path
+        (about 30s, then 120s) so a short channel blip no longer burns the
+        whole budget before the channel recovers; two retries are still the
+        limit, then the batch is abandoned with a warning.
         """
 
         if bucket.retries >= 2:
@@ -264,14 +332,16 @@ class AlertAggregator:
                 bucket.on_abandon(list(pending))
             return
         bucket.retries += 1
+        bucket.retry_at = time.time() + retry_delay(bucket.retries)
         bucket.pending[:0] = pending
-        del bucket.pending[: max(0, len(bucket.pending) - self.max_items * 2)]
+        self._trim_pending(bucket, key)
         logger.warning(
-            "告警汇总%s，%d 项放回队列等待重试（%s，第 %d 次）",
+            "告警汇总%s，%d 项放回队列等待重试（%s，第 %d 次，约 %d 秒后）",
             why,
             len(pending),
             key,
             bucket.retries,
+            round(bucket.retry_at - time.time()),
         )
 
     async def stop(self) -> None:

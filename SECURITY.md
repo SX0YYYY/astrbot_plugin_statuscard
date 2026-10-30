@@ -29,4 +29,4 @@
 - 插件只支持 `aiocqhttp`（QQ / OneBot / NapCat）
 - Komari Webhook 默认只监听 `127.0.0.1`
 - 主动推送依赖 AstrBot 平台适配器；QQ 侧静默吞消息无法从插件侧确认
-- `state.json` 的 `delivery` 会记录最近一次推送的目标和来源，文件权限为 600
+- `state.json` 的 `delivery` 与 `delivery_real` 会记录最近一次推送的目标和来源（`delivery_real` 只记录真实发出的通知），文件权限为 600

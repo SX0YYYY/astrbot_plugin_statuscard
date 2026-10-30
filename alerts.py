@@ -458,12 +458,16 @@ class AlertEngine:
         A buffered alert is only "announced" once the summary is posted. If
         the summary is abandoned (retries exhausted, reload), keeping
         ``alerted=True`` would make the later recovery notice claim an alert
-        the user never saw.
+        the user never saw. ``last_sent`` is cleared for the same reason: it
+        was recorded when the alert was buffered ("the summary did reach the
+        chat"), and keeping it would silence a new episode inside the
+        cooldown for half an hour after the summary was given up on.
         """
 
         labels = {label for label, _reason in items if label}
         if not labels:
             return
+        changed = False
         with self.state.section("alerts") as alerts:
             rules = alerts.get("rules")
             if not isinstance(rules, dict):
@@ -474,6 +478,14 @@ class AlertEngine:
                 label = str(st.get("label") or "")
                 if label and label in labels:
                     st["alerted"] = False
+                    st.pop("last_sent", None)
+                    changed = True
+        # Abandon can be the last write before a reload (stop() runs after
+        # the aggregator is cancelled); persist it or the new instance reads
+        # the stale "alerted=True" from disk and announces a recovery for an
+        # alert that never arrived.
+        if changed:
+            self.state.save()
 
     @staticmethod
     def _delivered(result: Any) -> bool:
@@ -618,9 +630,15 @@ class AlertEngine:
             with self.state.section("alerts") as alerts:
                 rules = alerts.get("rules")
                 if isinstance(rules, dict):
-                    legacy = rules.get(f"disk:{disk_paths[0]}")
-                    if "disk" not in rules and isinstance(legacy, dict):
-                        rules["disk"] = dict(legacy)
+                    legacy_key = f"disk:{disk_paths[0]}"
+                    legacy = rules.get(legacy_key)
+                    if isinstance(legacy, dict):
+                        if "disk" not in rules:
+                            rules["disk"] = dict(legacy)
+                        # Drop the old key in the same write: leaving it for
+                        # _prune_rules made it close the same disk twice --
+                        # one "已移除" recovery for a rule that still exists.
+                        rules.pop(legacy_key, None)
         valid_keys = {"cpu", "ram", "swap", "load"}
         for index, disk_path in enumerate(disk_paths):
             # The first mount keeps the historical key whether or not extra
@@ -765,6 +783,14 @@ class AlertEngine:
             st["alerted"] = False
             st["alert_since"] = _safe_float(st.get("last_attempt")) or now
             st["count"] = 0
+            # Log an alert row so the episode has a start in the event log;
+            # without it the later recovery had no matching beginning.
+            self._record_event(
+                "resource",
+                name,
+                "上次告警发送被中断（重载/重启），已按告警中处理",
+                "alert",
+            )
 
         if threshold <= 0:
             # A threshold of 0 (slider misjudged as "rule off") would make
@@ -856,6 +882,9 @@ class AlertEngine:
                         # applies to this rule too; without it the next
                         # episode pushed a second alert minutes later.
                         st["last_sent"] = now
+                        # The alert itself is still waiting for the summary:
+                        # a recovery inside the window must queue behind it.
+                        st["awaiting_summary"] = True
                         self._record_event(
                             "resource",
                             name,
@@ -891,7 +920,10 @@ class AlertEngine:
                             )
                             st["alerting"] = True
                             st["alerted"] = True
-                            st["alert_since"] = now
+                            # Keep the episode's original start: resetting it
+                            # here shrank the recovery notice's "告警持续" to
+                            # just the retry window.
+                            st.setdefault("alert_since", now)
                             st["count"] = 0
                             st["retry_count"] = 0
                             st["next_attempt"] = 0
@@ -914,7 +946,12 @@ class AlertEngine:
             # was skipped and its "failed" event stayed unresolved in the
             # daily report for up to 30 days. Close that event here; no
             # message is sent because the alert itself never arrived.
-            if (
+            # Only for episodes that never latched: a rule that exhausted its
+            # retries (alerting=True) closes through the recovery branch
+            # below, which reads ``last_error`` for the "此前未能送达" note --
+            # clearing it here used to swallow that note and add a second
+            # recovery row for the same episode.
+            if not alerting and (
                 _safe_int(st.get("retry_count")) > 0
                 or st.get("last_error") == "send_failed"
             ):
@@ -1001,11 +1038,28 @@ class AlertEngine:
                     )
                     if had_failed:
                         text += "\n（异常告警此前未能送达）"
+                    if st.pop("awaiting_summary", False):
+                        # This rule's alert is still inside the aggregation
+                        # window. Posting the recovery now would let it beat
+                        # the summary to the chat (恢复先于告警到达，看起来像
+                        # 两条不相关消息)；queue it instead so the summary is
+                        # posted first. On abandon the queued notice still
+                        # goes out -- the user then at least learns the
+                        # episode happened.
+                        st["pending_recovery"] = text
+                        st["recovery_retry_count"] = 1
+                        st["recovery_next_attempt"] = now + 15.0
+                        logger.info(
+                            "告警 %s 在聚合窗口内恢复，恢复通知延后 15 秒发送",
+                            name,
+                        )
+                        return
                     result = await self._send(text)
                     if not self._delivered(result):
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
+                        logger.warning("告警 %s 恢复通知未送达，已排队稍后补发", name)
 
     async def _broadcast_recovery(self, offline_ts: float, duration_text: str) -> None:
         """Announce the recovery to every group the bot has joined.
@@ -1215,9 +1269,12 @@ class AlertEngine:
             if st.get("alerting") or st.get("pending_alert_text"):
                 stale = bool(st.pop("stale", False))
                 duration = now - _safe_float(st.get("since"), now)
-                queued = (
-                    st.pop("pending_alert_text", None) if self.offline_notify else None
-                )
+                queued_raw = st.pop("pending_alert_text", None)
+                # A stale episode is one where the outage window is too old
+                # to push anything; delivering the hours-old alert text now
+                # -- without any context -- contradicts that. Drop it (the
+                # event log has the full story), same as the recovery notice.
+                queued = queued_raw if (self.offline_notify and not stale) else None
                 st["alerting"] = False
                 st["since"] = 0
                 parts: list[str] = []
@@ -1227,6 +1284,7 @@ class AlertEngine:
                     text = (
                         "✅ Bot 连接已恢复\n"
                         "──────────────\n"
+                        f"主机: {self._hostname()}\n"
                         f"掉线时间: {_fmt_ts(now - duration, self.config)}\n"
                         f"恢复时间: {_now_text(self.config)}\n"
                         f"离线时长: {format_duration(duration)}"
@@ -1402,14 +1460,14 @@ class AlertEngine:
                     logger.info("LLM 服务恢复通知补发成功")
                 else:
                     retry_count = int(watch.get("recovery_retry_count") or 1) + 1
-                    if retry_count >= 3:
+                    if retry_count > MAX_RECOVERY_RETRIES:
                         watch.pop("pending_recovery", None)
                         watch.pop("recovery_retry_count", None)
                         watch.pop("recovery_next_attempt", None)
                         self.state.save()
                         logger.warning(
                             "LLM 服务恢复通知连续发送失败 %d 次，放弃补发",
-                            retry_count,
+                            retry_count - 1,
                         )
                     else:
                         watch["recovery_retry_count"] = retry_count
@@ -1454,6 +1512,7 @@ class AlertEngine:
             # A failed push still owes the user an explanation, which the
             # recovery notice carries; only cooldown suppression is silent.
             watch["alerted"] = True
+            watch["send_failed"] = not delivered
             watch["last_alert_ts"] = now
             watch["last_streak"] = streak
             self.state.save()
@@ -1489,13 +1548,15 @@ class AlertEngine:
             )
             if self.recover_notify and notified:
                 last_streak = _safe_int(watch.get("last_streak"))
+                had_failed = bool(watch.pop("send_failed", False))
                 text = (
                     "✅ 已恢复 · LLM 服务\n"
                     "──────────────\n"
                     f"主机: {self._hostname()}\n"
                     + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
                     + "最近状态: 调用成功\n"
-                    f"时间: {_now_text(self.config)}"
+                    + ("（异常告警此前未能送达）\n" if had_failed else "")
+                    + f"时间: {_now_text(self.config)}"
                 )
                 result = await self._send(text, source="provider", kind="provider")
                 if not self._delivered(result):

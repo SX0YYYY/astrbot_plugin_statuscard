@@ -45,7 +45,9 @@ RESOURCE_LABELS = {
     "ram": "RAM",
     "swap": "SWAP",
     "disk": "磁盘",
-    "load1": "每核负载",
+    # Stored value is the raw 1-minute load; only the alert threshold divides
+    # it by cores, so "每核负载" was reading like a different metric.
+    "load1": "1 分钟负载",
 }
 RRULE_COUNT = len(RESOURCE_KEYS)
 VALID_SECTIONS = (
@@ -960,6 +962,7 @@ class DailyReportBuilder:
                 "previous": {},
                 "reset_days": [],
                 "sent_available": False,
+                "scope_label": "已脱敏",
                 "snapshot_note": None,
                 "recv_note": None,
                 "charts": {},
@@ -1807,9 +1810,12 @@ def build_report_text(view: dict[str, Any]) -> str:
             if gaps_text:
                 lines.append(f"停机盲区: {gaps_text}")
             lines.append(
+                # Weekly aggregates span the whole window, so the resource
+                # line must carry the window label -- "最后一天" used to
+                # describe a 7-day average.
                 "资源({}): CPU {} / 峰值 {}；RAM {} / 峰值 {}；SWAP {}；"
                 "磁盘 {}；负载 {}".format(
-                    day_label,
+                    window_label,
                     (yesterday.get("cpu") or {}).get("avg_text", "--"),
                     (yesterday.get("cpu") or {}).get("peak_text", "--"),
                     (yesterday.get("ram") or {}).get("avg_text", "--"),
@@ -1823,7 +1829,9 @@ def build_report_text(view: dict[str, Any]) -> str:
             lines.append(f"资源: {resources.get('empty_reason') or '暂无数据'}")
     anomalies = view.get("anomalies") or {}
     if "anomaly" in sections:
-        line = f"异常/失败: {anomalies.get('count', 0)} 次"
+        # The count covers the same window as Token/website/process: label it
+        # like they do (the weekly text used to read as if it were one day).
+        line = f"异常/失败({window_label}): {anomalies.get('count', 0)} 次"
         if anomalies.get("unresolved"):
             line += f"（另有 {anomalies['unresolved']} 项未恢复）"
         brief_items = anomalies.get("items") or []

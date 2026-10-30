@@ -1124,8 +1124,11 @@ class DailyReporter:
             return
         targets = self._targets("weekly")
         if not targets:
-            logger.warning("周报推送目标为空，跳过发送")
-            self._schedule_weekly_retry()
+            # Same as the daily report: an empty target list cannot heal, so
+            # the three-retry cycle only burned report_runs rows.
+            logger.warning("周报推送目标为空，跳过发送（请先在配置里填写推送目标）")
+            self._weekly_retry_count = 0
+            self._save_delivery_state()
             return
         day = report_day
         if self._with_image():
@@ -1389,9 +1392,14 @@ class DailyReporter:
             return
         day = str(view.get("day") or "")
         if not targets:
-            logger.warning("日报推送目标为空，跳过发送")
+            # An empty target list is a configuration problem that will not
+            # heal on its own; retrying three times only wrote three
+            # "targets empty" rows and the give-up notice went nowhere
+            # anyway (there is no target to notify). The config audit flags
+            # the empty list at startup; here one record is enough.
+            logger.warning("日报推送目标为空，跳过发送（请先在配置里填写推送目标）")
             self._record(day, False, "targets empty")
-            self._schedule_retry(day)
+            self._clear_retry()
             return
         if self._last_sent_day == day:
             logger.info("日报 %s 已发送过，跳过重复发送", day)

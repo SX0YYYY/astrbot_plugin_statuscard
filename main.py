@@ -950,7 +950,7 @@ class StatusCardPlugin(Star):
                     lines.append("OneBot 回执: " + "；".join(parts))
         else:
             lines.append("最近主动推送: 暂无记录")
-        report_status = self.report.status()
+        report_status = await asyncio.to_thread(self.report.status)
         store_stats = report_status.get("store", {})
         if not self.report_store.available:
             lines.append(
@@ -970,7 +970,7 @@ class StatusCardPlugin(Star):
             + f"网站 {store_stats.get('websites', 0)} 条"
             + f" / 进程 {store_stats.get('processes', 0)} 条"
         )
-        daily_status = self.daily_report.status()
+        daily_status = await asyncio.to_thread(self.daily_report.status)
         lines.append(
             "日报发送: "
             + ("开启" if daily_status.get("enabled") else "关闭")

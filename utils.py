@@ -155,8 +155,17 @@ def redact_url(url: Any) -> str:
         return text
     if not parts.netloc:
         # A bare "example.com/api?token=abc" has no scheme, so urlsplit puts
-        # everything in path and the query survives. Strip it explicitly.
-        return text.split("#", 1)[0].split("?", 1)[0]
+        # everything in path and the query survives. Strip it explicitly --
+        # and credentials too: "user:pass@host/api" is a legal (if unusual)
+        # monitor target, and the user:pass part used to survive verbatim.
+        bare = text.split("#", 1)[0].split("?", 1)[0]
+        if "@" in bare:
+            head, _, tail = bare.rpartition("@")
+            # Only treat it as credentials when the part before "@" looks
+            # like a userinfo (no slashes); otherwise it is just a path.
+            if head and "/" not in head and ":" in head:
+                return tail
+        return bare
     host = parts.hostname or ""
     if ":" in host and not host.startswith("["):
         # Keep IPv6 literals readable.

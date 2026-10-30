@@ -16,6 +16,7 @@ from .collectors import (
     sample_system_cpu,
 )
 from .state import StateStore
+from .utils import safe_float, safe_int
 
 
 def _message_stats_dir() -> Path | None:
@@ -289,12 +290,18 @@ class Sampler:
             switched = bool(interface) and previous_iface not in ("", interface)
             if interface:
                 net["interface"] = interface
-            last_ts = float(net.get("last_ts") or now)
-            last_sent = int(net.get("last_sent") or 0)
-            last_recv = int(net.get("last_recv") or 0)
+            last_ts = safe_float(net.get("last_ts")) or now
+            last_sent = safe_int(net.get("last_sent")) or 0
+            last_recv = safe_int(net.get("last_recv")) or 0
             # No baseline (first read failed, or a legacy state written with
-            # the old zero default): establish one now, book no traffic.
-            baseline_missing = "last_sent" not in net or last_sent <= 0
+            # the old zero default): establish one now, book no traffic. Both
+            # counters zero means the legacy default; a real receive-only
+            # interface has last_recv > 0 and must keep booking traffic.
+            baseline_missing = (
+                "last_sent" not in net
+                or "last_recv" not in net
+                or (last_sent <= 0 and last_recv <= 0)
+            )
 
             # A wall-clock step back (NTP correction) would make dt negative
             # and the rate meaningless; reset the baseline and book no
@@ -360,9 +367,9 @@ class Sampler:
         if counters is None:
             return
         with self.state.section("disk_io") as disk:
-            last_ts = float(disk.get("last_ts") or now)
-            last_read = int(disk.get("last_read") or 0)
-            last_write = int(disk.get("last_write") or 0)
+            last_ts = safe_float(disk.get("last_ts")) or now
+            last_read = safe_int(disk.get("last_read")) or 0
+            last_write = safe_int(disk.get("last_write")) or 0
             # See _sample_network: keep the rate sane across clock steps.
             clock_back = now < last_ts
             dt = 1.0 if clock_back else max(1.0, now - last_ts)

@@ -324,7 +324,7 @@ def test_weekly_html_and_text_carry_window_scope(tmp_path: Path) -> None:
     assert "最后一天采样峰值" not in html
 
     text = build_report_text(view)
-    assert "资源(最后一天):" in text
+    assert "资源(近 7 天):" in text
     assert "网站(近 7 天):" in text
     assert "Top 进程(近 7 天):" in text
 
@@ -432,7 +432,7 @@ def test_report_text_contains_key_figures() -> None:
     text = build_report_text(_sample_report_view())
     assert "系统日报 2026-10-20" in text
     assert "CPU 3.5%" in text
-    assert "异常/失败: 5 次" in text
+    assert "异常/失败(昨日): 5 次" in text
     assert "好友 22" in text
     assert "接收 数据积累中" in text
     assert "Token(昨日): 9,548,645" in text

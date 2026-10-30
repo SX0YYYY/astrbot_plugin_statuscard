@@ -160,8 +160,11 @@ def test_mask_umo_hides_chat_id() -> None:
     assert masked.endswith("1169")
     assert "461961169" not in masked
     assert masked.startswith("default:GroupMessage:")
-    # Too short to mask: returned unchanged.
-    assert page_api_module._mask_umo("1234") == "1234"
+    # v2.19.0：短 ID 也打码（此前 ≤4 位原样返回，泄漏 UMO 契约的边缘）
+    assert page_api_module._mask_umo("1234") == "***4"
+    assert page_api_module._mask_umo("default:FriendMessage:abc") == (
+        "default:FriendMessage:abc"
+    )  # 无数字不入打码逻辑
 
 
 def test_report_css_goes_through_template_variable(tmp_path: Path) -> None:

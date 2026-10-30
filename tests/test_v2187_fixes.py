@@ -246,7 +246,10 @@ def test_alert_retry_is_bounded(monkeypatch, tmp_path):
 
     state = monitor.state.data["monitors"]["items"][key]
     assert state["pending"] is False
-    assert state.get("alerted") is False
+    # v2.19.0 统一语义：耗尽后保持 alerted=True，恢复通知照发并带
+    # 「此前未能送达」说明（与资源规则一致），不再完全静默。
+    assert state.get("alerted") is True
+    assert state.get("send_exhausted") is True
 
 
 def test_monitor_item_key_keeps_query_distinct() -> None:

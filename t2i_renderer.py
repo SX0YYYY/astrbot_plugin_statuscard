@@ -113,10 +113,6 @@ def build_default_html(
 
     css = css.replace("width: 650px", f"width: {width}px")
     page_fix = f"html,body{{margin:0;padding:0;width:{width}px;}}"
-    index = index.replace(
-        '<link rel="stylesheet" href="/default/res/css/index.css" />',
-        f"<style>\n{css}\n{page_fix}\n</style>",
-    )
 
     tmpl = macros + "\n" + index
     env = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"]))
@@ -126,7 +122,10 @@ def build_default_html(
         br=_br_filter,
     )
     template = env.from_string(tmpl)
-    return template.render(d=view)
+    # CSS goes in as a template variable, not through a string replace: a
+    # future rule containing ``{{`` or ``{#`` would otherwise be parsed as
+    # Jinja syntax and break the render (same pattern as the report CSS).
+    return template.render(d=view, page_css=css + "\n" + page_fix)
 
 
 def build_report_html(

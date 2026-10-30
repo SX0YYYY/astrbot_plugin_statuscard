@@ -120,9 +120,12 @@ def _mask_umo(target: Any) -> str:
     text = str(target or "")
     head, _, tail = text.rpartition(":")
     digits = "".join(ch for ch in tail if ch.isdigit())
-    if len(digits) <= 4:
+    # Short IDs used to pass through untouched, which leaked the UMO the
+    # class docstring promises never to expose; mask anything digit-bearing.
+    if not digits:
         return text
-    masked = "*" * (len(digits) - 4) + digits[-4:]
+    keep = min(4, max(1, len(digits) - 4)) if len(digits) > 4 else 1
+    masked = "*" * (len(digits) - keep) + digits[len(digits) - keep :]
     return f"{head}:{masked}" if head else masked
 
 
@@ -140,7 +143,37 @@ class PageApi:
         self._reports_cache_seconds = 60.0
 
     # ------------------------------------------------------------------
-    # registration
+    # degraded store gate
+    # ------------------------------------------------------------------
+
+    def _db_unavailable_payload(self) -> dict[str, Any]:
+        """Shared marker + empty payload for a broken report store.
+
+        v2.18.9 taught the send path to retry via ``ensure_ready``; the
+        dashboard routes never checked, so a broken store looked like "no
+        data was ever recorded" -- the most misleading empty state there is.
+        The page gets an explicit ``db_unavailable`` marker instead, and one
+        recovery attempt is kicked off in the background so the next refresh
+        can already succeed.
+        """
+
+        store = self.plugin.report_store
+        if store.available:
+            return None
+        try:
+            asyncio.get_running_loop().create_task(
+                asyncio.to_thread(store.ensure_ready)
+            )
+        except Exception:
+            logger.debug("报表库后台恢复任务创建失败", exc_info=True)
+        return {
+            "ok": True,
+            "db_unavailable": True,
+            "reason_code": "report_db_unavailable",
+        }
+
+    # ------------------------------------------------------------------
+    # routes
     # ------------------------------------------------------------------
 
     def register(self) -> None:
@@ -382,7 +415,10 @@ class PageApi:
                 }
             )
 
-        daily_status = plugin.daily_report.status()
+        # status() runs a SQLite read (latest report run); like the disk and
+        # provider queries below it must not run on the event loop -- a busy
+        # store lock stalled every message for up to 5 seconds.
+        daily_status = await asyncio.to_thread(plugin.daily_report.status)
         try:
             provider_quality = await asyncio.to_thread(today_overview, plugin.config)
         except Exception:
@@ -532,18 +568,24 @@ class PageApi:
             return jsonify({"ok": True, "kind": kind, "results": per_target})
         if kind == "monitors":
             monitor = getattr(plugin, "monitor", None)
-            items = [
-                item
-                for item in (getattr(monitor, "items", None) or [])
-                if not item.get("config_error")
-            ]
+            all_items = list(getattr(monitor, "items", None) or [])
+            items = [item for item in all_items if not item.get("config_error")]
             if not items:
+                # "没有已启用的监测项" used to be the answer even when every
+                # item was enabled but incomplete -- it pointed the operator
+                # at the wrong fix. Distinguish the two cases.
+                broken = sum(1 for item in all_items if item.get("config_error"))
+                note = (
+                    f"{broken} 个监测项配置不完整（缺少 URL/端口等），请在配置页补全后重试"
+                    if broken
+                    else "没有已启用的监测项"
+                )
                 return jsonify(
                     {
                         "ok": True,
                         "kind": kind,
                         "results": [],
-                        "note": "没有已启用的监测项",
+                        "note": note,
                     }
                 )
 
@@ -556,6 +598,11 @@ class PageApi:
                 started = time.perf_counter()
                 try:
                     async with semaphore:
+                        # The clock restarts inside the semaphore: with more
+                        # items than slots, queueing time used to be billed
+                        # to the probe itself and the last items showed
+                        # seconds of "waiting" as their latency.
+                        started = time.perf_counter()
                         ok, detail, _target = await monitor._probe(item)
                 except Exception as exc:
                     ok, detail = False, f"探测异常: {exc.__class__.__name__}"
@@ -649,6 +696,9 @@ class PageApi:
             # /history already normalises; the export echoed the raw value
             # while silently using the 7-day window.
             range_key = "7d"
+        gate = self._db_unavailable_payload()
+        if gate:
+            return jsonify({**gate, "kind": kind, "range": range_key, "rows": []})
         seconds = RANGE_SECONDS[range_key]
         end = int(time.time())
         start = end - seconds
@@ -757,6 +807,20 @@ class PageApi:
         # Echo the range that was actually used, never an unvalidated input.
         if key not in RANGE_SECONDS:
             key = "24h"
+        gate = self._db_unavailable_payload()
+        if gate:
+            return jsonify(
+                {
+                    **gate,
+                    "range": key,
+                    "window_start": None,
+                    "window_end": None,
+                    "points": [],
+                    "gaps": [],
+                    "network": [],
+                    "network_note": "",
+                }
+            )
         seconds = RANGE_SECONDS[key]
         end = int(time.time())
         start = end - seconds
@@ -871,6 +935,19 @@ class PageApi:
         except (TypeError, ValueError):
             days = 7
         days = max(1, min(30, days))
+        gate = self._db_unavailable_payload()
+        if gate:
+            return jsonify(
+                {
+                    **gate,
+                    "days": days,
+                    "counts_limit": 2000,
+                    "counts_truncated": False,
+                    "items": [],
+                    "counts": {},
+                    "truncated": False,
+                }
+            )
         tz = now_in_timezone(self.plugin.config).tzinfo
         start_dt = datetime.combine(
             (now_in_timezone(self.plugin.config).date() - timedelta(days=days - 1)),
@@ -930,6 +1007,11 @@ class PageApi:
 
     async def reports(self):
         plugin = self.plugin
+        gate = self._db_unavailable_payload()
+        if gate:
+            # An explicit degraded marker instead of "empty sections": the
+            # page keeps whatever it already rendered and shows a notice.
+            return jsonify({**gate, "day": None})
         now_ts = time.time()
         fresh = str(_query_value("fresh", "0")) == "1"
         # The cache key carries the date, the redaction rules and the report

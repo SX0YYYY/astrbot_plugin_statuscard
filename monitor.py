@@ -521,6 +521,14 @@ class ServiceMonitor:
             st["alerted"] = False
             st["since"] = safe_float(st.get("last_attempt")) or now
             st["fails"] = 0
+            # Log an alert row so the episode has a start in the event log;
+            # without it the later recovery had no matching beginning.
+            self._record_event(
+                name,
+                target_text,
+                "上次告警发送被中断（重载/重启），已按告警中处理",
+                "alert",
+            )
 
         if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
             # Misconfiguration is not an outage: warn once, never alert.
@@ -677,6 +685,9 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        # The alert itself is still waiting for the summary:
+                        # a recovery inside the window must queue behind it.
+                        st["awaiting_summary"] = True
                         self._record_event(name, target_text, detail, "alert")
                     elif delivered:
                         st["last_sent"] = now
@@ -710,15 +721,19 @@ class ServiceMonitor:
                     else:
                         retry_count = safe_int(st.get("retry_count") or 0) + 1
                         if retry_count > MAX_ALERT_RETRIES:
-                            # The operator never received this outage, so keep
-                            # the episode latched but silent and suppress the
-                            # recovery notice later.
+                            # The operator never received this outage. Stop
+                            # retrying the alert, but keep the episode latched
+                            # and let the recovery notice announce it with the
+                            # "此前未能送达" note -- the same semantics as the
+                            # resource rules, so a silent channel produces a
+                            # consistent story instead of silence.
                             st["pending"] = False
-                            st["alerted"] = False
+                            st["alerted"] = True
+                            st["send_exhausted"] = True
                             st["retry_count"] = 0
                             st["next_attempt"] = 0
                             logger.warning(
-                                "监测项 %s 告警连续 %d 次发送失败，已停止重试",
+                                "监测项 %s 告警连续 %d 次发送失败，已停止重试（恢复时将一并说明）",
                                 name,
                                 MAX_ALERT_RETRIES,
                             )
@@ -731,6 +746,21 @@ class ServiceMonitor:
             st["last_ok"] = now
             st["last_error"] = ""
             pending_text = st.get("pending_recovery")
+            if pending_text and not self.recover_notify:
+                # The operator turned recovery notices off after this one was
+                # queued for retry; honouring the switch means dropping the
+                # backlog instead of delivering it later anyway (same rule as
+                # the resource alerts).
+                for stale_key in (
+                    "pending_recovery",
+                    "recovery_attempt",
+                    "recovery_next_attempt",
+                    "recovery_retry_count",
+                    "send_exhausted",
+                    "awaiting_summary",
+                ):
+                    st.pop(stale_key, None)
+                pending_text = None
             if pending_text:
                 next_recovery = safe_float(st.get("recovery_next_attempt") or 0)
                 if now >= next_recovery:
@@ -777,7 +807,8 @@ class ServiceMonitor:
                 # rely on resolved_ts being written on every recovery.
                 self._record_event(name, target_text, detail, "recovery")
                 if self.recover_notify and not stale and notified:
-                    extra = "\n（异常告警此前未能送达）" if pending else ""
+                    had_failed = bool(st.pop("send_exhausted", False)) or bool(pending)
+                    extra = "\n（异常告警此前未能送达）" if had_failed else ""
                     text = (
                         f"✅ 服务恢复 · {name}\n"
                         "──────────────\n"
@@ -787,11 +818,29 @@ class ServiceMonitor:
                         f"恢复时间: {_now_text(self.config)}\n"
                         f"中断时长: {format_duration(duration)}{extra}"
                     )
-                    result = await self._send(text)
-                    if not self._delivered(result):
+                    if st.pop("awaiting_summary", False):
+                        # This item's alert is still inside the aggregation
+                        # window. Posting the recovery now would let it beat
+                        # the summary to the chat; queue it so the summary is
+                        # posted first. On abandon the queued notice still
+                        # goes out -- the user then at least learns the
+                        # episode happened.
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
-                        st["recovery_next_attempt"] = now + retry_delay(1)
+                        st["recovery_next_attempt"] = now + 15.0
+                        logger.info(
+                            "监测项 %s 在聚合窗口内恢复，恢复通知延后 15 秒发送",
+                            name,
+                        )
+                    else:
+                        result = await self._send(text)
+                        if not self._delivered(result):
+                            st["pending_recovery"] = text
+                            st["recovery_retry_count"] = 1
+                            st["recovery_next_attempt"] = now + retry_delay(1)
+                            logger.warning(
+                                "监测项 %s 恢复通知未送达，已排队稍后补发", name
+                            )
                 st["pending"] = False
         states[key] = st
 
@@ -1081,11 +1130,18 @@ class ServiceMonitor:
         )
 
     def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
-        """Withdraw "alerted" for monitors whose summary never arrived."""
+        """Withdraw "alerted" for monitors whose summary never arrived.
+
+        ``last_sent`` goes with it: it was recorded when the alert was
+        buffered ("the summary did reach the chat"), and keeping it would
+        silence a new episode inside the cooldown for half an hour after the
+        summary was given up on.
+        """
 
         labels = {label for label, _reason in items if label}
         if not labels:
             return
+        changed = False
         with self.state.section("monitors") as monitors:
             states = monitors.get("items")
             if not isinstance(states, dict):
@@ -1095,6 +1151,13 @@ class ServiceMonitor:
                     continue
                 if str(st.get("name") or "") in labels:
                     st["alerted"] = False
+                    st.pop("last_sent", None)
+                    changed = True
+        # Abandon can be the last write before a reload (stop() runs after
+        # the flush tasks are cancelled); persist it or the new instance
+        # reads the stale "alerted=True" from disk.
+        if changed:
+            self.state.save()
 
     @staticmethod
     def _delivered(result: Any) -> bool:

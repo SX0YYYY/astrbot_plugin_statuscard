@@ -322,7 +322,7 @@
       return (
         text +
         " · " +
-        t("history_range_short", "数据仅 {days} 天，{range} 视图不完整", {
+        t("history_range_short", "数据仅 {days} 天，不足 {range}", {
           days: shownDays,
           range: rangeLabel(range),
         })
@@ -1073,6 +1073,11 @@
     let truncated = false;
     for (const kind of kinds) {
       const data = await bridge.apiGet("export", { kind, range });
+      if (data && data.db_unavailable) {
+        throw new Error(
+          t("db_unavailable_retry", "数据库暂时不可用，正在自动恢复，请稍后重试导出"),
+        );
+      }
       if (!data || !data.ok) {
         throw new Error(
           (data && data.error) ||
@@ -1136,6 +1141,12 @@
       if (seq === state.historySeq) setHistoryLoading(false);
     }
     if (seq !== state.historySeq) return;
+    if (data.db_unavailable) {
+      toast(
+        t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
+      );
+      return;
+    }
     const noteKind = data.network_note_kind;
     $("network-note").textContent =
       noteKind === "redacted"
@@ -1146,15 +1157,9 @@
               "网络折线来自日报采样，与资源趋势同一时间窗口。",
             )
           : noteKind === "state"
-            ? [
-                t(
-                  "network_note_state",
-                  "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）。",
-                ),
-                data.network_note || "",
-              ]
-                .filter(Boolean)
-                .join(" ")
+            ? // The backend note already carries the full sentence; joining a
+              // translated copy in front used to print the same text twice.
+              data.network_note || ""
             : data.network_note || "";
     if (data.truncated) {
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
@@ -1272,6 +1277,12 @@
     const seq = ++state.eventsSeq;
     const data = await apiGet("events", { days: state.eventDays });
     if (seq !== state.eventsSeq) return;
+    if (data.db_unavailable) {
+      toast(
+        t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
+      );
+      return;
+    }
     const items = data.items || [];
     const counts = data.counts || {};
     const summary =
@@ -1672,6 +1683,12 @@
     const seq = ++state.reportsSeq;
     const data = await apiGet("reports", force ? { fresh: 1 } : undefined);
     if (seq !== state.reportsSeq) return;
+    if (data.db_unavailable) {
+      toast(
+        t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
+      );
+      return;
+    }
     if (!data || data.ok !== true) {
       throw new Error(
         t(
@@ -1957,15 +1974,25 @@
       button.textContent = t("verify_confirm_again", "再点一次确认发送");
       clearTimeout(verifyArmTimer);
       verifyArmTimer = setTimeout(() => {
-        button.dataset.armed = "";
-        button.classList.remove("verify-armed");
-        button.textContent = verifyLabel(kind);
+        // Only restore this button if it is still armed: another verify
+        // button's run clears the shared timer id, and without this check a
+        // stale timer never fired while the armed state leaked (the next
+        // click skipped the confirmation entirely).
+        if (button.dataset.armed === "1") {
+          button.dataset.armed = "";
+          button.classList.remove("verify-armed");
+          button.textContent = verifyLabel(kind);
+        }
       }, 5000);
       return;
     }
+    if (kind === "targets") {
+      // Only the targets flow owns the shared arm timer; clearing it from
+      // any other kind's run used to freeze the armed button mid-confirm.
+      clearTimeout(verifyArmTimer);
+    }
     button.dataset.armed = "";
     button.classList.remove("verify-armed");
-    clearTimeout(verifyArmTimer);
     button.disabled = true;
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");

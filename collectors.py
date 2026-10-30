@@ -11,8 +11,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, wait
 
 try:
     import pwd
@@ -35,6 +34,7 @@ from .utils import (
     normalize_targets,
     readable_python_version,
     redact_url,
+    safe_float,
 )
 from .version import resolve_astrbot_version
 
@@ -311,7 +311,12 @@ def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
 # a worker from occupying the default executor that every other
 # ``asyncio.to_thread`` call shares, and the caller gives up after a timeout
 # instead of freezing the status card, the daily image and the dashboard.
-_DISK_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="statuscard-disk")
+#
+# Each mount is submitted as its own job (one hung mount used to stall the
+# whole batch, so the root disk went blind along with it), and queued-but-
+# unstarted jobs are cancelled on the next call so a pool full of stuck
+# workers cannot pile up an ever-growing backlog.
+_DISK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="statuscard-disk")
 
 
 def disk_usage_bounded(
@@ -320,19 +325,56 @@ def disk_usage_bounded(
     """Read disk usage without letting a hung mount block forever."""
 
     targets = [str(path) for path in (paths or _default_disk_paths())]
-    future = _DISK_POOL.submit(disk_usage, targets)
-    try:
-        return future.result(timeout=timeout)
-    except FutureTimeout:
-        logger.warning(
-            "磁盘信息读取超时（%s），本次跳过；请检查挂载点是否可达", targets
-        )
-        return [
-            DiskUsage(
-                name=name, used=None, total=None, percent=None, exception="读取超时"
+    futures = {name: _DISK_POOL.submit(_disk_usage_one, name) for name in targets}
+    done, _not_done = wait(futures.values(), timeout=timeout)
+    results: dict[str, DiskUsage] = {}
+    for name, future in futures.items():
+        if future in done and not future.cancelled():
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                results[name] = DiskUsage(
+                    name=name,
+                    used=None,
+                    total=None,
+                    percent=None,
+                    exception=str(exc),
+                )
+        else:
+            future.cancel()  # queued jobs die here; running ones keep hanging
+            results[name] = DiskUsage(
+                name=name,
+                used=None,
+                total=None,
+                percent=None,
+                exception="读取超时",
             )
-            for name in targets
-        ]
+    if any(r.exception for r in results.values()):
+        logger.warning(
+            "部分磁盘挂载点读取超时或失败（%s），请检查挂载点是否可达",
+            ", ".join(name for name, r in results.items() if r.exception),
+        )
+    return [results[name] for name in targets]
+
+
+def _disk_usage_one(name: str) -> DiskUsage:
+    """Read one mount; a hung statvfs can only stall its own future."""
+
+    try:
+        u = psutil.disk_usage(name)
+        # Measure against ``total`` so the number matches the
+        # "used / total" text printed beside it. psutil's own percent
+        # divides by (used + avail), which leaves out the filesystem's
+        # root-reserved blocks; on ext4 that reads 2-3 points higher and
+        # looks like an arithmetic error to whoever reads the card.
+        percent = (u.used / u.total * 100.0) if u.total else 0.0
+        return DiskUsage(
+            name=name, used=u.used, total=u.total, percent=round(percent, 1)
+        )
+    except Exception as exc:
+        return DiskUsage(
+            name=name, used=None, total=None, percent=None, exception=str(exc)
+        )
 
 
 @dataclass
@@ -1829,10 +1871,13 @@ def _system_info_rows(
     dpkg, pip = _package_counts(state)
     packages = f"{pip if pip is not None else '--'} pip / {dpkg if dpkg is not None else '--'} dpkg"
     disk_text = "--"
-    if disks:
-        d = disks[0]
-        if d.used is not None and d.total is not None:
-            disk_text = f"{format_bytes(d.used)} / {format_bytes(d.total)}"
+    readable = [d for d in disks if d.used is not None and d.total is not None]
+    if readable:
+        # The worst readable mount (not blindly the first): a card whose
+        # system row says "--" while the disk panel shows numbers looked
+        # self-contradictory when mount #1 happened to be unreadable.
+        d = max(readable, key=lambda item: item.percent or 0.0)
+        disk_text = f"{format_bytes(d.used)} / {format_bytes(d.total)}"
     mem = memory_stat()
     cpu_brand = get_cpu_brand()
     cores = cpu_count() or cpu_count_logical() or 0
@@ -1944,9 +1989,14 @@ async def collect_all(
             counters = None
         if counters is None:
             # No per-interface counter (odd platform or the interface vanished
-            # between the two calls): fall back to the total, and say so.
+            # between the two calls): fall back to the total, and say so. The
+            # fallback is wrapped too -- a sandbox that hides /proc fails both
+            # calls, and the second one used to crash collect_all outright.
             interface = "--"
-            counters = psutil.net_io_counters()
+            try:
+                counters = psutil.net_io_counters()
+            except Exception:
+                counters = None
         return (memory, swap_value, usage, interface, counters)
 
     mem, swap, disks, net_interface, net_counters = await asyncio.to_thread(
@@ -1978,8 +2028,8 @@ async def collect_all(
     history = net_state.get("history") if isinstance(net_state, dict) else []
     chart_interval = net_state.get("interval") if isinstance(net_state, dict) else None
     chart = build_network_chart(history, tz, interval=int(chart_interval or 60))
-    up_rate = float(net_state.get("up_rate") or 0.0)
-    down_rate = float(net_state.get("down_rate") or 0.0)
+    up_rate = safe_float(net_state.get("up_rate")) or 0.0
+    down_rate = safe_float(net_state.get("down_rate")) or 0.0
     month_names = {
         1: "1月",
         2: "2月",
@@ -2000,10 +2050,12 @@ async def collect_all(
     except Exception:
         month_label = month
 
-    disk_read = float(disk_state.get("read_rate") or 0.0)
-    disk_write = float(disk_state.get("write_rate") or 0.0)
+    disk_read = safe_float(disk_state.get("read_rate")) or 0.0
+    disk_write = safe_float(disk_state.get("write_rate")) or 0.0
     if disk_read == 0.0 and disk_write == 0.0:
-        d_io = disk_io()
+        # Off the event loop for consistency with every other psutil call;
+        # /proc/diskstats is fast but not free.
+        d_io = await asyncio.to_thread(disk_io)
         if d_io:
             disk_read = sum(x.read for x in d_io)
             disk_write = sum(x.write for x in d_io)
@@ -2044,8 +2096,12 @@ async def collect_all(
         "network": {
             "up": format_speed(up_rate),
             "down": format_speed(down_rate),
-            "up_total": format_bytes(net_counters.bytes_sent),
-            "down_total": format_bytes(net_counters.bytes_recv),
+            # net_counters can be None on a sandbox that hides /proc (both
+            # counter reads failed); show "--" instead of crashing the card.
+            "up_total": format_bytes(net_counters.bytes_sent) if net_counters else "--",
+            "down_total": format_bytes(net_counters.bytes_recv)
+            if net_counters
+            else "--",
             "month": month_label,
             "month_up": format_bytes(net_state.get("month_up") or 0),
             "month_down": format_bytes(net_state.get("month_down") or 0),

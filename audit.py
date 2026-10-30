@@ -229,8 +229,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         webhook_token = str(
             cfg_get(config, "alerts.komari_webhook.token", "") or ""
         ).strip()
+        # Same fallback the runtime uses (``or "127.0.0.1"``): an empty host
+        # binds loopback and starts fine -- audit used to read it as "" and
+        # raise a false "会拒绝启动" error against a perfectly working setup.
         webhook_host = str(
-            cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or ""
+            cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or "127.0.0.1"
         ).strip()
         if cfg_bool(config, "alerts.komari_webhook.require_token", True) and not (
             webhook_token
@@ -243,7 +246,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "Webhook 会拒绝启动。请填写 Token 或关闭该开关。",
                 )
             )
-        elif webhook_host in ("0.0.0.0", "::", "") and not cfg_bool(
+        elif webhook_host in ("0.0.0.0", "::") and not cfg_bool(
             config, "alerts.komari_webhook.require_token", True
         ):
             # A token that is configured but not enforced leaves the listener
@@ -254,9 +257,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 AuditIssue(
                     "error",
                     "webhook_open_no_token",
-                    "Komari Webhook 监听所有网卡（0.0.0.0）但没有启用 Token 鉴权"
-                    "（未勾选「强制要求 Token」），出于安全考虑会拒绝启动。"
-                    "请勾选并填写 Token，或改回 127.0.0.1。",
+                    f"Komari Webhook 监听所有网卡（{webhook_host}）但没有启用 "
+                    "Token 鉴权（未勾选「强制要求 Token」），出于安全考虑会拒绝"
+                    "启动。请勾选并填写 Token，或改回 127.0.0.1。",
                 )
             )
     if cfg_bool(config, "alerts.offline_broadcast.enabled", False) and not cfg_bool(
@@ -493,6 +496,21 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     # A mistyped target is the most common "alerts never arrive" cause and
     # previously only produced a runtime log line.
     target_pattern = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z]+:[^:\s]+$")
+    # Notification-center rules are the recommended way to route since
+    # v2.18.0, and a wrong target there is exactly where a per-group setup
+    # goes wrong -- so their targets run through the same sanity check.
+    rule_targets: list[tuple[str, str]] = []
+    rules = cfg_get(config, "notify.rules", [])
+    if isinstance(rules, list):
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            enabled = rule.get("enabled", True)
+            if enabled is False or enabled == 0 or enabled == "":
+                continue
+            text = str(rule.get("target") or "").strip()
+            if text:
+                rule_targets.append((text, f"通知中心规则 #{index + 1}"))
     for key, label in (
         ("alerts.targets", "默认推送目标"),
         ("monitors.targets", "监测推送目标"),
@@ -501,18 +519,17 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         raw = cfg_get(config, key, [])
         if isinstance(raw, str):
             raw = [raw]
-        if not isinstance(raw, (list, tuple, set)):
+        if isinstance(raw, (list, tuple, set)):
+            rule_targets.extend((str(item or "").strip(), label) for item in raw)
+    for text, label in rule_targets:
+        if not text or text.isdigit() or target_pattern.match(text):
             continue
-        for item in raw:
-            text = str(item or "").strip()
-            if not text or text.isdigit() or target_pattern.match(text):
-                continue
-            issues.append(
-                AuditIssue(
-                    "warning",
-                    "target_format_suspect",
-                    f"{label}「{text}」格式可疑：群聊可直接填群号，"
-                    "私聊填 default:FriendMessage:QQ号。",
-                )
+        issues.append(
+            AuditIssue(
+                "warning",
+                "target_format_suspect",
+                f"{label}「{text}」格式可疑：群聊可直接填群号，"
+                "私聊填 default:FriendMessage:QQ号。",
             )
+        )
     return issues

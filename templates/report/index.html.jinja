@@ -76,7 +76,7 @@
       <div class="empty">{{ d.resources.empty_reason }}</div>
       {% else %}
       <div class="stat-grid resource-grid">
-        {% for key, label in [("cpu", "CPU"), ("ram", "RAM"), ("swap", "SWAP"), ("disk", "磁盘"), ("load1", "每核负载")] %}
+        {% for key, label in [("cpu", "CPU"), ("ram", "RAM"), ("swap", "SWAP"), ("disk", "磁盘"), ("load1", "1 分钟负载")] %}
         <div class="stat">
           <div class="stat-label">{{ label }}</div>
           <div class="stat-value">{{ d.resources.yesterday[key].avg_text }}</div>

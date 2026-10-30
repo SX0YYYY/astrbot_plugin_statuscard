@@ -200,7 +200,9 @@
         "report_more_events": "另有 {n} 条未列出",
         "table_name": "名称",
         "table_status": "状态",
-        "table_duration": "时长"
+        "table_duration": "时长",
+        "db_unavailable": "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据",
+        "db_unavailable_retry": "数据库暂时不可用，正在自动恢复，请稍后重试导出"
       }
     }
   }
