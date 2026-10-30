@@ -438,7 +438,7 @@ def test_report_samples_worst_mount(monkeypatch, tmp_path: Path) -> None:
     reporter = ReportCollector(plugin, state, config, store)
     monkeypatch.setattr(
         report_module,
-        "disk_usage",
+        "disk_usage_bounded",
         lambda paths: [
             DiskUsage(name="/", used=40, total=100, percent=40.0),
             DiskUsage(name="/data", used=90, total=100, percent=90.0),
@@ -455,7 +455,7 @@ def test_dashboard_shows_worst_mount(monkeypatch, tmp_path: Path) -> None:
     api = page_api_module.PageApi(plugin)
     monkeypatch.setattr(
         page_api_module,
-        "disk_usage",
+        "disk_usage_bounded",
         lambda paths: [
             DiskUsage(name="/", used=40, total=100, percent=40.0),
             DiskUsage(name="/data", used=90, total=100, percent=90.0),

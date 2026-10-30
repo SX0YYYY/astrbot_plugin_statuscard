@@ -702,6 +702,8 @@ class StatusCardPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("测试通知")
     async def cmd_alert_test(self, event: AstrMessageEvent):
+        """发送一条测试通知到当前会话与实际推送目标，验证投递链路。"""
+
         event.should_call_llm(False)
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
@@ -711,6 +713,8 @@ class StatusCardPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("立即检测")
     async def cmd_monitor_test(self, event: AstrMessageEvent):
+        """立即探测全部服务监测项，不影响告警状态。"""
+
         event.should_call_llm(False)
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))

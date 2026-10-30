@@ -57,7 +57,7 @@ def test_disk_rules_cover_every_mount(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(engine, "_check_offline", no_offline)
     monkeypatch.setattr(
         alerts_module,
-        "disk_usage",
+        "disk_usage_bounded",
         lambda paths: [
             collectors.DiskUsage(name=p, used=10, total=100, percent=10.0)
             for p in paths
@@ -66,7 +66,9 @@ def test_disk_rules_cover_every_mount(tmp_path: Path, monkeypatch) -> None:
 
     asyncio.run(engine._sample_once())
     disk_calls = [key for key in calls if str(key).startswith("disk")]
-    assert disk_calls == ["disk:/", "disk:/data"]
+    # The first mount keeps the unqualified key so adding a second mount does
+    # not look like "old disk recovered, new disk full".
+    assert disk_calls == ["disk", "disk:/data"]
 
 
 # ---------------------------------------------------------------------------

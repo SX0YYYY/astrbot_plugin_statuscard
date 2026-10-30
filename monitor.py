@@ -315,8 +315,9 @@ class ServiceMonitor:
             logger.exception("记录服务监测事件失败")
 
     def _prune_state(self) -> None:
-        if not self.items:
-            return
+        # No early return on an empty item list: clearing every monitor used
+        # to leave its latched alerts open in the daily report until the
+        # 30-day window rolled over.
         with self.state.section("monitors") as monitors:
             states = monitors.setdefault("items", {})
             if not isinstance(states, dict):
@@ -332,10 +333,16 @@ class ServiceMonitor:
                     continue
                 # Close the episode before dropping its state: the old alert
                 # row never got resolved_ts, so the daily report kept showing
-                # an "未恢复" entry for up to 30 days.
-                parts = str(key).split(":")
-                name = parts[1] if len(parts) > 1 and parts[1] else "服务"
-                self._record_event(name, "", "监测项已移除，自动关闭", "recovery")
+                # an "未恢复" entry for up to 30 days. The name/target come
+                # from the state when available (a colon inside a name used to
+                # produce the wrong name and leave the alert open), otherwise
+                # from the key itself.
+                name = str(state.get("name") or "")
+                if not name:
+                    parts = str(key).split(":", 2)
+                    name = parts[1] if len(parts) > 1 and parts[1] else "服务"
+                target = str(state.get("target") or "")
+                self._record_event(name, target, "监测项已移除，自动关闭", "recovery")
         self.state.save()
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
@@ -499,6 +506,21 @@ class ServiceMonitor:
         last_sent = safe_float(st.get("last_sent") or 0)
         name = str(item.get("name") or item.get("__template_key") or "服务")
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
+        # Persisted so pruning a removed item can close its alert under the
+        # right name and target even when the name contains a colon.
+        st["name"] = name
+        st["target"] = target_text
+
+        if st.pop("send_inflight", False) and not alerting:
+            # Reloaded/crashed during a slow alert send. The message may have
+            # reached the chat, so do not fire the same alert again after the
+            # threshold is met once more; keep the recovery notice quiet for
+            # the same reason the resource rules do.
+            alerting = True
+            st["alerting"] = True
+            st["alerted"] = False
+            st["since"] = safe_float(st.get("last_attempt")) or now
+            st["fails"] = 0
 
         if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
             # Misconfiguration is not an outage: warn once, never alert.
@@ -630,9 +652,16 @@ class ServiceMonitor:
                     )
                     if pending_recovery:
                         text += "\n（上次恢复通知未送达，已合并到本次告警）"
+                    # Persist before the await: a reload or crash during a
+                    # slow send used to leave the item "not alerting" on disk,
+                    # so the same outage alerted again after restart.
+                    st["last_attempt"] = now
+                    st["send_inflight"] = True
+                    self.state.save()
                     result = await self._push_alert(name, detail, text, target_text)
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
+                    st.pop("send_inflight", None)
                     st["alerting"] = True
                     st["alerted"] = True
                     st["since"] = now
@@ -1048,7 +1077,24 @@ class ServiceMonitor:
             text=text,
             send=self._send,
             kind="service",
+            on_abandon=self._on_summary_abandoned,
         )
+
+    def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
+        """Withdraw "alerted" for monitors whose summary never arrived."""
+
+        labels = {label for label, _reason in items if label}
+        if not labels:
+            return
+        with self.state.section("monitors") as monitors:
+            states = monitors.get("items")
+            if not isinstance(states, dict):
+                return
+            for st in states.values():
+                if not isinstance(st, dict) or not st.get("alerting"):
+                    continue
+                if str(st.get("name") or "") in labels:
+                    st["alerted"] = False
 
     @staticmethod
     def _delivered(result: Any) -> bool:

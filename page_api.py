@@ -26,7 +26,7 @@ from .collectors import (
     cfg_bool,
     cfg_get,
     cfg_int,
-    disk_usage,
+    disk_usage_bounded,
     format_bytes,
     format_duration,
     get_timezone,
@@ -39,7 +39,7 @@ from .collectors import (
 from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
-from .utils import normalize_targets
+from .utils import normalize_targets, redact_url
 from .version import __version__, resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
@@ -233,7 +233,7 @@ class PageApi:
             configured = [os.path.abspath(os.sep)]
         try:
             # Keep the dashboard on the same used/total scale as the card.
-            usages = disk_usage(configured)
+            usages = disk_usage_bounded(configured)
         except Exception:
             usages = []
         mounts: list[dict[str, Any]] = []
@@ -343,6 +343,7 @@ class PageApi:
         monitor_status = plugin.monitor.status()
         monitor_items: list[dict[str, Any]] = []
         ok_count = fail_count = unknown_count = config_error_count = 0
+        degraded_count = 0
         for item in monitor_status.get("items", []):
             state = item.get("state") or {}
             checked = state.get("last_checked")
@@ -357,6 +358,13 @@ class PageApi:
             elif alerting:
                 status = "fail"
                 fail_count += 1
+            elif state.get("fails"):
+                # Failed the latest probe but has not reached the alert
+                # threshold (or is suppressed by a dependency). Showing a
+                # green dot and hiding last_error here told the operator
+                # "everything is fine" while the service was already down.
+                status = "degraded"
+                degraded_count += 1
             else:
                 status = "ok"
                 ok_count += 1
@@ -417,7 +425,7 @@ class PageApi:
                     "used_text": format_bytes(swap.used),
                     "total_text": format_bytes(swap.total),
                 },
-                "disk": self._disk(),
+                "disk": await asyncio.to_thread(self._disk),
                 "network": network_view,
                 "network_redacted": "network" in redact,
                 "monitors": {
@@ -425,6 +433,7 @@ class PageApi:
                     "total": len(monitor_items),
                     "ok": ok_count,
                     "fail": fail_count,
+                    "degraded": degraded_count,
                     "unknown": unknown_count,
                     "config_error": config_error_count,
                     "items": monitor_items,
@@ -467,40 +476,32 @@ class PageApi:
                 cfg_get(plugin.config, "alerts.platform_id", "default") or "default"
             )
             merged: list[str] = []
-            center_active = False
             # Verify exactly what real notifications would use: resolve each
             # kind through the notification center (which already filters
-            # disabled rules and empty targets), and only fall back to the
-            # legacy lists for kinds no rule covers.
-            for notify_kind in (
-                "resource",
-                "service",
-                "offline",
-                "provider",
-                "daily",
-                "weekly",
-                "daily_image",
-            ):
+            # disabled rules and empty targets) and fall back to that kind's
+            # legacy list only when no rule covers it. A single global gate
+            # ("any rule exists") skipped the legacy targets of every kind the
+            # rules did not cover, so a channel that really receives alerts
+            # was never tested.
+            legacy_by_kind = (
+                ("resource", "alerts.targets"),
+                ("service", "monitors.targets"),
+                ("offline", "alerts.targets"),
+                ("provider", "alerts.targets"),
+                ("daily", "daily_report.targets"),
+                ("weekly", "daily_report.targets"),
+                ("daily_image", "alerts.targets"),
+            )
+            for notify_kind, legacy_key in legacy_by_kind:
                 picked = resolve_targets(plugin.config, notify_kind)
                 if picked is None:
-                    continue
-                center_active = True
+                    raw = cfg_get(plugin.config, legacy_key, [])
+                    if isinstance(raw, str):
+                        raw = [raw]
+                    picked = normalize_targets(raw or [], platform_id)
                 for one in picked:
                     if one not in merged:
                         merged.append(one)
-            if not center_active:
-                for key in (
-                    "alerts.targets",
-                    "monitors.targets",
-                    "daily_report.targets",
-                ):
-                    raw = cfg_get(plugin.config, key, [])
-                    if isinstance(raw, str):
-                        raw = [raw]
-                    for item in raw or []:
-                        for one in normalize_targets([item], platform_id):
-                            if one not in merged:
-                                merged.append(one)
             if not merged:
                 return jsonify({"ok": False, "error": "未配置任何推送目标"})
             text = (
@@ -703,7 +704,17 @@ class PageApi:
                 store.list_website_samples, start, end + 60, limit=limit + 1
             )
             truncated = len(fetched) > limit
-            rows = fetched[-limit:]
+            # Rows written before v2.18.7 may carry the full URL (with a
+            # token in the query) as the name; the CSV is exactly what gets
+            # forwarded to other people, so strip query and credentials here
+            # like the daily report already does.
+            rows = [
+                {
+                    **row,
+                    "name": redact_url(str(row.get("name") or "")),
+                }
+                for row in fetched[-limit:]
+            ]
         elif kind == "events":
             # One range query instead of one connection per day.
             fetched = await asyncio.to_thread(

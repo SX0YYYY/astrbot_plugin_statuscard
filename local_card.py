@@ -72,16 +72,28 @@ def _has_cjk(font: Any) -> bool:
     A font object that cannot answer the probe (some test doubles, unusual
     FreeType builds) is accepted instead of rejected: refusing every font
     would make the card fall back to the bitmap default for no reason.
+
+    The old check asked whether the glyph bitmap was non-empty. A missing
+    glyph renders as ``.notdef`` (usually an empty box), which is non-empty
+    too, so a Latin-only font always passed and the fallback card showed
+    boxes. Compare against a private-use character no real font defines:
+    identical bitmaps mean both are ``.notdef``.
     """
 
     try:
-        mask = font.getmask("中")
+        glyph = font.getmask("中")
+        missing = font.getmask("\ue000")
     except Exception:
         return True
     try:
-        return bool(mask.getbbox())
+        return glyph.tobytes() != missing.tobytes()
     except Exception:
-        return True
+        # Test doubles and unusual FreeType builds may not expose pixel
+        # bytes; the old bbox check is the best available fallback.
+        try:
+            return bool(glyph.getbbox())
+        except Exception:
+            return True
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:

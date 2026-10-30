@@ -711,7 +711,7 @@ def test_report_html_renders_new_sections(tmp_path: Path) -> None:
     html = build_report_html(view, render_width=650)
 
     assert "网站延迟" in html
-    assert "Top 异常进程" in html
+    assert "Top 进程（CPU / 内存峰值）" in html
     assert "<script" not in html
 
 

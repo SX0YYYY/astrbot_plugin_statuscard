@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .utils import cfg_get
+from .utils import cfg_get, redact_url
 
 # The redaction rules the plugin understands.
 RULES: tuple[str, ...] = ("hostname", "process", "network", "qq_stats")
@@ -116,6 +116,16 @@ class Redactor:
             for row in view.get("system_info", []):
                 if row.get("label") == "Host":
                     row["value"] = HIDDEN
+            # The website table repeats the probe target and its error text;
+            # an internal address there leaked even with the hostname rule on.
+            for site in view.get("websites", []) or []:
+                if not isinstance(site, dict):
+                    continue
+                name = redact_url(str(site.get("name") or ""))
+                masked = self.mask_addresses(name)
+                site["name"] = HIDDEN if masked != name else name
+                if site.get("error"):
+                    site["error"] = self.mask_addresses(site["error"])
         if self.process:
             for proc in view.get("process", {}).get("top", []):
                 proc["name"] = HIDDEN

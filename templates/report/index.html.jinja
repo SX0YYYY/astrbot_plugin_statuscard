@@ -67,8 +67,11 @@
     <section class="section">
       <div class="section-head">
         <h2>资源趋势</h2>
-        <span>{{ d.day_label }} 24 小时 · 最近 {{ d.history_days }} 天</span>
+        <span>{% if d.summary.span_days > 1 %}近 {{ d.summary.span_days }} 天均值 / 峰值 · 最近 {{ d.history_days }} 天{% else %}{{ d.day_label }} 24 小时 · 最近 {{ d.history_days }} 天{% endif %}</span>
       </div>
+      {% if d.summary.span_days > 1 %}
+      <p class="note">下方五张卡为近 {{ d.summary.span_days }} 天聚合：均值为该窗口内的日均值，峰值为窗口内最大值。</p>
+      {% endif %}
       {% if not d.resources.available %}
       <div class="empty">{{ d.resources.empty_reason }}</div>
       {% else %}
@@ -131,7 +134,7 @@
       {% else %}
       <div class="empty">{{ d.anomalies.empty_reason }}</div>
       {% endif %}
-      <p class="note">服务监测 {{ d.anomalies.normal.monitors }} 项正常；资源规则 {{ d.anomalies.normal.resource_rules }} 条。</p>
+      <p class="note">服务监测 {{ d.anomalies.normal.monitors }} 项已配置（异常见左表）；资源规则 {{ d.anomalies.normal.resource_rules }} 条。</p>
     </section>
     {% endif %}
 
@@ -358,7 +361,7 @@
     {% if "process" in d.sections and d.process %}
     <section class="section">
       <div class="section-head">
-        <h2>Top 异常进程</h2>
+        <h2>Top 进程（CPU / 内存峰值）</h2>
         <span>{{ d.window_label }}采样峰值（占整机 %）</span>
       </div>
       {% if not d.process.available %}

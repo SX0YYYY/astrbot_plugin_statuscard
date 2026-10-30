@@ -35,6 +35,31 @@ class ReportStore:
             logger.exception("初始化日报数据库失败，历史数据将不可用")
             self.init_error = "初始化失败（详见日志）"
 
+    def ensure_ready(self) -> bool:
+        """Retry initialisation after a failed start.
+
+        A full disk, a permission change or a lock at startup used to disable
+        the whole report chain until someone reloaded the plugin, while the
+        UI promised the next scheduled run would continue. Retry on each
+        collector tick and before each scheduled send; a success restores
+        every writer automatically.
+        """
+
+        if self.available:
+            return True
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db_with_recovery()
+            self._secure_permissions()
+            self.available = True
+            self.init_error = None
+            logger.info("日报数据库已恢复: %s", self.path)
+            return True
+        except Exception as exc:
+            self.init_error = f"初始化失败（{exc.__class__.__name__}）"
+            logger.warning("日报数据库仍不可用: %s", exc)
+            return False
+
     def _init_db_with_recovery(self) -> None:
         """Create the schema; rebuild the file when it is truly corrupt.
 
@@ -257,23 +282,43 @@ class ReportStore:
         if not self.available or not rows:
             return False
         con: sqlite3.Connection | None = None
+        rebuild = False
+        corrupt = False
         with self._lock:
             try:
                 con = self._connect()
                 con.executemany(sql, rows)
                 con.commit()
+                self._write_failures = 0
                 return True
-            except Exception:
+            except Exception as exc:
                 if con is not None:
                     try:
                         con.rollback()
                     except Exception:
                         pass
                 logger.exception("日报数据库批量写入失败")
+                # Website/process samples used to fail silently forever: a
+                # corrupt database that surfaced only here never triggered the
+                # recovery path, so those two report sections stayed empty
+                # while every other table kept working.
+                self._write_failures += 1
+                corrupt = self._is_corruption(exc)
+                rebuild = corrupt or self._write_failures >= 3
                 return False
             finally:
                 if con is not None:
                     con.close()
+                if rebuild:
+                    try:
+                        if corrupt:
+                            self._init_db_with_recovery()
+                        else:
+                            self._init_db()
+                        self._write_failures = 0
+                        logger.warning("日报数据库已重建（批量写入），后续写入将重试")
+                    except Exception:
+                        logger.exception("日报数据库重建失败")
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         if not self.available:

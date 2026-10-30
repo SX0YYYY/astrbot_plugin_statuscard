@@ -798,7 +798,16 @@
       data.platform && String(data.platform) !== "default"
         ? String(data.platform)
         : "";
-    $("subtitle").textContent = platform ? host + " · " + platform : host;
+    // The page does not auto-refresh, so the timestamp is the only way to
+    // tell whether a figure is current or an hour old.
+    const updated = String(data.generated_at || "").split(" ").pop();
+    $("subtitle").textContent = [
+      host,
+      platform,
+      updated ? t("updated_at", "更新于 {time}", { time: updated }) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
     $("subtitle").removeAttribute("data-i18n");
     $("plugin-version").textContent = "v" + (data.plugin_version || "--");
 
@@ -967,9 +976,10 @@
     } else {
       $("monitor-summary").textContent = t(
         "monitor_summary",
-        "正常 {ok} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
+        "正常 {ok} · 检查中 {degraded} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
         {
           ok: monitors.ok || 0,
+          degraded: monitors.degraded || 0,
           fail: monitors.fail || 0,
           unknown: monitors.unknown || 0,
           config_error: monitors.config_error || 0,
@@ -984,7 +994,8 @@
                   ? t("monitor_config_error", "配置不完整（{error}），未探测", {
                       error: item.config_error,
                     })
-                  : item.status === "fail" && item.last_error
+                  : (item.status === "fail" || item.status === "degraded") &&
+                      item.last_error
                     ? item.last_error
                     : item.last_checked
                       ? t("monitor_last_check", "最近检查 {time}", {
@@ -1135,10 +1146,15 @@
               "网络折线来自日报采样，与资源趋势同一时间窗口。",
             )
           : noteKind === "state"
-            ? t(
-                "network_note_state",
-                "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）。",
-              )
+            ? [
+                t(
+                  "network_note_state",
+                  "网络折线来自插件 state.json（默认 60 个采样点，约 1 小时）。",
+                ),
+                data.network_note || "",
+              ]
+                .filter(Boolean)
+                .join(" ")
             : data.network_note || "";
     if (data.truncated) {
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
@@ -1264,7 +1280,9 @@
         .join(" · ") +
       (data.counts_truncated
         ? " · " +
-          t("events_counts_truncated", "统计仅覆盖最近 2000 条")
+          t("events_counts_truncated", "统计仅覆盖最近 {limit} 条", {
+            limit: data.counts_limit || 2000,
+          })
         : "") +
       (data.truncated
         ? " · " + t("events_truncated", "仅显示最近 200 条")
@@ -1358,6 +1376,59 @@
                   "停机盲区 {count} 段：期间插件或 Bot 停机，无采样数据。",
                   { count: resources.gaps.length },
                 ),
+              ) +
+              "</p>"
+            : "") +
+          "</div>",
+      );
+    }
+    const anomalies = data.anomalies || {};
+    const anomalyItems = anomalies.items || [];
+    if (anomalyItems.length) {
+      // The image report has this table; the page used to show only the
+      // count, so "4 次异常" was all an operator saw here.
+      blocks.push(
+        '<div class="detail-block"><h3>' +
+          esc(t("report_anomaly_events", "异常事件")) +
+          (anomalies.unresolved
+            ? ' <span class="muted">' +
+              esc(
+                t("report_unresolved_n", "未恢复 {n} 项", {
+                  n: anomalies.unresolved,
+                }),
+              ) +
+              "</span>"
+            : "") +
+          '</h3><div class="table-wrap"><table class="table"><thead><tr><th>' +
+          esc(t("table_time", "时间")) +
+          "</th><th>" +
+          esc(t("table_name", "名称")) +
+          "</th><th>" +
+          esc(t("table_status", "状态")) +
+          "</th><th>" +
+          esc(t("table_duration", "时长")) +
+          "</th></tr></thead><tbody>" +
+          anomalyItems
+            .map(
+              (item) =>
+                "<tr><td>" +
+                esc(item.time || "--") +
+                "</td><td>" +
+                esc(item.name || "--") +
+                "</td><td>" +
+                esc(item.status || "--") +
+                "</td><td>" +
+                esc(item.duration || "--") +
+                "</td></tr>",
+            )
+            .join("") +
+          "</tbody></table></div>" +
+          (anomalies.total > anomalyItems.length
+            ? '<p class="muted">' +
+              esc(
+                t("report_more_events", "另有 {n} 条未列出", {
+                  n: anomalies.total - anomalyItems.length,
+                }),
               ) +
               "</p>"
             : "") +

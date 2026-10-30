@@ -16,13 +16,14 @@ from .aggregator import AlertAggregator
 from .collectors import (
     _call_action,
     _get_aiocqhttp_client,
+    _normalize_list,
     _normalize_object,
     cached_cpu_percent,
     cfg_bool,
     cfg_float,
     cfg_get,
     cfg_int,
-    disk_usage,
+    disk_usage_bounded,
     format_bytes,
     format_duration,
     memory_stat,
@@ -71,6 +72,13 @@ MAX_RECOVERY_RETRIES = 5
 # documented as affecting only the resource rules, and raising it to dampen
 # memory jitter used to delay disconnect alerts by the same factor.
 OFFLINE_ALERT_SAMPLES = 2
+# A raw provider_stats enum ("completed") means nothing to a group member;
+# the alert and recovery texts use these labels instead.
+_PROVIDER_STATUS_TEXT = {
+    "completed": "调用成功",
+    "error": "调用失败",
+    "aborted": "已中止",
+}
 
 
 def _webhook_bind_allowed(host: str, require_token: bool, token: str) -> bool:
@@ -441,7 +449,31 @@ class AlertEngine:
             text=text,
             send=lambda text: self._send(text, kind="resource"),
             kind="resource",
+            on_abandon=self._on_summary_abandoned,
         )
+
+    def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
+        """Withdraw "alerted" for rules whose summary never reached the chat.
+
+        A buffered alert is only "announced" once the summary is posted. If
+        the summary is abandoned (retries exhausted, reload), keeping
+        ``alerted=True`` would make the later recovery notice claim an alert
+        the user never saw.
+        """
+
+        labels = {label for label, _reason in items if label}
+        if not labels:
+            return
+        with self.state.section("alerts") as alerts:
+            rules = alerts.get("rules")
+            if not isinstance(rules, dict):
+                return
+            for st in rules.values():
+                if not isinstance(st, dict) or not st.get("alerting"):
+                    continue
+                label = str(st.get("label") or "")
+                if label and label in labels:
+                    st["alerted"] = False
 
     @staticmethod
     def _delivered(result: Any) -> bool:
@@ -491,10 +523,15 @@ class AlertEngine:
             logger.exception("记录告警事件失败")
 
     async def send_test(self, target_umo: str | None = None) -> bool:
-        # When the notification center has taken over, the legacy ``targets``
-        # list is inert: the test must exercise the targets that real alerts
-        # would use, otherwise the command validates the wrong destination.
-        targets = [target_umo] if target_umo else self._targets_for("resource")
+        # Exercise both the current chat and the targets real alerts would
+        # use. Sending only to the invoking chat reported success while every
+        # real alert went to a mistyped group id -- the most common reason
+        # "alerts are not arriving".
+        targets: list[str] = []
+        for candidate in [target_umo, *(self._targets_for("resource") or [])]:
+            text_candidate = str(candidate or "").strip()
+            if text_candidate and text_candidate not in targets:
+                targets.append(text_candidate)
         if not targets:
             return False
         text = (
@@ -573,11 +610,22 @@ class AlertEngine:
         # Every configured mount gets its own rule. Watching only the first
         # one meant a second disk could fill up silently while the card and
         # the report showed it.
+        if len(disk_paths) > 1:
+            # Adding a second mount used to rename the single-mount key from
+            # "disk" to "disk:/" -- the old state was pruned with a fake
+            # "recovered" event and the still-full disk alerted again. Carry
+            # the first mount's latch over instead.
+            with self.state.section("alerts") as alerts:
+                rules = alerts.get("rules")
+                if isinstance(rules, dict):
+                    legacy = rules.get(f"disk:{disk_paths[0]}")
+                    if "disk" not in rules and isinstance(legacy, dict):
+                        rules["disk"] = dict(legacy)
         valid_keys = {"cpu", "ram", "swap", "load"}
-        for disk_path in disk_paths:
-            # A single mount keeps the historical key so the cooldown and the
-            # existing state survive the upgrade; extra mounts are keyed.
-            rule_key = "disk" if len(disk_paths) == 1 else f"disk:{disk_path}"
+        for index, disk_path in enumerate(disk_paths):
+            # The first mount keeps the historical key whether or not extra
+            # mounts exist, so its cooldown and latch survive a config change.
+            rule_key = "disk" if index == 0 else f"disk:{disk_path}"
             valid_keys.add(rule_key)
             try:
                 # One implementation shared with the card, the report and the
@@ -586,7 +634,7 @@ class AlertEngine:
                 # than the number the user reads on the card.
                 # statvfs blocks on a hung network mount; keep it off the
                 # event loop (the card path already did).
-                disk = (await asyncio.to_thread(disk_usage, [disk_path]))[0]
+                disk = (await asyncio.to_thread(disk_usage_bounded, [disk_path]))[0]
                 if disk.percent is None or disk.used is None or disk.total is None:
                     raise RuntimeError(disk.exception or "磁盘信息不可用")
                 await self._evaluate(
@@ -630,6 +678,10 @@ class AlertEngine:
         await self._check_offline()
         if self.provider_watch_enabled:
             await self._check_provider_quality()
+        else:
+            # A latch created before the switch was turned off would stay
+            # "unresolved" in the daily report forever.
+            self._close_provider_watch("LLM 服务监控已关闭")
         self._prune_rules(valid_keys)
         self.state.set("alerts_last_sample", now)
         self.state.save()
@@ -694,6 +746,10 @@ class AlertEngine:
             rules[key] = st
         now = time.time()
         st["last_seen"] = now
+        # Remember the display label: the aggregator's abandon callback only
+        # has labels, and resolving a key back to its label (disk paths) is
+        # otherwise guesswork.
+        st["label"] = name
         count = _safe_int(st.get("count"))
         alerting = bool(st.get("alerting"))
         last_sent = _safe_float(st.get("last_sent"))
@@ -771,7 +827,7 @@ class AlertEngine:
                         f"当前: {value_text}（阈值 {threshold:.1f}{unit}）\n"
                         f"主机: {self._hostname()}\n"
                         f"时间: {_now_text(self.config)}\n"
-                        f"已连续 {self.sustain} 个采样周期超过阈值。"
+                        f"判定条件: 连续 {self.sustain} 个采样周期超过阈值。"
                     )
                     if had_pending:
                         text += "\n（上一次的恢复通知未送达，已并入本条）"
@@ -853,6 +909,22 @@ class AlertEngine:
                                 )
         else:
             st["count"] = 0
+            # A push that failed and then recovered before the retry budget
+            # ran out never latched ``alerting``, so the recovery branch below
+            # was skipped and its "failed" event stayed unresolved in the
+            # daily report for up to 30 days. Close that event here; no
+            # message is sent because the alert itself never arrived.
+            if (
+                _safe_int(st.get("retry_count")) > 0
+                or st.get("last_error") == "send_failed"
+            ):
+                self._record_event(
+                    "resource",
+                    name,
+                    "告警未能送达，本次波动已结束",
+                    "recovery",
+                )
+                st["last_error"] = ""
             # A new episode starts with a clean retry budget. Leaving the
             # counter behind meant a later failure could give up on its first
             # attempt and never deliver any alert at all.
@@ -899,6 +971,10 @@ class AlertEngine:
                 # never sent, so its recovery notice would arrive without a
                 # matching alert and look like a duplicate (2026-10-29 实测).
                 notified = bool(st.pop("alerted", True))
+                # Read before clearing: an episode whose alerts were abandoned
+                # after the retry budget still sends a recovery, and the user
+                # deserves to know the alert itself never arrived.
+                had_failed = st.get("last_error") == "send_failed"
                 st["alerting"] = False
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
@@ -919,9 +995,12 @@ class AlertEngine:
                         f"✅ 已恢复 · {name}\n"
                         "──────────────\n"
                         f"当前: {value_text}\n"
+                        f"主机: {self._hostname()}\n"
                         f"告警持续: {format_duration(duration)}\n"
                         f"时间: {_now_text(self.config)}"
                     )
+                    if had_failed:
+                        text += "\n（异常告警此前未能送达）"
                     result = await self._send(text)
                     if not self._delivered(result):
                         st["pending_recovery"] = text
@@ -952,7 +1031,15 @@ class AlertEngine:
         except Exception as exc:
             logger.warning("掉线广播：获取群列表失败（%s）", exc)
             return
-        groups = _normalize_object(raw) or []
+        # aiocqhttp's ``call_action`` already unwraps the protocol envelope,
+        # so ``get_group_list`` returns a bare list. Parsing it with the
+        # object helper turned that list into ``{}`` and the broadcast scanned
+        # zero groups on every recovery since v2.15.0 (2026-10-30 实测日志
+        # 「扫描 0 个群」). Accept both shapes, like the collector does.
+        groups = _normalize_list(raw)
+        if groups is None:
+            envelope = _normalize_object(raw)
+            groups = envelope.get("data") or envelope.get("groups") or []
         if isinstance(groups, dict):
             groups = groups.get("data") or groups.get("groups") or []
         exclude = {
@@ -968,8 +1055,13 @@ class AlertEngine:
         # The formal recovery notice goes to alerts.targets as well; those
         # groups must not receive it twice (once from the broadcast, once from
         # the reply above).
+        # The formal recovery notice goes to the targets that the notification
+        # center actually resolves for ``offline``; those groups must not
+        # receive the broadcast as well. Using ``self.targets`` here missed
+        # the case where a rule routes offline notices to another group, so
+        # that group got two messages and the default target got none.
         notify_groups: set[str] = set()
-        for target in self.targets:
+        for target in self._targets_for("offline"):
             text_target = str(target or "").strip()
             tail = text_target.rsplit(":", 1)[-1]
             if tail.isdigit():
@@ -1217,7 +1309,7 @@ class AlertEngine:
                 "──────────────\n"
                 f"主机: {self._hostname()}\n"
                 f"时间: {_now_text(self.config)}\n"
-                "离线告警会先排队，连接恢复后补发。"
+                "若本条未能送达，将在连接恢复后补发。"
             )
             result = await self._send(text, kind="offline")
             delivered = self._delivered(result)
@@ -1232,6 +1324,24 @@ class AlertEngine:
                 self._record_event(
                     "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
+
+    def _close_provider_watch(self, reason: str) -> None:
+        """Resolve a latched LLM alert when the rule stops running.
+
+        Turning ``provider_watch`` off (or setting its threshold to 0) used to
+        leave ``alerting=True`` behind: the daily report kept showing an
+        "unresolved" LLM incident no later event could close.
+        """
+
+        alerts_state = self.state.setdefault("alerts", {})
+        watch = alerts_state.get("provider_watch")
+        if not isinstance(watch, dict) or not watch.get("alerting"):
+            return
+        watch["alerting"] = False
+        watch["alerted"] = False
+        watch["alert_since"] = 0
+        self._record_event("provider", "LLM 服务", reason, "recovery")
+        logger.info("LLM 服务告警已关闭：%s", reason)
 
     async def _check_provider_quality(self) -> None:
         """Alert when the newest provider_stats rows fail consecutively.
@@ -1254,6 +1364,7 @@ class AlertEngine:
         if now - self._provider_last_check < 60:
             return
         if self.provider_watch_threshold <= 0:
+            self._close_provider_watch("LLM 服务监控阈值已关闭")
             return
         self._provider_last_check = now
         try:
@@ -1312,7 +1423,7 @@ class AlertEngine:
                 "──────────────\n"
                 f"主机: {self._hostname()}\n"
                 f"连续失败: {streak} 次（阈值 {self.provider_watch_threshold}）\n"
-                f"最近状态: {latest or '未知'}\n"
+                f"最近状态: {_PROVIDER_STATUS_TEXT.get(str(latest or ''), latest or '未知')}\n"
                 f"时间: {_now_text(self.config)}"
             )
             in_cooldown = bool(
@@ -1383,7 +1494,7 @@ class AlertEngine:
                     "──────────────\n"
                     f"主机: {self._hostname()}\n"
                     + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
-                    + f"最近状态: completed\n"
+                    + "最近状态: 调用成功\n"
                     f"时间: {_now_text(self.config)}"
                 )
                 result = await self._send(text, source="provider", kind="provider")

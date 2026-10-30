@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.18.8-blue)
+![Version](https://img.shields.io/badge/version-2.18.9-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -198,7 +198,7 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM �
 
 高级（打开“显示高级告警选项”）：
 
-- **阈值**：CPU 85% / 内存 90% / SWAP 90% / 磁盘 85% / 每核负载 2.0。
+- **阈值**：CPU 85% / 内存 90% / SWAP 90% / 磁盘 85% / 每核负载 2.0；**某一项设为 0 表示单独关闭这一项**（其余照常告警）。
 - **采样间隔**：默认 60 秒。
 - **连续超过阈值几次才告警**：默认 3 次（约 3 分钟）。
 - **告警冷却**：同一规则成功告警后 1800 秒内不重复提醒。
@@ -490,7 +490,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 | `display.timezone` | `Asia/Shanghai` | 卡片、告警、监测和日报统一使用的时区 |
 | `display.redact` | 空 | 脱敏项：主机名 / 进程信息 / 网络数据 / QQ 统计 |
 | `display.page_redact` | 空 | Web 看板脱敏项；只影响 WebUI 面板。与 `display.redact` 完全独立，全部不勾即看板不脱敏 |
-| `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调 |
+| `alerts.cpu_threshold` 等 | CPU 85 / 内存 90 / SWAP 90 / 磁盘 85 / 每核负载 2.0 | 资源阈值；打开“显示高级告警选项”后可调；设为 0 表示单独关闭该项 |
 | `display.sample_seconds` | `60` | 网络/磁盘 IO/月流量采样间隔（秒），决定状态卡折线时间粒度；告警采样在 `alerts.interval_seconds` 单独设置 |
 | `alerts.interval_seconds` | `60` | 资源告警采样间隔（秒）；不影响状态卡折线采样 |
 | `alerts.sustain_samples` | `3` | 连续超过阈值几次才告警（资源告警）；服务监测的失败阈值在「服务可用性监测」分组 |
@@ -656,6 +656,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.18.9**：全流程实测修复批——「掉线恢复全群广播」修复（此前实际扫描 0 个群、从未发出）、聚合放弃后不再出现无对应告警的「已恢复」、告警发送失败后不再长期挂「未恢复」、报表库初始化失败可自动恢复、异常时长错乱与 failed+alert 重复计数修正、看板新增「检查中」状态与异常明细、导出网站 CSV 脱敏、窄屏布局与对比度改善
 - **v2.18.8**：P3 批 44 项全部修复——孤儿告警自动收尾、广播与恢复通知去重、时钟回拨不再放大速率、网络折线按时间轴且缺口分段、网卡只选物理在线口、周报摘要标注范围、验证 UMO 打码、主题跟随系统、配置提示与 CI 校验补齐、包体瘦身与工作区清理
 - **v2.18.7**：全流程找茬修复批——Webhook 通配监听未强制 Token 时拒绝启动、容器/unit 名拼错不再当服务异常、监测恢复补发与告警重试加上限、周报资源按整周聚合、状态卡 4xx/5xx 标红、网站名不再泄露 URL 里的 token、`.bak` 可抵御二次损坏、验证按钮文案恢复
 - **v2.18.6**：A/B 两批待办（38 项）一次性收口——多挂载点磁盘告警、恢复通知补发上限、Webhook 开关语义、停机不记假速率、导出保留最新、周报口径、体检新增时间校验等

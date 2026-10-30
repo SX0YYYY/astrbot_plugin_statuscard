@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -437,6 +438,81 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "unknown_redact_rule",
                     f"{label}规则含未知值：{', '.join(sorted(set(unknown)))}；"
                     f"可用值为 {', '.join(REDACT_RULES)}，未知值会被忽略。",
+                )
+            )
+    # "Enabled but every section unchecked" is the second silent failure:
+    # the scheduler skips the report entirely, while the switch still looks
+    # on. A legacy "todo" section list also migrates to [].
+    daily_sections = cfg_get(config, "daily_report.sections", None)
+    if daily_on and isinstance(daily_sections, list) and not daily_sections:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "daily_report_sections_empty",
+                "「日报内容」全部未勾选，定时日报不会发送。"
+                "请勾选至少一个模块，或关闭「启用趋势日报」。",
+            )
+        )
+    try:
+        history_days = int(cfg_get(config, "daily_report.history_days", 7) or 7)
+        retention_days = int(cfg_get(config, "daily_report.retention_days", 30) or 30)
+    except (TypeError, ValueError):
+        history_days = retention_days = 0
+    if daily_on and 0 < retention_days < history_days:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "history_exceeds_retention",
+                f"趋势天数（{history_days}）大于资源保留天数（{retention_days}），"
+                f"趋势图会缺 {history_days - retention_days} 天数据；"
+                "请调大「资源保留天数」或调小「历史趋势天数」。",
+            )
+        )
+    if monitors_on and cfg_bool(config, "monitors.silence_enabled", False):
+        silence_until = str(cfg_get(config, "monitors.silence_until", "") or "").strip()
+        if not silence_until:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "silence_enabled_without_time",
+                    "已开启「维护静默」但未填写截止时间，静默不会生效（留空表示不静默）。",
+                )
+            )
+        else:
+            try:
+                datetime.strptime(silence_until, "%Y-%m-%d %H:%M")
+            except ValueError:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "silence_time_invalid",
+                        f"维护静默截止时间「{silence_until}」格式不正确，"
+                        "应为 YYYY-MM-DD HH:MM，当前不会生效。",
+                    )
+                )
+    # A mistyped target is the most common "alerts never arrive" cause and
+    # previously only produced a runtime log line.
+    target_pattern = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z]+:[^:\s]+$")
+    for key, label in (
+        ("alerts.targets", "默认推送目标"),
+        ("monitors.targets", "监测推送目标"),
+        ("daily_report.targets", "日报推送目标"),
+    ):
+        raw = cfg_get(config, key, [])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            continue
+        for item in raw:
+            text = str(item or "").strip()
+            if not text or text.isdigit() or target_pattern.match(text):
+                continue
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "target_format_suspect",
+                    f"{label}「{text}」格式可疑：群聊可直接填群号，"
+                    "私聊填 default:FriendMessage:QQ号。",
                 )
             )
     return issues

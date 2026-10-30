@@ -35,9 +35,9 @@ class _NullPlugin:
 def test_every_surface_uses_the_same_disk_percent() -> None:
     """v2.18.4 only changed the card; the other three kept psutil's scale."""
 
-    assert report.disk_usage is collectors.disk_usage
-    assert alerts_module.disk_usage is collectors.disk_usage
-    assert page_api.disk_usage is collectors.disk_usage
+    assert report.disk_usage_bounded is collectors.disk_usage_bounded
+    assert alerts_module.disk_usage_bounded is collectors.disk_usage_bounded
+    assert page_api.disk_usage_bounded is collectors.disk_usage_bounded
 
 
 # ---------------------------------------------------------------------------

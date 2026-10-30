@@ -17,7 +17,7 @@
         "error_bridge": "插件页面桥接不可用，请从 AstrBot 插件页面打开",
         "error_load": "加载失败",
         "error_retry": "重试",
-        "events_counts_truncated": "统计仅覆盖最近 2000 条",
+        "events_counts_truncated": "统计仅覆盖最近 {limit} 条",
         "events_truncated": "仅显示最近 200 条",
         "export_csv": "导出 CSV",
         "export_done": "已导出 {count} 个文件",
@@ -76,7 +76,7 @@
         "monitor_last_check": "最近检查 {time}",
         "monitor_none": "没有配置服务监测目标",
         "monitor_not_checked": "尚未检查",
-        "monitor_summary": "正常 {ok} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
+        "monitor_summary": "正常 {ok} · 检查中 {degraded} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
         "network_down": "下行",
         "network_month_down": "本月下行",
         "network_month_up": "本月上行",
@@ -193,7 +193,14 @@
         "verify_webhook_bad": "HTTP {status}：请检查 Token 与目标配置。",
         "verify_webhook_not_listening": "Webhook 未在监听",
         "verify_webhook_ok": "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
-        "verifying": "验证中…"
+        "verifying": "验证中…",
+        "updated_at": "更新于 {time}",
+        "report_anomaly_events": "异常事件",
+        "report_unresolved_n": "未恢复 {n} 项",
+        "report_more_events": "另有 {n} 条未列出",
+        "table_name": "名称",
+        "table_status": "状态",
+        "table_duration": "时长"
       }
     }
   }

@@ -42,7 +42,7 @@
         "network_down": "Download",
         "network_month_up": "Month upload",
         "network_month_down": "Month download",
-        "monitor_summary": "OK {ok} · Failed {fail} · Unknown {unknown} · Config issues {config_error}",
+        "monitor_summary": "OK {ok} · Checking {degraded} · Failed {fail} · Unknown {unknown} · Config issues {config_error}",
         "monitor_none": "No service monitors configured",
         "monitor_not_checked": "Not checked yet",
         "monitor_last_check": "Last check {time}",
@@ -193,7 +193,14 @@
         "quality_reason_no_data_today": "No LLM calls today yet",
         "report_unavailable": "Some content is unavailable",
         "report_sections_empty": "No report content selected: daily_report.sections is empty. Pick the sections in the config page.",
-        "events_counts_truncated": "Statistics cover the latest 2000 rows"
+        "events_counts_truncated": "Statistics cover the latest {limit} rows",
+        "updated_at": "Updated {time}",
+        "report_anomaly_events": "Incidents",
+        "report_unresolved_n": "{n} unresolved",
+        "report_more_events": "{n} more not listed",
+        "table_name": "Name",
+        "table_status": "Status",
+        "table_duration": "Duration"
       }
     }
   }

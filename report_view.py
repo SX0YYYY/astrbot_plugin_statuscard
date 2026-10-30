@@ -713,10 +713,10 @@ class DailyReportBuilder:
         window_days = {
             (day - timedelta(days=offset)).isoformat() for offset in range(span)
         }
-        events = self.store.list_events(previous.isoformat(), limit=1000)
+        events = self.store.list_events(previous.isoformat(), limit=5000)
         for offset in range(span):
             boundary = day - timedelta(days=offset)
-            events += self.store.list_events(boundary.isoformat(), limit=1000)
+            events += self.store.list_events(boundary.isoformat(), limit=5000)
         events.sort(
             key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
         )
@@ -731,8 +731,15 @@ class DailyReportBuilder:
         # An interruption that began before the window still has an alert row
         # outside ``events``; load the preceding month so a recovery inside
         # the window can be paired with it instead of showing "--".
-        for alert in self.store.list_events_range(
-            window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
+        #
+        # Sorted by time: the query returns newest-first, so a recovery was
+        # popped before its own alert was seen again and the stale start time
+        # survived into the window (a 30-second blip rendered as 16 hours).
+        for alert in sorted(
+            self.store.list_events_range(
+                window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
+            ),
+            key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0)),
         ):
             status = str(alert.get("status") or "")
             name = str(alert.get("name") or "")
@@ -757,6 +764,15 @@ class DailyReportBuilder:
                 open_alerts.pop(key, None)
         items: list[dict[str, Any]] = []
         count = 0
+        # One interruption can leave both a "failed" row (the first push did
+        # not arrive) and an "alert" row (the retry succeeded). ``close_all``
+        # writes the same resolved_ts to both, so that value identifies the
+        # episode; the old code discarded the key as soon as it read
+        # resolved_ts, and the second row counted again (2 anomalies for one
+        # blip).
+        seen_ids: set[tuple[tuple[str, str, str], int]] = set()
+        # Keys whose episode started inside the window and is still open; the
+        # unresolved count below reads this set.
         episode_open: set[tuple[str, str, str]] = set()
         for event in events:
             status = str(event.get("status") or "")
@@ -769,25 +785,35 @@ class DailyReportBuilder:
             resolved_ts = event.get("resolved_ts")
             if status in {"alert", "failed"}:
                 open_alerts.setdefault(key, int(event.get("ts") or 0))
-            if str(event.get("day") or "") not in window_days:
+            outside = str(event.get("day") or "") not in window_days
+            if status == "recovery" and outside:
+                # Events before the window must also close their episode: the
+                # previous day's recovery used to be skipped by the day filter
+                # while its alert had already been registered here, so an
+                # in-window recovery was paired with a stale start time from
+                # the day before (16 hours for a 30-second blip).
+                open_alerts.pop(key, None)
+                continue
+            if outside:
                 continue
             if status not in {"alert", "recovery", "failed"}:
                 continue
             duration_text = "--"
             if status == "recovery":
                 start = open_alerts.pop(key, None)
+                # The episode is over: a later alert with the same key is a
+                # new one and must count again.
+                seen_ids = {sid for sid in seen_ids if sid[0] != key}
                 episode_open.discard(key)
                 if start:
                     duration_text = format_duration(int(event.get("ts") or 0) - start)
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
             elif status in {"alert", "failed"}:
-                if key in episode_open:
-                    # One interruption can leave both a "failed" row (the
-                    # first push did not arrive) and an "alert" row (the
-                    # retry succeeded). They are the same episode: keep the
-                    # earlier row and count it once.
+                episode_id = (key, int(resolved_ts or 0))
+                if episode_id in seen_ids:
                     continue
+                seen_ids.add(episode_id)
                 count += 1
                 if resolved_ts:
                     # The episode ended after the report day (its recovery
@@ -984,8 +1010,13 @@ class DailyReportBuilder:
             day_text = item.isoformat()
             if not sent_available or not sent_min_day or day_text < sent_min_day:
                 sent_values.append(None)
+            elif day_text in sent_map:
+                sent_values.append(int(sent_map[day_text]))
             else:
-                sent_values.append(int(sent_map.get(day_text, 0)))
+                # A day with no row is "no data" (bot down, platform id
+                # changed), not "sent 0"; drawing it as zero invented an
+                # outage-shaped dip on the chart.
+                sent_values.append(None)
 
         yesterday = snapshots.get(day.isoformat(), {})
         previous = snapshots.get((day - timedelta(days=1)).isoformat(), {})
@@ -1776,12 +1807,16 @@ def build_report_text(view: dict[str, Any]) -> str:
             if gaps_text:
                 lines.append(f"停机盲区: {gaps_text}")
             lines.append(
-                "资源({}): CPU {} / 峰值 {}；RAM {} / 峰值 {}".format(
+                "资源({}): CPU {} / 峰值 {}；RAM {} / 峰值 {}；SWAP {}；"
+                "磁盘 {}；负载 {}".format(
                     day_label,
-                    yesterday["cpu"]["avg_text"],
-                    yesterday["cpu"]["peak_text"],
-                    yesterday["ram"]["avg_text"],
-                    yesterday["ram"]["peak_text"],
+                    (yesterday.get("cpu") or {}).get("avg_text", "--"),
+                    (yesterday.get("cpu") or {}).get("peak_text", "--"),
+                    (yesterday.get("ram") or {}).get("avg_text", "--"),
+                    (yesterday.get("ram") or {}).get("peak_text", "--"),
+                    (yesterday.get("swap") or {}).get("avg_text", "--"),
+                    (yesterday.get("disk") or {}).get("avg_text", "--"),
+                    (yesterday.get("load1") or {}).get("avg_text", "--"),
                 )
             )
         else:
@@ -1791,6 +1826,16 @@ def build_report_text(view: dict[str, Any]) -> str:
         line = f"异常/失败: {anomalies.get('count', 0)} 次"
         if anomalies.get("unresolved"):
             line += f"（另有 {anomalies['unresolved']} 项未恢复）"
+        brief_items = anomalies.get("items") or []
+        if brief_items:
+            # Without the text image this is the only place the user learns
+            # which service failed and when.
+            brief = "；".join(
+                f"{item.get('time', '')} {str(item.get('name') or '')[:12]} "
+                f"{item.get('status', '')}"
+                for item in brief_items[:3]
+            )
+            line += f"（{brief}）"
         lines.append(line)
     qq = view.get("qq") or {}
     if "qq" in sections:

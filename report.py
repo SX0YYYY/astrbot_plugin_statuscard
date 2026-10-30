@@ -17,7 +17,7 @@ from .collectors import (
     cfg_int,
     collect_bot_info,
     connection_test,
-    disk_usage,
+    disk_usage_bounded,
     memory_stat,
     now_in_timezone,
     resolve_targets,
@@ -166,8 +166,9 @@ class ReportCollector:
             logger.info("日报数据收集未启用（daily_report.collect=false）")
             return
         if not self.store.available:
-            logger.warning("日报数据库不可用，跳过历史数据收集")
-            return
+            # Keep the loop alive: it retries the database every minute, so a
+            # full disk or a permission fix no longer requires a plugin reload.
+            logger.warning("日报数据库暂不可用，将在后台每分钟重试初始化")
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info(
@@ -196,6 +197,9 @@ class ReportCollector:
         await asyncio.to_thread(self._backfill_from_cache)
         while self._running:
             try:
+                if not self.store.ensure_ready():
+                    await asyncio.sleep(60)
+                    continue
                 await self._tick()
             except asyncio.CancelledError:
                 raise
@@ -241,7 +245,7 @@ class ReportCollector:
             # invisible in the report while the alert fired.
             # statvfs blocks on a hung network mount, so it must not run on
             # the event loop (the card path already used a thread).
-            rows = await asyncio.to_thread(disk_usage, paths)
+            rows = await asyncio.to_thread(disk_usage_bounded, paths)
             percents = [row.percent for row in rows if row.percent is not None]
             disk_pct = max(percents) if percents else None
         except Exception:
@@ -985,17 +989,12 @@ class DailyReporter:
                     self._weekly_pending = None
                     report_day = self._weekly_pending_report_day
                     if report_day and report_day != self._default_report_day():
-                        logger.warning(
-                            "周报重试已跨周，放弃本次重试（避免发送另一份周报）"
+                        # The image retry already keeps the original report
+                        # day; the text retry used to give up here, so a slow
+                        # T2I failure near midnight could not fall back at all.
+                        logger.info(
+                            "周报文字重试仍使用原报告日 %s（跨周不改）", report_day
                         )
-                        self._record(
-                            report_day, False, "weekly send failed (cross-week)"
-                        )
-                        self._weekly_pending_report_day = None
-                        self._weekly_retry_count = 0
-                        self._save_delivery_state()
-                        await asyncio.sleep(60)
-                        continue
                     try:
                         await self._send_weekly_scheduled(report_day)
                     except asyncio.CancelledError:
@@ -1099,9 +1098,9 @@ class DailyReporter:
         if weekly_sections is not None and not weekly_sections:
             logger.warning("周报内容为空（daily_report.weekly_sections=[]），跳过发送")
             return
-        if not self.store.available:
+        if not self.store.available and not self.store.ensure_ready():
             logger.error("日报数据库不可用，跳过本次周报发送")
-            await self._notify_store_unavailable(self._targets())
+            await self._notify_store_unavailable(self._targets("weekly"))
             return
         try:
             view = await asyncio.to_thread(
@@ -1373,7 +1372,7 @@ class DailyReporter:
             self._record(self._default_report_day(), False, "sections empty")
             self._clear_retry()
             return
-        if not self.store.available:
+        if not self.store.available and not self.store.ensure_ready():
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
             logger.error("日报数据库不可用，跳过本次日报发送")
@@ -1485,6 +1484,10 @@ class DailyReporter:
     ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
+        if not self.store.available and not self.store.ensure_ready():
+            # Preview used to build a page of "--" and send it as if it were
+            # a real report; the scheduled path already refuses to.
+            return False, tr(self.config, "report_db_unavailable_preview")
         span = max(1, min(30, int(span_days or 1)))
         prefix = "report" if span == 1 else "weekly"
         source = "report_preview" if span == 1 else "weekly_preview"

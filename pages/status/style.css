@@ -8,7 +8,7 @@
   --panel-soft: #f8fafc;
   --text: #1e293b;
   --muted: #64748b;
-  --faint: #94a3b8;
+  --faint: #5f6f86;
   --line: #e2e8f0;
   --accent: #2563eb;
   --accent-soft: #dbeafe;
@@ -280,17 +280,26 @@ main.is-refreshing::after {
   justify-content: space-between;
   gap: 12px;
   min-height: 30px;
+  /* At 390px the title and the range buttons used to squeeze each other:
+     "资源趋/势" and "24 小/时" both wrapped. */
+  flex-wrap: wrap;
 }
 
 .card-head h2 {
   margin: 0;
   font-size: 15px;
   letter-spacing: 0.2px;
+  white-space: nowrap;
 }
 
 .card-head > span {
   color: var(--faint);
   font-size: 12px;
+}
+
+.segmented button,
+.card-head > button {
+  white-space: nowrap;
 }
 
 .metric-grid {
@@ -417,6 +426,11 @@ main.is-refreshing::after {
 }
 
 .dot.unknown {
+  background: var(--warn);
+}
+
+/* Failed the latest probe but has not reached the alert threshold. */
+.dot.degraded {
   background: var(--warn);
 }
 
@@ -835,6 +849,14 @@ main.is-refreshing::after {
 
   .card {
     padding: 13px 13px;
+  }
+
+  .card-head h2 {
+    flex: 1 1 100%;
+  }
+
+  .card-head > button {
+    margin-left: auto;
   }
 
   .metric-value {

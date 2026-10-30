@@ -36,6 +36,10 @@ class _Bucket:
     flush_task: asyncio.Task | None = None
     send: SendFn | None = None
     retries: int = 0
+    # Called with the batch when a summary is abandoned for good. The caller
+    # then withdraws "alerted" so the user does not receive a recovery notice
+    # for an alert that never reached the chat.
+    on_abandon: Callable[[list[tuple[str, str]]], None] | None = None
 
 
 class AlertAggregator:
@@ -76,6 +80,7 @@ class AlertAggregator:
         text: str,
         send: SendFn,
         kind: str = "default",
+        on_abandon: Callable[[list[tuple[str, str]]], None] | None = None,
     ) -> Any | None:
         """Deliver ``text`` now, or buffer it for the window summary.
 
@@ -83,10 +88,16 @@ class AlertAggregator:
         own send (the first alert of a window, or aggregation disabled);
         returns ``None`` when the item was buffered and will be covered by
         the summary.
+
+        ``on_abandon`` is invoked with the buffered batch if the summary can
+        never be delivered, so the owning rules can stop claiming the user was
+        notified.
         """
 
         key = str(kind or "default")
         bucket = self._bucket(key)
+        if on_abandon is not None:
+            bucket.on_abandon = on_abandon
         if not (self.window_seconds > 0 and time.time() < bucket.until):
             # Claim the window *before* awaiting ``send``. Claiming it after
             # the await meant concurrent alerts (monitor.check_all probes all
@@ -200,6 +211,8 @@ class AlertAggregator:
             logger.warning(
                 "告警汇总缺少发送函数，丢弃 %d 项缓冲（%s）", len(pending), key
             )
+            if bucket.on_abandon is not None:
+                bucket.on_abandon(list(pending))
             return
         lines = [f"⚠️ 告警汇总 · {len(pending)} 项异常", "──────────────"]
         for label, reason in pending[: self.max_items]:
@@ -247,6 +260,8 @@ class AlertAggregator:
 
         if bucket.retries >= 2:
             logger.warning("告警汇总%s，%d 项放弃重试（%s）", why, len(pending), key)
+            if bucket.on_abandon is not None:
+                bucket.on_abandon(list(pending))
             return
         bucket.retries += 1
         bucket.pending[:0] = pending
@@ -272,3 +287,10 @@ class AlertAggregator:
             await asyncio.gather(*tasks, return_exceptions=True)
         for bucket in self._buckets.values():
             bucket.flush_task = None
+            if bucket.pending:
+                # Reload/shutdown: these items were never posted. Let their
+                # rules know so the next recovery is not announced as if the
+                # alert had arrived.
+                if bucket.on_abandon is not None:
+                    bucket.on_abandon(list(bucket.pending))
+                bucket.pending.clear()

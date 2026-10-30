@@ -11,6 +11,8 @@ import sqlite3
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
 try:
     import pwd
@@ -85,7 +87,11 @@ def format_bytes(value: float | None, digits: int = 2) -> str:
         value /= 1024
         idx += 1
     if idx == 0:
-        return f"{value:.0f} {units[idx]}"
+        rounded = round(value)
+        if abs(rounded) >= 1024 and len(units) > 1:
+            # 1023.6 used to print as "1024 B" -- round first, then promote.
+            return f"{rounded / 1024:.{digits}f} {units[1]}"
+        return f"{rounded:.0f} {units[idx]}"
     return f"{value:.{digits}f} {units[idx]}"
 
 
@@ -299,6 +305,34 @@ def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
                 )
             )
     return ret
+
+
+# statvfs on a hung NFS/CIFS mount blocks forever. A dedicated pool keeps such
+# a worker from occupying the default executor that every other
+# ``asyncio.to_thread`` call shares, and the caller gives up after a timeout
+# instead of freezing the status card, the daily image and the dashboard.
+_DISK_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="statuscard-disk")
+
+
+def disk_usage_bounded(
+    paths: list[str] | None = None, timeout: float = 8.0
+) -> list[DiskUsage]:
+    """Read disk usage without letting a hung mount block forever."""
+
+    targets = [str(path) for path in (paths or _default_disk_paths())]
+    future = _DISK_POOL.submit(disk_usage, targets)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeout:
+        logger.warning(
+            "磁盘信息读取超时（%s），本次跳过；请检查挂载点是否可达", targets
+        )
+        return [
+            DiskUsage(
+                name=name, used=None, total=None, percent=None, exception="读取超时"
+            )
+            for name in targets
+        ]
 
 
 @dataclass
@@ -1541,10 +1575,23 @@ def build_network_chart(
 
     points: list[tuple[float, float, float]] = []
     if isinstance(history, list):
+        previous_ts: float | None = None
         for item in history[-60:]:
             try:
                 if isinstance(item, (list, tuple)) and len(item) >= 3:
-                    points.append((float(item[0]), float(item[1]), float(item[2])))
+                    ts = float(item[0])
+                    up = float(item[1])
+                    down = float(item[2])
+                    if not (
+                        math.isfinite(ts) and math.isfinite(up) and math.isfinite(down)
+                    ):
+                        raise ValueError("non-finite sample")
+                    if previous_ts is not None and ts <= previous_ts:
+                        # A clock step back used to leave an earlier point at
+                        # the end of the series, collapsing the time axis.
+                        continue
+                    previous_ts = ts
+                    points.append((ts, up, down))
             except Exception as exc:
                 logger.debug("跳过无效的网络采样点: %s", exc)
                 continue
@@ -1647,10 +1694,18 @@ def build_network_chart(
     down_area = down_areas[0] if down_areas else ""
 
     y_labels = []
-    for i in range(5):
-        value = max_value * i / 4
-        y = top + plot_h * (1 - i / 4)
-        y_labels.append({"y": round(y, 1), "text": format_bytes(value, 1)})
+    if max_value <= 1.0:
+        # An idle window (all zeros) used to print five labels that collapsed
+        # to "0 B / 0 B / 0 B / 1 B / 1 B"; two ticks are honest.
+        y_labels = [
+            {"y": round(top + plot_h, 1), "text": format_bytes(0, 1)},
+            {"y": float(top), "text": format_bytes(max_value, 1)},
+        ]
+    else:
+        for i in range(5):
+            value = max_value * i / 4
+            y = top + plot_h * (1 - i / 4)
+            y_labels.append({"y": round(y, 1), "text": format_bytes(value, 1)})
 
     x_labels = []
     for i in range(5):
@@ -1878,9 +1933,9 @@ async def collect_all(
         # card. Keep all local system calls in one worker-thread pass.
         memory = memory_stat()
         swap_value = swap_stat()
-        usage = disk_usage([str(x) for x in disk_paths])
+        usage = disk_usage_bounded([str(x) for x in disk_paths])
         if usage and all(item.exception for item in usage):
-            usage = disk_usage(_default_disk_paths())
+            usage = disk_usage_bounded(_default_disk_paths())
         interface = _pick_network_interface(state)
         counters = None
         try:

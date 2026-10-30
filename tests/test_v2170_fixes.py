@@ -184,9 +184,11 @@ def test_audit_still_reports_missing_targets_without_rules() -> None:
     assert "daily_summary_no_targets" in codes
 
 
-def test_verify_targets_ignores_disabled_rules_and_legacy_lists(
-    monkeypatch,
-) -> None:
+def test_verify_targets_falls_back_per_kind(monkeypatch) -> None:
+    """Only the kinds a rule covers use the rule; the rest keep their legacy
+    target, exactly like the real send path. The old code skipped every
+    legacy target as soon as one rule existed."""
+
     config = {
         "alerts": {"targets": ["default:GroupMessage:333"], "platform_id": "default"},
         "monitors": {"targets": ["default:GroupMessage:444"]},
@@ -211,7 +213,14 @@ def test_verify_targets_ignores_disabled_rules_and_legacy_lists(
     monkeypatch.setattr(page_api, "_query_value", lambda key, default=None: "targets")
     asyncio.run(api.verify())
     sent = plugin.texts[-1][0]
-    assert sent == ["default:GroupMessage:111"]
+    assert sent[0] == "default:GroupMessage:111"
+    assert set(sent) == {
+        "default:GroupMessage:111",
+        "default:GroupMessage:333",
+        "default:GroupMessage:444",
+        "default:GroupMessage:555",
+    }
+    assert "default:GroupMessage:222" not in sent
 
 
 def test_network_redaction_hides_sysinfo_interface() -> None:
@@ -433,7 +442,7 @@ def test_weekly_resource_trend_includes_report_day() -> None:
 def test_weekly_guard_uses_weekly_sections() -> None:
     reporter = object.__new__(DailyReporter)
     reporter.config = {"daily_report": {"sections": [], "weekly_sections": ["token"]}}
-    reporter.store = SimpleNamespace(available=False)
+    reporter.store = SimpleNamespace(available=False, ensure_ready=lambda: False)
     called: list[int] = []
 
     async def fake_notify(targets):
@@ -490,7 +499,11 @@ def test_sampler_prime_survives_counter_failure(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr(sampler_module.psutil, "net_io_counters", boom)
     sampler = Sampler(StateStore(tmp_path / "state.json"))
     sampler._prime()  # must not raise
-    assert sampler.state.get("net", {}).get("last_sent") == 0
+    # No zero baseline is invented when the first read fails: the next
+    # successful sample would otherwise book every byte since boot as one
+    # interval (a fake multi-GB/s spike and a polluted month counter).
+    assert "last_sent" not in sampler.state.get("net", {})
+    assert "last_recv" not in sampler.state.get("net", {})
 
 
 def test_local_image_skips_onebot_direct(monkeypatch, tmp_path: Path) -> None:

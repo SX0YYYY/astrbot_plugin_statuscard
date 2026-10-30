@@ -165,8 +165,13 @@ class Sampler:
             counters = None
         with self.state.section("net") as net:
             net.setdefault("last_ts", now)
-            net.setdefault("last_sent", int(counters.bytes_sent) if counters else 0)
-            net.setdefault("last_recv", int(counters.bytes_recv) if counters else 0)
+            # Do not invent a zero baseline when the first read failed: the
+            # next successful sample would then book every byte since boot as
+            # one interval (a 20 GB/s spike that also polluted the month
+            # counter and flattened the chart for an hour).
+            if counters is not None:
+                net.setdefault("last_sent", int(counters.bytes_sent))
+                net.setdefault("last_recv", int(counters.bytes_recv))
             net.setdefault("month", now_in_timezone(self.config).strftime("%Y-%m"))
             net.setdefault("month_up", 0)
             net.setdefault("month_down", 0)
@@ -287,6 +292,9 @@ class Sampler:
             last_ts = float(net.get("last_ts") or now)
             last_sent = int(net.get("last_sent") or 0)
             last_recv = int(net.get("last_recv") or 0)
+            # No baseline (first read failed, or a legacy state written with
+            # the old zero default): establish one now, book no traffic.
+            baseline_missing = "last_sent" not in net or last_sent <= 0
 
             # A wall-clock step back (NTP correction) would make dt negative
             # and the rate meaningless; reset the baseline and book no
@@ -305,12 +313,13 @@ class Sampler:
             # it to the month accumulator would book hours of traffic to the
             # moment of restart (or to the new month, right after a rollover).
             stale = (now - last_ts) > max(300.0, self.interval_seconds * 5)
-            if switched:
-                # The counters moved to a different scale; this round only
-                # establishes the new baseline.
+            if switched or baseline_missing:
+                # The counters moved to a different scale, or there is no
+                # baseline yet; this round only establishes it.
                 sent_delta = 0
                 recv_delta = 0
                 stale = False
+                clock_back = False
             up_rate = 0.0 if stale else sent_delta / dt
             down_rate = 0.0 if stale else recv_delta / dt
 
@@ -328,8 +337,13 @@ class Sampler:
                 history = net.get("history")
                 if not isinstance(history, list):
                     history = []
-                history.append([now, round(up_rate, 1), round(down_rate, 1)])
-                net["history"] = history[-self.history_size :]
+                if not clock_back and not baseline_missing:
+                    # A point stamped earlier than the previous one makes the
+                    # chart's time axis collapse (all x values fly off-canvas
+                    # for an hour). The baseline was reset above; skip the
+                    # out-of-order point instead.
+                    history.append([now, round(up_rate, 1), round(down_rate, 1)])
+                    net["history"] = history[-self.history_size :]
 
             net["last_ts"] = now
             net["last_sent"] = int(counters.bytes_sent)
