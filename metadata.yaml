@@ -2,7 +2,7 @@ name: astrbot_plugin_statuscard
 display_name: 服务器状态卡
 desc: 把服务器的 CPU、内存、磁盘、网络和进程做成一张状态图发到 QQ；内置 Web 可视化统计面板（资源/网络/服务监测/异常/日报，支持导出 CSV 与立即验证），并支持资源与掉线告警、LLM 服务质量统计与连续失败告警、通知中心、每日定时状态图、趋势日报、每周周报和服务可用性监测。
 short_desc: 状态图 + Web 统计面板 + 告警 + LLM 服务质量 + 定时状态图 + 日报/周报 + 服务监测
-version: 2.20.0
+version: 2.20.1
 author: 烬辞
 repo: "https://github.com/SX0YYYY/astrbot_plugin_statuscard"
 support_platforms:

@@ -557,6 +557,12 @@ class PageApi:
                     state = "uncertain"
                 else:
                     state = "failed"
+                # The receipt error can quote the full target (for example
+                # "无法解析目标: default:GroupMessage:123"), which defeated the
+                # masked "target" field right above it.
+                error_text = str(receipt.get("error") or "")
+                if target:
+                    error_text = error_text.replace(target, _mask_umo(target))
                 per_target.append(
                     {
                         # Keep enough to tell targets apart without echoing
@@ -565,7 +571,7 @@ class PageApi:
                         "state": state,
                         "retcode": receipt.get("retcode"),
                         "message_id": receipt.get("message_id"),
-                        "error": receipt.get("error") or "",
+                        "error": self._mask_host_text(error_text)[:160],
                     }
                 )
             return jsonify({"ok": True, "kind": kind, "results": per_target})
@@ -1040,10 +1046,17 @@ class PageApi:
         # page_redact was turned on, or old sections after the operator
         # changed daily_report.sections.
         sections_cfg = cfg_get(plugin.config, "daily_report.sections", None)
+        # The page used to hardcode 7 days while the pushed report honours
+        # daily_report.history_days (7-30); the chart and the pushed image
+        # then disagreed after the operator changed the setting.
+        history_days = max(
+            7, min(30, cfg_int(plugin.config, "daily_report.history_days", 7))
+        )
         cache_key = (
             now_in_timezone(plugin.config).date().isoformat(),
             tuple(sorted(self._redact())),
             repr(sections_cfg),
+            history_days,
         )
         cached = self._reports_cache
         if (
@@ -1074,6 +1087,9 @@ class PageApi:
     ):
         view: dict[str, Any] = {}
         try:
+            history_days = max(
+                7, min(30, cfg_int(self.plugin.config, "daily_report.history_days", 7))
+            )
             builder = DailyReportBuilder(
                 self.plugin.report_store,
                 self.plugin.config,
@@ -1083,7 +1099,7 @@ class PageApi:
             view = await asyncio.to_thread(
                 builder.build,
                 day=None,
-                history_days=7,
+                history_days=history_days,
                 sections=sections,
                 meta={
                     "host": self._host(),

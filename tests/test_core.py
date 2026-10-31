@@ -134,7 +134,18 @@ def test_sampler_resets_month_traffic_on_rollover(tmp_path: Path, monkeypatch) -
         lambda _config: datetime(2026, 10, 1, 0, 0, 30, tzinfo=TZINFO),
     )
     counters = types.SimpleNamespace(bytes_sent=1_050_000, bytes_recv=2_100_000)
-    monkeypatch.setattr(sampler_module.psutil, "net_io_counters", lambda: counters)
+    # Provide one real interface so the sampler takes the per-interface path;
+    # the all-interface fallback deliberately skips accounting (v2.20.1).
+    monkeypatch.setattr(
+        sampler_module.psutil,
+        "net_io_counters",
+        lambda pernic=False: {"eth0": counters} if pernic else counters,
+    )
+    monkeypatch.setattr(
+        sampler_module.psutil,
+        "net_if_stats",
+        lambda: {"eth0": types.SimpleNamespace(isup=True)},
+    )
 
     sampler._sample_network(now)
 
@@ -763,7 +774,7 @@ def test_direct_send_success_does_not_fall_back() -> None:
     assert receipts["default:GroupMessage:123456"].message_id == 777
 
 
-def test_direct_send_protocol_error_is_not_resent() -> None:
+def test_direct_send_protocol_error_falls_back_to_framework() -> None:
     class _FailingClient:
         async def call_action(self, action: str, **kwargs: object) -> object:
             class _ActionFailed(Exception):
@@ -779,9 +790,11 @@ def test_direct_send_protocol_error_is_not_resent() -> None:
 
     harness = _SenderHarness(_FailingClient())
     ok, receipts = asyncio.run(harness.run(["default:GroupMessage:123456"]))
-    assert ok is False
-    # The message may already be in the chat, so it must not be sent again.
-    assert harness.fallback_calls == 0
+    # status=failed proves nothing was posted, so the framework path is a
+    # safe retry (v2.20.1). The old behaviour silently dropped the message.
+    assert ok is True
+    assert harness.fallback_calls == 1
+    assert receipts["default:GroupMessage:123456"].rejected is True
     assert receipts["default:GroupMessage:123456"].retcode == 100
 
 

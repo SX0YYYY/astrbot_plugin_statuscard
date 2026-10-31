@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.20.0-blue)
+![Version](https://img.shields.io/badge/version-2.20.1-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -14,9 +14,9 @@
 >
 > **默认就能用。** 安装并重载插件后，管理员发送 `查看状态` 即可出图；头像默认用 QQ 头像，背景默认用内置背景，不需要先配置任何东西。
 
-![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.png)
+![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.jpg)
 
-*示例图为线上实拍后脱敏（主机名与群号已替换）；实际卡片会显示你的真实数据。*
+*示例图为线上实拍后按脱敏配置生成（主机名与进程名显示「已隐藏」，QQ 统计已隐藏）；实际卡片会显示你的真实数据。背景为内置默认背景，你可以换成自己的图片。*
 
 > 如果这个插件对你有帮助，欢迎在 GitHub 点个 Star 支持一下——这是对维护者最直接的鼓励。
 
@@ -75,15 +75,15 @@
 
 ## 效果预览
 
-![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.png)
+![状态卡示例](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/statuscard-example.jpg)
 
-示例图为线上实拍后脱敏（主机名与群号已替换）；实际卡片会显示你的真实数据。
+示例图为线上实拍后按脱敏配置生成（主机名与进程名显示「已隐藏」，QQ 统计已隐藏）；实际卡片会显示你的真实数据。背景为内置默认背景，你可以换成自己的图片。
 
 ## 看板预览
 
 ![Web 看板概览](https://raw.githubusercontent.com/SX0YYYY/astrbot_plugin_statuscard/main/docs/dashboard-overview.png)
 
-AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM 服务质量迷你卡与「立即验证」卡片）、历史趋势、异常事件、日报摘要四个标签，历史趋势可一键导出 CSV；页面文案跟随 WebUI 语言，主题跟随明暗模式。图为线上实拍（主机名与群号已脱敏），界面以实际安装版本为准。
+AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM 服务质量迷你卡，底部为「立即验证」入口）、历史趋势、异常事件、日报摘要四个标签，历史趋势可一键导出 CSV；页面文案跟随 WebUI 语言，主题跟随明暗模式。图为线上实拍（主机名已脱敏），界面以实际安装版本为准。
 
 ## 平台支持
 

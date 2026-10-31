@@ -53,7 +53,10 @@ def test_extract_receipt_failure_keeps_reason() -> None:
     assert receipt.ok is False
     assert receipt.retcode == 100
     assert "group not found" in receipt.error
-    assert receipt.attempted is True
+    # status=failed means OneBot refused the action: nothing was posted, so
+    # the delivery layer may safely retry (v2.20.1).
+    assert receipt.attempted is False
+    assert receipt.rejected is True
 
 
 def test_receipt_from_exception_reads_action_failed() -> None:
@@ -69,7 +72,8 @@ def test_receipt_from_exception_reads_action_failed() -> None:
     assert receipt is not None
     assert receipt.ok is False
     assert receipt.retcode == 100
-    assert receipt.attempted is True
+    assert receipt.attempted is False
+    assert receipt.rejected is True
 
 
 def test_receipt_from_exception_ignores_transport_error() -> None:
@@ -126,7 +130,7 @@ def test_send_direct_with_aiocqhttp_unwrapped_data() -> None:
     assert receipt.attempted is True
 
 
-def test_send_direct_marks_attempted_on_protocol_error() -> None:
+def test_send_direct_marks_rejected_on_protocol_error() -> None:
     class _FailingClient:
         async def call_action(self, action: str, **kwargs: object) -> object:
             class _ActionFailed(Exception):
@@ -149,7 +153,8 @@ def test_send_direct_marks_attempted_on_protocol_error() -> None:
     )
     assert receipt.ok is False
     assert receipt.retcode == 100
-    assert receipt.attempted is True
+    assert receipt.attempted is False
+    assert receipt.rejected is True
     assert "group not found" in receipt.error
 
 

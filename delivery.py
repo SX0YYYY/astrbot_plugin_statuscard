@@ -60,6 +60,8 @@ class DeliveryResult:
     ok_targets: list[str] = field(default_factory=list)
     failed_targets: list[str] = field(default_factory=list)
     uncertain_targets: list[str] = field(default_factory=list)
+    # OneBot answered status=failed: definitely not delivered, safe to retry.
+    rejected_targets: list[str] = field(default_factory=list)
     receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     retcodes: dict[str, int | None] = field(default_factory=dict)
 
@@ -93,6 +95,7 @@ class DeliveryResult:
             "ok_targets": list(self.ok_targets),
             "failed_targets": list(self.failed_targets),
             "uncertain_targets": list(self.uncertain_targets),
+            "rejected_targets": list(self.rejected_targets),
             "receipts": dict(self.receipts),
             "retcodes": dict(self.retcodes),
         }
@@ -165,9 +168,21 @@ class DeliveryService:
                 if receipt.ok:
                     result.ok_targets.append(target)
                     continue
-                if receipt.attempted:
-                    # OneBot answered with an error: the message may already
-                    # be in the chat, so re-sending would duplicate it.
+                if receipt.rejected:
+                    # OneBot refused the action outright (status=failed), so
+                    # nothing reached the chat. Try the framework path: it
+                    # may use a different send route, and a retry is safe.
+                    logger.warning(
+                        "目标 %s 的 OneBot 直发被明确拒绝（%s），尝试框架发送",
+                        target,
+                        receipt.error or "未知错误",
+                    )
+                    result.failed_targets.append(target)
+                    result.rejected_targets.append(target)
+                elif receipt.attempted:
+                    # OneBot answered with an error without proving the send
+                    # failed: the message may already be in the chat, so
+                    # re-sending would duplicate it.
                     logger.warning(
                         "目标 %s 的 OneBot 直发返回错误（%s），不再重发以免重复",
                         target,
@@ -179,8 +194,15 @@ class DeliveryService:
             sent, uncertain = await self._send_via_astrbot(target, payload)
             if sent:
                 result.ok_targets.append(target)
+                # The framework path delivered what OneBot rejected; the
+                # target is no longer failed/rejected.
+                if target in result.failed_targets:
+                    result.failed_targets.remove(target)
+                if target in result.rejected_targets:
+                    result.rejected_targets.remove(target)
             else:
-                result.failed_targets.append(target)
+                if target not in result.failed_targets:
+                    result.failed_targets.append(target)
                 if uncertain:
                     result.uncertain_targets.append(target)
         result.ok = bool(result.ok_targets)
@@ -307,7 +329,7 @@ class DeliveryService:
             # "verify" click used to overwrite the single slot, so the
             # diagnostics command showed a successful verify while the real
             # alert had failed.
-            if not str(source).startswith("verify"):
+            if not str(source).startswith("verify") and source != "test":
                 self.state.set("delivery_real", payload)
             self.state.save()
         except Exception as exc:

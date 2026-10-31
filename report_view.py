@@ -565,11 +565,20 @@ class DailyReportBuilder:
         def hourly_values(key: str) -> list[float | None]:
             out: list[float | None] = []
             for label in hour_labels:
-                values = [
-                    float(item[key])
-                    for item in buckets[label]
-                    if item.get(key) is not None
-                ]
+                values: list[float] = []
+                for item in buckets[label]:
+                    raw = item.get(key)
+                    if raw is None:
+                        continue
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        # A single corrupt row (hand-edited DB or a bad cache
+                        # backfill) must not fail the whole report build and
+                        # leave the user without a daily report.
+                        continue
+                    if math.isfinite(value):
+                        values.append(value)
                 out.append(sum(values) / len(values) if values else None)
             return out
 
@@ -823,9 +832,15 @@ class DailyReportBuilder:
                     # written back). It is complete, so it must not inflate
                     # "未恢复 N 项" while showing a finished duration.
                     episode_open.discard(key)
-                    duration_text = format_duration(
-                        int(resolved_ts) - int(event.get("ts") or 0)
-                    )
+                    resolved_i = int(resolved_ts)
+                    started_i = int(event.get("ts") or 0)
+                    if resolved_i - started_i > (span + 1) * 86400:
+                        # close_all wrote the same resolved_ts onto every old
+                        # open episode of a rule; pairing the newest alert
+                        # with it turned a 5-minute outage into "5 days".
+                        duration_text = "跨窗口关闭"
+                    else:
+                        duration_text = format_duration(resolved_i - started_i)
                 else:
                     episode_open.add(key)
                     duration_text = "进行中"
@@ -890,11 +905,13 @@ class DailyReportBuilder:
                     "duration": "进行中",
                 }
             )
+        raw_total = len(items)
         if unresolved_items:
             # Keep the unresolved rows visible: prepending them after the
             # 20-row cut used to hide today's real events once 20 stale rows
-            # had accumulated.
-            head = items[: max(0, 20 - len(unresolved_items))]
+            # had accumulated. Keep the newest in-window rows alongside them.
+            room = max(0, 20 - len(unresolved_items))
+            head = items[-room:] if room else []
             items = unresolved_items + head
         return {
             "available": bool(items),
@@ -908,8 +925,10 @@ class DailyReportBuilder:
             # shown as "进行中" but were not counted here, so the headline said
             # "未恢复 0 项" right above a row that said otherwise.
             "unresolved": len(unresolved_items) + len(episode_open - set(stale.keys())),
-            "total": len(items),
-            "items": items[:20],
+            # Count before the display cut: with unresolved rows prepended the
+            # old total became 20 and the "另有 N 条未列出" disclosure vanished.
+            "total": raw_total + len(unresolved_items),
+            "items": items[-20:],
             "normal": {
                 "monitors": self._monitor_count(),
                 "resource_rules": RRULE_COUNT,
@@ -1162,7 +1181,7 @@ class DailyReportBuilder:
                     """
                     SELECT substr(timestamp, 1, 10) AS day, SUM(count)
                     FROM platform_stats
-                    WHERE platform_id = 'aiocqhttp'
+                    WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
                       AND timestamp >= ? AND timestamp < ?
                     GROUP BY day
                     """,
@@ -1180,7 +1199,7 @@ class DailyReportBuilder:
                 raw = connection.execute(
                     """
                     SELECT timestamp, count FROM platform_stats
-                    WHERE platform_id = 'aiocqhttp'
+                    WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
                       AND timestamp >= ? AND timestamp < ?
                     """,
                     (
@@ -1199,15 +1218,25 @@ class DailyReportBuilder:
                         mapping[key] = mapping.get(key, 0) + int(count or 0)
             min_row = connection.execute(
                 """
-                SELECT MIN(substr(timestamp, 1, 10))
-                FROM platform_stats WHERE platform_id = 'aiocqhttp'
+                SELECT MIN(timestamp)
+                FROM platform_stats
+                WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
                 """
             ).fetchone()
         except Exception:
             return {}, None, False
         finally:
             connection.close()
-        min_day = str(min_row[0]) if min_row and min_row[0] else None
+        min_day = None
+        if min_row and min_row[0]:
+            # The stored timestamp is the server's local wall clock. Comparing
+            # its date text with a display-timezone day marked the first chart
+            # column as "no data" whenever the two offsets differed.
+            try:
+                stamp = datetime.strptime(str(min_row[0])[:19], "%Y-%m-%d %H:%M:%S")
+                min_day = stamp.astimezone(self.tz).date().isoformat()
+            except (TypeError, ValueError):
+                min_day = str(min_row[0])[:10]
         return mapping, min_day, True
 
     # ------------------------------------------------------------------
@@ -1927,4 +1956,4 @@ def build_report_text(view: dict[str, Any]) -> str:
     lines.append(
         "窗口: {}（{}）".format(view.get("window") or "", view.get("timezone") or "")
     )
-    return "\n".join(lines)[:1500]
+    return "\n".join(lines)[:2000]

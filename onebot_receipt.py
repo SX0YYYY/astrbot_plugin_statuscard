@@ -17,6 +17,11 @@ class OnebotReceipt:
     ``attempted`` tells whether the request actually reached OneBot. When it
     is ``True`` the message may already be in the chat even though ``ok`` is
     ``False``, so the caller must not re-send it.
+
+    ``rejected`` marks the stronger case where OneBot answered with
+    ``status: failed``: the action was refused outright and nothing reached
+    the chat, so retrying (or falling back to the framework path) cannot
+    produce a duplicate message.
     """
 
     ok: bool = False
@@ -25,6 +30,7 @@ class OnebotReceipt:
     error: str = ""
     skipped: str = ""
     attempted: bool = False
+    rejected: bool = False
 
 
 @dataclass
@@ -87,7 +93,30 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
     # it as a hard failure made every send on an async implementation log a
     # warning and count as uncertain; keep the explicit failed status as the
     # only hard-failure path (v2.20.0).
-    if status == "failed" or (retcode_int is not None and retcode_int not in (0, 1)):
+    if status == "failed":
+        # The action was refused before anything was posted (wrong group,
+        # muted bot, media upload failure). ``attempted=False`` tells the
+        # delivery layer that a retry cannot duplicate the message; the old
+        # code marked this ``attempted=True`` and every such fault silently
+        # disappeared from the alert path (v2.20.1).
+        error = str(
+            payload.get("message")
+            or payload.get("wording")
+            or payload.get("error")
+            or f"retcode={retcode_int}"
+        )
+        return OnebotReceipt(
+            ok=False,
+            retcode=retcode_int,
+            message_id=message_id,
+            error=error,
+            attempted=False,
+            rejected=True,
+        )
+    if retcode_int is not None and retcode_int not in (0, 1):
+        # A non-zero retcode without status=failed may still mean the request
+        # reached the implementation (some adapters quote business errors on
+        # an otherwise accepted action), so keep it in the uncertain bucket.
         error = str(
             payload.get("message")
             or payload.get("wording")
@@ -140,7 +169,10 @@ def receipt_from_exception(exc: BaseException) -> OnebotReceipt | None:
     ):
         receipt = extract_receipt(raw)
         if not receipt.ok:
-            receipt.attempted = True
+            # Keep ``attempted=False`` for an explicit status=failed: the
+            # message provably never left the plugin and may be retried.
+            if not receipt.rejected:
+                receipt.attempted = True
             return receipt
     text = str(exc)
     if "ActionFailed" in type(exc).__name__ or "action failed" in text.lower():

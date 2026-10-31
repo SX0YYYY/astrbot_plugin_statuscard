@@ -291,7 +291,7 @@ class AlertAggregator:
             lines.append(f"… 另有 {extra} 项未列出")
         lines.append(
             f"以上 {total} 项在 {self.window_seconds} 秒聚合窗口内集中出现，"
-            "已合并推送；各项均已单独记录，恢复时仍会照常通知。"
+            "已合并推送；各项均已单独记录，恢复时按正常流程通知。"
         )
         try:
             result = await sender("\n".join(lines))

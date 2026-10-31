@@ -323,6 +323,7 @@ def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
 # unstarted jobs are cancelled on the next call so a pool full of stuck
 # workers cannot pile up an ever-growing backlog.
 _DISK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="statuscard-disk")
+_DISK_WARN_AT = 0.0
 
 
 def disk_usage_bounded(
@@ -363,10 +364,15 @@ def disk_usage_bounded(
                 exception="读取超时",
             )
     if any(r.exception for r in results.values()):
-        logger.warning(
-            "部分磁盘挂载点读取超时或失败（%s），请检查挂载点是否可达",
-            ", ".join(name for name, r in results.items() if r.exception),
-        )
+        # A hung mount is polled on every card/report sample; warning every
+        # round filled the journal. Once per 10 minutes is enough.
+        global _DISK_WARN_AT
+        if time.time() - _DISK_WARN_AT > 600:
+            _DISK_WARN_AT = time.time()
+            logger.warning(
+                "部分磁盘挂载点读取超时或失败（%s），请检查挂载点是否可达",
+                ", ".join(name for name, r in results.items() if r.exception),
+            )
     return [results[name] for name in targets]
 
 
@@ -588,6 +594,12 @@ async def connection_test(
             return _copy_conn_tests(cached[1])
         results = await _probe_websites(sites)
         _WEBSITE_CACHE[key] = (time.monotonic(), results)
+        if len(_WEBSITE_CACHE) > 128:
+            # Editing the target list repeatedly accumulates one entry per
+            # (url, timeout, name) combination; drop the oldest map wholesale
+            # once it grows past anything a real config can use.
+            _WEBSITE_CACHE.clear()
+            _WEBSITE_CACHE[key] = (time.monotonic(), results)
         return _copy_conn_tests(results)
 
 
@@ -766,8 +778,16 @@ def _pick_network_interface(state: Any = None) -> str:
             saved = str((state.get("net", {}) or {}).get("interface") or "")
             if saved:
                 # The sampler already decided which interface the rates come
-                # from; the card must label and total that same one.
-                return saved
+                # from; the card must label and total that same one. Only
+                # trust it while the interface still exists and is up -- a
+                # vanished NIC made the card read the all-interface total
+                # while the sampler skipped, so the two views disagreed.
+                try:
+                    stats = psutil.net_if_stats()
+                    if saved in stats and stats[saved].isup:
+                        return saved
+                except Exception:
+                    return saved
         except Exception:
             pass
     try:
@@ -1275,7 +1295,15 @@ async def collect_bot_info(
                 groups = _normalize_list(await _call_action(client, "get_group_list"))
                 if groups is not None:
                     gcount = len(groups)
-                    mcount = sum(int(g.get("member_count") or 0) for g in groups)
+                    # Missing member_count used to read as 0, so a platform
+                    # that omits the field showed "0 群员" instead of "--".
+                    missing_members = [
+                        g.get("member_count") for g in groups if "member_count" not in g
+                    ]
+                    if groups and len(missing_members) == len(groups):
+                        mcount = None
+                    else:
+                        mcount = sum(int(g.get("member_count") or 0) for g in groups)
                     data["groups"] = gcount
                     data["members"] = mcount
                     store("groups", gcount)
@@ -2020,8 +2048,9 @@ async def collect_all(
         memory = memory_stat()
         swap_value = swap_stat()
         usage = disk_usage_bounded([str(x) for x in disk_paths])
-        if usage and all(item.exception for item in usage):
-            usage = disk_usage_bounded(_default_disk_paths())
+        # Do not replace unreadable mounts with "/": the card then showed a
+        # healthy root while the configured data disk had vanished. Keeping
+        # the failed row visible (with "--") tells the operator what broke.
         interface = _pick_network_interface(state)
         counters = None
         try:

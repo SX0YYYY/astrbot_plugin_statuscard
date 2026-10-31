@@ -61,7 +61,7 @@
         "table_model": "Model",
         "table_tokens": "Tokens",
         "table_share": "Share",
-        "table_date": "Date",
+        "table_date": "Data day",
         "table_time": "Time",
         "table_result": "Result",
         "table_method": "Method",

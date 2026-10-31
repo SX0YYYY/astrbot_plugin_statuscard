@@ -495,6 +495,17 @@ class DailyReporter:
         # it the very first weekly run was lost silently whenever the
         # process died inside the Sunday window (v2.20.0).
         self._weekly_attempt_week: str | None = None
+        # A week whose weekly report was given up must not restart the
+        # 10/20/30-minute retry cycle: the catch-up check only looked at
+        # last_sent, so every abandon immediately scheduled another attempt
+        # and the user got a "stopped retrying" notice every ~40 minutes.
+        self._weekly_given_up_week: str | None = None
+        # Empty targets / empty sections used to re-enter the send path every
+        # second (3600 journal lines and hundreds of report_runs per hour).
+        # A short in-memory pause keeps the loop quiet until the operator
+        # fixes the config (a reload clears it).
+        self._weekly_pause_until = 0.0
+        self._weekly_empty_recorded_week: str | None = None
         # Render retries: a short T2I outage should not turn the report into
         # text. The attempts and the next retry time survive reloads too.
         # The report day is pinned as well: a retry that crosses midnight must
@@ -540,6 +551,7 @@ class DailyReporter:
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
         self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
+        self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = saved.get("pending_retry_day") or None
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
@@ -604,6 +616,7 @@ class DailyReporter:
                     "pending_retry_day": self._pending_retry_day,
                     "weekly_last_sent_week": self._weekly_last_sent_week,
                     "weekly_attempt_week": self._weekly_attempt_week,
+                    "weekly_given_up_week": self._weekly_given_up_week,
                     "weekly_pending": self._weekly_pending,
                     "weekly_pending_report_day": self._weekly_pending_report_day,
                     "weekly_retry_count": self._weekly_retry_count,
@@ -1085,6 +1098,9 @@ class DailyReporter:
             self._weekly_pending = None
             self._weekly_pending_report_day = None
             self._weekly_retry_count = 0
+            # Remember the week that was abandoned: without it the catch-up
+            # check instantly queued another attempt after the give-up notice.
+            self._weekly_given_up_week = self._week_key(self._today())
             self._save_delivery_state()
             logger.warning("周报连续发送失败 3 次，停止重试")
             return False
@@ -1106,7 +1122,13 @@ class DailyReporter:
         weekly_sections = self._weekly_sections()
         if weekly_sections is not None and not weekly_sections:
             logger.warning("周报内容为空（daily_report.weekly_sections=[]），跳过发送")
-            self._record(self._default_report_day(), False, "weekly sections empty")
+            week_key = self._week_key(self._today())
+            if self._weekly_empty_recorded_week != week_key:
+                # Record the misconfiguration once per week, not once per
+                # second (the loop retried immediately after the early return).
+                self._weekly_empty_recorded_week = week_key
+                self._record(self._default_report_day(), False, "weekly sections empty")
+            self._weekly_pause_until = time.time() + 600
             self._clear_retry()
             return
         if not self.store.available and not self.store.ensure_ready():
@@ -1139,6 +1161,7 @@ class DailyReporter:
             # the three-retry cycle only burned report_runs rows.
             logger.warning("周报推送目标为空，跳过发送（请先在配置里填写推送目标）")
             self._weekly_retry_count = 0
+            self._weekly_pause_until = time.time() + 600
             self._save_delivery_state()
             return
         day = report_day
@@ -1166,6 +1189,7 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     self._weekly_last_sent_week = week_key
+                    self._weekly_given_up_week = None
                     self._record(
                         day,
                         True,
@@ -1187,6 +1211,7 @@ class DailyReporter:
                         "周报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._weekly_last_sent_week = week_key
+                    self._weekly_given_up_week = None
                     self._record(day, True, "weekly-image unconfirmed")
                     self._weekly_pending = None
                     self._weekly_pending_report_day = None
@@ -1386,6 +1411,10 @@ class DailyReporter:
         not deliver last week's report in the middle of a new week.
         """
 
+        if time.time() < float(getattr(self, "_weekly_pause_until", 0.0) or 0.0):
+            # A config problem (empty target/sections) paused the loop for a
+            # few minutes instead of re-entering the send path every second.
+            return False
         if not self._weekly_last_sent_week and not self._weekly_attempt_week:
             # Neither marker means a genuine first install/upgrade: sending
             # then could duplicate a report the previous process already
@@ -1396,7 +1425,12 @@ class DailyReporter:
         if now.weekday() != 6:
             return False
         report_day = (now - timedelta(days=1)).date().isoformat()
-        return self._weekly_last_sent_week != self._week_key(report_day)
+        week_key = self._week_key(report_day)
+        if getattr(self, "_weekly_given_up_week", None) == week_key:
+            # Already gave up after three failed attempts this week; retrying
+            # again would produce the same notice every ~40 minutes.
+            return False
+        return self._weekly_last_sent_week != week_key
 
     async def _send_scheduled(self, day: str | None = None) -> None:
         self._last_attempt_day = self._today()
@@ -1482,7 +1516,10 @@ class DailyReporter:
                         "日报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._last_sent_day = day
-                    self._record(day, True, "image unconfirmed")
+                    # Not a confirmed delivery: record it as failed so the
+                    # dashboard's send history does not show a clean success
+                    # (the detail still says "unconfirmed").
+                    self._record(day, False, "image unconfirmed")
                     self._image_retry_attempts = 0
                     self._pending_image_retry = None
                     self._clear_retry()
@@ -1508,7 +1545,7 @@ class DailyReporter:
         elif _uncertain(result):
             logger.warning("日报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._last_sent_day = day
-            self._record(day, True, "text unconfirmed")
+            self._record(day, False, "text unconfirmed")
             self._image_retry_attempts = 0
             self._pending_image_retry = None
             self._clear_retry()

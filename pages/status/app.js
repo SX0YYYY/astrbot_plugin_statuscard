@@ -17,6 +17,14 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  // Status words come from the API with a stable status_key; map them to the
+  // existing i18n keys instead of rendering the Chinese status text.
+  const STATUS_I18N = {
+    alert: "status_alert",
+    recovery: "status_recovery",
+    failed: "status_failed",
+    unknown: "status_unknown",
+  };
   const ESC = {
     "&": "&amp;",
     "<": "&lt;",
@@ -782,15 +790,7 @@
   // overview
   // ------------------------------------------------------------------
 
-  async function loadOverview() {
-    const seq = ++state.overviewSeq;
-    const data = await apiGet("overview");
-    if (seq !== state.overviewSeq) return;
-    if (data.timezone) state.timezone = String(data.timezone);
-    const cpu = data.cpu || {};
-    const memory = data.memory || {};
-    const swap = data.swap || {};
-    const disk = data.disk || {};
+  function updateSubtitle(data) {
     const host = data.host || "--";
     // "default" is the plugin's internal platform key, not something a user
     // recognises; showing "host · default" read like a broken value.
@@ -810,6 +810,18 @@
       .join(" · ");
     $("subtitle").removeAttribute("data-i18n");
     $("plugin-version").textContent = "v" + (data.plugin_version || "--");
+  }
+
+  async function loadOverview() {
+    const seq = ++state.overviewSeq;
+    const data = await apiGet("overview");
+    if (seq !== state.overviewSeq) return;
+    if (data.timezone) state.timezone = String(data.timezone);
+    const cpu = data.cpu || {};
+    const memory = data.memory || {};
+    const swap = data.swap || {};
+    const disk = data.disk || {};
+    updateSubtitle(data);
 
     $("metrics").innerHTML = [
       metric(
@@ -1429,7 +1441,11 @@
                 "</td><td>" +
                 esc(item.name || "--") +
                 "</td><td>" +
-                esc(item.status || "--") +
+                esc(
+                  item.status_key && STATUS_I18N[item.status_key]
+                    ? t(STATUS_I18N[item.status_key], item.status || "--")
+                    : item.status || "--",
+                ) +
                 "</td><td>" +
                 esc(item.duration || "--") +
                 "</td></tr>",
@@ -2058,6 +2074,16 @@
     setRefreshState(button, "refreshing");
     try {
       await activateTab(state.tab, true);
+      if (state.tab !== "overview") {
+        // The header timestamp only comes from the overview payload. Refresh
+        // it in the background, otherwise "更新于" stays at the time the page
+        // was opened even though the visible tab just reloaded.
+        try {
+          updateSubtitle(await apiGet("overview"));
+        } catch (error) {
+          // Keep the old timestamp; the visible tab did refresh successfully.
+        }
+      }
       setRefreshState(button, "done");
       toast(t("refresh_done", "数据已更新"));
     } catch (error) {

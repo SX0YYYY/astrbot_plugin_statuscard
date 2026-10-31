@@ -568,6 +568,12 @@ class AlertEngine:
         await asyncio.sleep(1)
         while self._running:
             try:
+                # A hand-edited or half-written state.json can turn ``alerts``
+                # into a list/scalar. section() replaces that under the lock,
+                # so one bad write no longer makes every sample raise until a
+                # restart (v2.20.1).
+                with self.state.section("alerts"):
+                    pass
                 await self._sample_once()
             except asyncio.CancelledError:
                 raise
@@ -683,6 +689,14 @@ class AlertEngine:
                 # recovery event (U-disk unplugged, NFS gone). Close the
                 # episode here -- the mount coming back later just starts a
                 # fresh evaluation (v2.20.0).
+                #
+                # Everything that can block (the recovery event's SQLite
+                # write and the notice itself) runs *outside* the section:
+                # awaiting a send while holding the state lock let a worker
+                # thread that was inside save() deadlock the event loop
+                # (v2.20.1).
+                close_text: str | None = None
+                closed = False
                 with self.state.section("alerts") as alerts:
                     rules = alerts.get("rules")
                     st = rules.get(rule_key) if isinstance(rules, dict) else None
@@ -694,14 +708,9 @@ class AlertEngine:
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
                         st.pop("awaiting_summary", None)
-                        self._record_event(
-                            "resource",
-                            f"磁盘使用率 ({disk_path})",
-                            "挂载点不可读（已拔出或掉线），告警自动关闭",
-                            "recovery",
-                        )
+                        closed = True
                         if notified and self.recover_notify:
-                            text = (
+                            close_text = (
                                 "✅ 告警已关闭 · 磁盘挂载点不可读\n"
                                 "──────────────\n"
                                 f"挂载点: {disk_path}\n"
@@ -709,7 +718,17 @@ class AlertEngine:
                                 "之前的告警已自动关闭。\n"
                                 f"时间: {_now_text(self.config)}"
                             )
-                            await self._send(text, source="resource", kind="resource")
+                if closed:
+                    # The event must be written even when notifications are
+                    # disabled: it is what closes the episode for the report.
+                    self._record_event(
+                        "resource",
+                        f"磁盘使用率 ({disk_path})",
+                        "挂载点不可读（已拔出或掉线），告警自动关闭",
+                        "recovery",
+                    )
+                if close_text is not None:
+                    await self._send(close_text, source="resource", kind="resource")
 
         if hasattr(os, "getloadavg"):
             try:
@@ -1090,7 +1109,13 @@ class AlertEngine:
                     )
                     if had_failed:
                         text += "\n（异常告警此前未能送达）"
-                    if st.pop("awaiting_summary", False):
+                    awaiting = st.pop("awaiting_summary", False)
+                    remaining = (
+                        self._aggregator.window_remaining("resource")
+                        if self._aggregator is not None
+                        else 0.0
+                    )
+                    if awaiting and remaining > 0:
                         # This rule's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat (恢复先于告警到达，看起来像
@@ -1103,11 +1128,6 @@ class AlertEngine:
                         # Schedule after the window actually closes: a fixed
                         # 15s raced the flush whenever the sampling interval
                         # was shorter than the window.
-                        remaining = (
-                            self._aggregator.window_remaining("resource")
-                            if self._aggregator is not None
-                            else 0.0
-                        )
                         st["recovery_next_attempt"] = now + max(15.0, remaining + 3.0)
                         logger.info(
                             "告警 %s 在聚合窗口内恢复，恢复通知延后 %.0f 秒发送",
@@ -1462,6 +1482,12 @@ class AlertEngine:
         watch["alerting"] = False
         watch["alerted"] = False
         watch["alert_since"] = 0
+        # A queued recovery from the previous episode must not resurface as a
+        # stale notice after the watch is turned back on (v2.20.1).
+        watch.pop("pending_recovery", None)
+        watch.pop("recovery_retry_count", None)
+        watch.pop("recovery_next_attempt", None)
+        watch.pop("send_failed", None)
         self._record_event("provider", "LLM 服务", reason, "recovery")
         logger.info("LLM 服务告警已关闭：%s", reason)
 

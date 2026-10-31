@@ -74,6 +74,10 @@ _CONFIG_ERROR_HINTS = (
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
+# The probe infrastructure failed (spawn timeout, systemctl hang), so the
+# service state is unknown. Counting it as an outage produced fake alerts on
+# a busy docker daemon; these rounds keep the previous state instead.
+PROBE_ERROR_PREFIX = "探测失败: "
 
 # A permanently unreachable push target must not keep the monitor retrying
 # forever: every attempt costs a full send timeout plus a state write. Alert
@@ -357,6 +361,14 @@ class ServiceMonitor:
                 await task
             except asyncio.CancelledError:
                 pass
+        # Best-effort notices queued by config-error closures used to be
+        # destroyed with the plugin ("Task was destroyed but it is pending").
+        background = [item for item in self._bg_tasks if not item.done()]
+        for item in background:
+            item.cancel()
+        if background:
+            await asyncio.gather(*background, return_exceptions=True)
+        self._bg_tasks.clear()
 
     async def _loop(self) -> None:
         while self._running:
@@ -382,9 +394,18 @@ class ServiceMonitor:
                 )
                 self._targets_warned = True
             return
+        # Dozens of targets used to be probed at once; a hung docker daemon or
+        # a slow endpoint then produced a burst of subprocesses/connections.
+        # Eight at a time is plenty for the 30s interval.
+        semaphore = asyncio.Semaphore(8)
+
+        async def _probe_limited(item: dict[str, Any]) -> Any:
+            async with semaphore:
+                return await self._check_item(item)
+
         results = await asyncio.gather(
             *(
-                self._check_item(item)
+                _probe_limited(item)
                 for item in self.items
                 if not item.get("config_error")
             ),
@@ -580,6 +601,19 @@ class ServiceMonitor:
             states[key] = st
             return
 
+        if not ok and detail.startswith(PROBE_ERROR_PREFIX):
+            # The probe itself failed (subprocess timeout / spawn error). The
+            # service may be fine, so do not count this as a failed check;
+            # keep the previous state and warn at most every 10 minutes.
+            st["last_checked"] = now
+            st["last_error"] = detail
+            last_warn = safe_float(st.get("probe_error_at") or 0)
+            if now - last_warn > 600:
+                st["probe_error_at"] = now
+                logger.warning("监测项 %s 探测失败，本轮跳过判定: %s", name, detail)
+            states[key] = st
+            return
+
         if self._is_silenced():
             # The maintenance window mutes the push, not the state machine.
             # Freezing it entirely meant a fault that started and ended inside
@@ -650,7 +684,11 @@ class ServiceMonitor:
                 return
 
         if not ok:
-            fails += 1
+            if not alerting:
+                # Once latched the counter is not used for anything; letting
+                # it grow made state.json and the dashboard show an ever
+                # increasing "fails" number during a long outage.
+                fails += 1
             will_alert = not alerting and fails >= self.fail_threshold
             st["fails"] = fails
             st["last_error"] = detail
@@ -763,7 +801,13 @@ class ServiceMonitor:
                         f"原因: {detail}\n"
                         f"时间: {_now_text(self.config)}"
                     )
+                    # Persist the in-flight marker before the await so a reload
+                    # during a slow retry cannot replay the same alert from a
+                    # stale `pending` value (v2.20.1).
+                    st["send_inflight"] = True
+                    self.state.save()
                     result = await self._send(text)
+                    st.pop("send_inflight", None)
                     st["last_attempt"] = now
                     if self._delivered(result):
                         st["pending"] = False
@@ -795,6 +839,7 @@ class ServiceMonitor:
                             st["retry_count"] = retry_count
                             st["next_attempt"] = now + retry_delay(retry_count)
         else:
+            st.pop("config_error_warned", None)
             st["fails"] = 0
             st["last_checked"] = now
             st["last_ok"] = now
@@ -880,7 +925,13 @@ class ServiceMonitor:
                         f"恢复时间: {_now_text(self.config)}\n"
                         f"中断时长: {format_duration(duration)}{extra}"
                     )
-                    if st.pop("awaiting_summary", False):
+                    awaiting = st.pop("awaiting_summary", False)
+                    remaining = (
+                        self._aggregator.window_remaining("service")
+                        if self._aggregator is not None
+                        else 0.0
+                    )
+                    if awaiting and remaining > 0:
                         # This item's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat; queue it so the summary is
@@ -889,11 +940,6 @@ class ServiceMonitor:
                         # episode happened.
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
-                        remaining = (
-                            self._aggregator.window_remaining("service")
-                            if self._aggregator is not None
-                            else 0.0
-                        )
                         st["recovery_next_attempt"] = now + max(15.0, remaining + 3.0)
                         logger.info(
                             "监测项 %s 在聚合窗口内恢复，恢复通知延后 %.0f 秒发送",
@@ -949,7 +995,10 @@ class ServiceMonitor:
             f"目标已不存在或配置错误，告警自动关闭（{detail}）",
             "recovery",
         )
-        if notified and self.recover_notify:
+        if notified and self.recover_notify and not self._is_silenced():
+            # The maintenance window promises "probe only, never push"; a
+            # config-error close is still a recovery notice and used to slip
+            # past the silence check because it returns before it (v2.20.1).
             text = (
                 f"✅ 服务告警关闭 · {name}\n"
                 "──────────────\n"
@@ -1095,6 +1144,12 @@ class ServiceMonitor:
                     return False, detail[:200], container
                 running = proc.stdout.strip().lower() == "true"
                 return running, f"容器 running={running}", container
+            except subprocess.TimeoutExpired:
+                return (
+                    False,
+                    f"{PROBE_ERROR_PREFIX}docker inspect 超过 {timeout}s 未返回",
+                    container,
+                )
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", container
 
@@ -1172,6 +1227,12 @@ class ServiceMonitor:
                             unit,
                         )
                 return state_text == "active", f"{unit}: {state_text}", unit
+            except subprocess.TimeoutExpired:
+                return (
+                    False,
+                    f"{PROBE_ERROR_PREFIX}systemctl 超过 {timeout}s 未返回",
+                    unit,
+                )
             except Exception as exc:
                 return False, f"{exc.__class__.__name__}: {exc}", unit
 
@@ -1333,6 +1394,12 @@ class ServiceMonitor:
 
     def status(self) -> dict[str, Any]:
         monitors = self.state.get("monitors", {}) or {}
+        if not isinstance(monitors, dict):
+            # A hand-edited state.json must not make the dashboard route raise.
+            monitors = {}
+        item_states = monitors.get("items")
+        if not isinstance(item_states, dict):
+            item_states = {}
         return {
             "enabled": self.enabled,
             "targets": list(self.targets),
@@ -1348,7 +1415,7 @@ class ServiceMonitor:
                     "name": item.get("name"),
                     "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
                     "target": self._item_key(item),
-                    "state": monitors.get("items", {}).get(self._item_key(item), {}),
+                    "state": item_states.get(self._item_key(item), {}),
                     "config_error": item.get("config_error"),
                 }
                 for item in self.items

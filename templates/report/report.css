@@ -207,8 +207,12 @@ body {
 .chart {
   display: block;
   width: 100%;
+  /* The SVG viewBox is 600 units wide with fixed font sizes. Letting it
+     stretch to a 1600px report scaled the axis labels 2.5x larger than the
+     body text; cap it at the design width instead. */
+  max-width: 600px;
   height: auto;
-  margin-top: 2px;
+  margin: 2px auto 0;
 }
 
 .plot-bg {

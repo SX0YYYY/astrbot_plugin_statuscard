@@ -278,10 +278,24 @@ class Sampler:
         if counters is None:
             try:
                 counters = psutil.net_io_counters()
-                interface = ""
             except Exception:
                 logger.debug("读取网络计数器失败，本轮跳过网络采样", exc_info=True)
                 return
+            # The fallback counter sums every interface (loopback, docker
+            # bridges, veth) and cannot be compared with the single-interface
+            # baseline saved in state. Booking its delta used to credit hours
+            # of traffic to one interval and permanently inflate the month
+            # total; skip this round instead (v2.20.1).
+            with self.state.section("net") as net:
+                month = now_in_timezone(self.config).strftime("%Y-%m")
+                if net.get("month") != month:
+                    # Rollover still has to happen even on a skipped round.
+                    net["month"] = month
+                    net["month_up"] = 0
+                    net["month_down"] = 0
+                    logger.info("已进入 %s，本月流量统计已重置", month)
+                net["updated_at"] = now
+            return
         if counters is None:
             return
         with self.state.section("net") as net:
@@ -366,6 +380,14 @@ class Sampler:
         if counters is None:
             return
         with self.state.section("disk_io") as disk:
+            # A failed prime leaves no baseline. Without this guard the next
+            # successful read books everything since boot as one interval
+            # (tens of GiB/s); the network side already had this protection.
+            baseline_missing = (
+                "last_read" not in disk
+                or "last_write" not in disk
+                or "last_ts" not in disk
+            )
             last_ts = safe_float(disk.get("last_ts")) or now
             last_read = safe_int(disk.get("last_read")) or 0
             last_write = safe_int(disk.get("last_write")) or 0
@@ -374,9 +396,12 @@ class Sampler:
             # A restart (or a long sampler stall) used to divide the whole
             # downtime's IO by 1s, showing a rock-bottom average for one
             # round; rebuild the baseline instead, like the network side
-            # does for its stale window (v2.20.0).
-            stale = (not clock_back) and (now - last_ts > self.interval_seconds * 3)
-            if stale:
+            # does for its stale window (v2.20.0). Use the same window as the
+            # network side so both graphs agree (v2.20.1).
+            stale = (not clock_back) and (
+                now - last_ts > max(300.0, self.interval_seconds * 5)
+            )
+            if stale or baseline_missing:
                 read_delta = write_delta = 0
                 dt = 1.0
                 read_rate = write_rate = 0.0
