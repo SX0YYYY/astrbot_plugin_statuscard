@@ -274,19 +274,34 @@ class MemStat:
     total: int
     used: int
     percent: float
+    # "Available" memory (includes reclaimable cache). ``None`` when the
+    # platform does not report it. The card text uses it so the printed
+    # numbers and the percentage share one definition.
+    available: int | None = None
 
 
 def memory_stat() -> MemStat:
     try:
         m = psutil.virtual_memory()
-        # psutil's ``percent`` divides by (total - available) while the card
-        # prints ``used / total`` next to it; on Linux the two disagree by
-        # 2-4 points because ``available`` also counts reclaimable cache, so
-        # the ring looked like an arithmetic error. The disk percentage was
-        # unified on used/total for the same reason (v2.18.4); RAM now
-        # matches its own text, the alert text and the dashboard.
-        percent = (m.used / m.total * 100.0) if m.total else 0.0
-        return MemStat(total=m.total, used=m.used, percent=percent)
+        # ``percent`` keeps psutil's own definition ((total - available) /
+        # total). It is the value the RAM alert threshold and every stored
+        # sample are compared against, so changing it here would silently
+        # move the threshold (Linux counts reclaimable cache as "available",
+        # so used/total reads 2-4 points higher) and mix two definitions in
+        # the 30-day trend.
+        #
+        # The *text* next to it is the one that was inconsistent: it printed
+        # used/total while the ring used the available-based percentage. The
+        # card therefore shows the available-based percentage together with
+        # the available-based text (see ``MemStat.available``), so the number
+        # and the words agree without touching any stored or thresholded
+        # value.
+        return MemStat(
+            total=m.total,
+            used=m.used,
+            percent=m.percent,
+            available=getattr(m, "available", None),
+        )
     except Exception:
         # Same reasoning as cpu_freq: an unavailable /proc/meminfo must not
         # take the whole card down.
@@ -2066,7 +2081,13 @@ def _system_info_rows(
         {"label": "GPU", "value": _gpu_name(state)},
         {
             "label": "Memory",
-            "value": f"{format_bytes(mem.used)} / {format_bytes(mem.total)}",
+            # Same definition as the RAM ring (available-based), so the
+            # system-info table and the ring do not contradict each other.
+            "value": (
+                f"{format_bytes(mem.available)} / {format_bytes(mem.total)}"
+                if mem.available is not None
+                else f"{format_bytes(mem.used)} / {format_bytes(mem.total)}"
+            ),
         },
         {"label": "Network", "value": net_interface},
         {"label": "Arch", "value": platform.machine()},
@@ -2100,7 +2121,16 @@ def _resources(cpu_pct: float, mem: MemStat, swap: MemStat) -> list[dict[str, An
         {
             "percent": mem.percent,
             "title": "RAM",
-            "desc": f"{format_bytes(mem.used)} / {format_bytes(mem.total)}\n物理内存使用",
+            # "可用 / 总量" matches the percentage above it: psutil's RAM
+            # percent is (total - available) / total. The old text printed
+            # used/total, which on Linux reads 2-4 points higher than the
+            # ring next to it and looked like an arithmetic error.
+            "desc": (
+                f"{format_bytes(mem.available)} / {format_bytes(mem.total)}\n"
+                "物理内存可用"
+                if mem.available is not None
+                else f"{format_bytes(mem.used)} / {format_bytes(mem.total)}\n物理内存使用"
+            ),
         },
         {
             "percent": swap.percent,

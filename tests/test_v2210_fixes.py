@@ -255,18 +255,49 @@ def test_sampler_survives_dirty_month_counter(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_memory_percent_matches_used_over_total(
+def test_memory_percent_keeps_the_threshold_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The RAM percentage must stay psutil's own definition.
+
+    It is the value the RAM alert threshold and every stored sample are
+    compared against. v2.20.10 first changed it to used/total, which
+    silently moved the threshold on Linux (2-4 points higher) and mixed two
+    definitions in the 30-day trend. The card text was aligned instead.
+    """
+
+    fake = SimpleNamespace(
+        total=8 * 1024**3,
+        used=4 * 1024**3,
+        available=5 * 1024**3,  # psutil reports 37.5% here
+        percent=37.5,
+    )
+    monkeypatch.setattr(collectors.psutil, "virtual_memory", lambda: fake)
+    stat = collectors.memory_stat()
+    # Unchanged: the threshold semantics must not move.
+    assert stat.percent == pytest.approx(37.5, abs=1e-6)
+    # The text can be aligned with that percentage.
+    assert stat.available == 5 * 1024**3
+
+
+def test_memory_text_uses_the_available_definition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = SimpleNamespace(
         total=8 * 1024**3,
         used=4 * 1024**3,
-        available=5 * 1024**3,  # psutil would report 37.5% here
+        available=5 * 1024**3,
         percent=37.5,
     )
     monkeypatch.setattr(collectors.psutil, "virtual_memory", lambda: fake)
-    stat = collectors.memory_stat()
-    assert stat.percent == pytest.approx(50.0, abs=1e-6)
+    resources = collectors._resources(
+        10.0, collectors.memory_stat(), collectors.swap_stat()
+    )
+    ram = next(item for item in resources if item["title"] == "RAM")
+    # 37.5% of 8 GiB is 3 GiB used, i.e. 5 GiB available: the text must
+    # print the available side so it agrees with the percentage.
+    assert "5.00 GB" in ram["desc"]
+    assert "可用" in ram["desc"]
 
 
 # ----------------------------------------------------------------------
@@ -642,3 +673,46 @@ def test_empty_reason_codes_exist_for_website_and_process(tmp_path: Path) -> Non
     process = view.get("process") or {}
     assert website.get("empty_reason_code") in (None, "website_none", "website_since")
     assert process.get("empty_reason_code") in (None, "process_none", "process_since")
+
+
+# ----------------------------------------------------------------------
+# 防回归：语义标记变更后，所有渲染端必须有对应样式
+# ----------------------------------------------------------------------
+
+
+def test_report_template_styles_every_status_key() -> None:
+    """A new ``status_key`` must have a badge style in the report CSS.
+
+    v2.20.10 introduced ``recovered`` (a closed episode with a duration)
+    while the old key was ``recovery``. The dashboard CSS already styled
+    both, but the daily-report image template only knew ``recovery`` --
+    every recovered row lost its green badge in the pushed image. Style
+    regressions are invisible to the API tests, so they are pinned here.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    css = (root / "templates/report/report.css").read_text(encoding="utf-8")
+    for key in ("alert", "failed", "recovery", "recovered"):
+        assert f".badge.{key}" in css, f"report.css lacks .badge.{key}"
+    assert '[data-theme="dark"] .badge.recovered' in css
+
+
+def test_report_view_emits_only_known_status_keys() -> None:
+    """Every ``status_key`` the view produces must be styled somewhere."""
+
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "templates/report/index.html.jinja").read_text(encoding="utf-8")
+    assert "item.status_key" in template
+    css = (root / "templates/report/report.css").read_text(encoding="utf-8")
+    known = {"alert", "failed", "recovery", "recovered"}
+    for key in known:
+        assert f".badge.{key}" in css
+
+
+def test_page_api_reports_whether_memory_text_is_available() -> None:
+    """The dashboard needs to know which wording to use for RAM."""
+
+    src = (Path(__file__).resolve().parents[1] / "page_api.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"available": mem.available is not None' in src

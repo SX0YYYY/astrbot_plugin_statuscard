@@ -509,8 +509,13 @@ class PageApi:
                 },
                 "memory": {
                     "percent": round(float(mem.percent), 1),
-                    "used_text": format_bytes(mem.used),
+                    # "available / total" matches the percentage above it
+                    # (psutil's RAM percent is (total - available) / total).
+                    "used_text": format_bytes(
+                        mem.available if mem.available is not None else mem.used
+                    ),
                     "total_text": format_bytes(mem.total),
+                    "available": mem.available is not None,
                 },
                 "swap": {
                     "percent": round(float(swap.percent), 1),

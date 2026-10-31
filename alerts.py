@@ -733,7 +733,19 @@ class AlertEngine:
             mem.percent,
             self.mem_threshold,
             "%",
-            f"{mem.percent:.1f}% ({format_bytes(mem.used)} / {format_bytes(mem.total)})",
+            # Same definition as the percentage above: psutil's RAM percent is
+            # (total - available) / total, so the text prints "available /
+            # total". The old "used / total" text read 2-4 points higher than
+            # the percentage beside it on Linux and looked miscalculated.
+            (
+                f"{mem.percent:.1f}% "
+                f"({format_bytes(mem.available)} / {format_bytes(mem.total)} 可用)"
+                if mem.available is not None
+                else (
+                    f"{mem.percent:.1f}% "
+                    f"({format_bytes(mem.used)} / {format_bytes(mem.total)})"
+                )
+            ),
         )
         await self._evaluate(
             "swap",

@@ -70,6 +70,7 @@
         "metric_swap": "SWAP",
         "metric_uptime": "运行时间",
         "metric_used_total": "{used} / {total}",
+        "metric_available_total": "{used} 可用 / {total}",
         "monitor_config_error": "配置不完整（{error}），未探测",
         "monitor_disabled": "服务监测已关闭",
         "monitor_disabled_hint": "在配置页开启「服务可用性监测」后，这里会显示探测结果。",

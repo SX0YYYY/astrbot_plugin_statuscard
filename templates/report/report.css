@@ -310,7 +310,12 @@ body {
   color: #b91c1c;
 }
 
-.badge.recovery {
+/* ``recovered`` marks a row whose episode is closed and carries a duration;
+   ``recovery`` is the bare recovery event. Both are the "good" colour --
+   v2.20.10 introduced the recovered marker and the daily-report image lost
+   its green badge until this rule was added. */
+.badge.recovery,
+.badge.recovered {
   background: #dcfce7;
   color: #15803d;
 }
@@ -504,7 +509,8 @@ body {
   color: #fca5a5;
 }
 
-[data-theme="dark"] .badge.recovery {
+[data-theme="dark"] .badge.recovery,
+[data-theme="dark"] .badge.recovered {
   background: #052e16;
   color: #86efac;
 }

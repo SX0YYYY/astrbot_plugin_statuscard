@@ -38,6 +38,7 @@
         "metric_uptime": "Uptime",
         "metric_cores": "{count} cores · load {load}",
         "metric_used_total": "{used} / {total}",
+        "metric_available_total": "{used} free / {total}",
         "label_astrbot": "AstrBot {version}",
         "network_up": "Upload",
         "network_redacted": "Network data hidden by redaction settings",

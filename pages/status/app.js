@@ -896,10 +896,17 @@
       metric(
         t("metric_memory", "内存"),
         pctText(memory.percent),
-        t("metric_used_total", "{used} / {total}", {
-          used: memory.used_text || "--",
-          total: memory.total_text || "--",
-        }),
+        // The backend sends "available" (same definition as the percentage
+        // above); SWAP and disk keep the "used" wording.
+        memory.available
+          ? t("metric_available_total", "{used} 可用 / {total}", {
+              used: memory.used_text || "--",
+              total: memory.total_text || "--",
+            })
+          : t("metric_used_total", "{used} / {total}", {
+              used: memory.used_text || "--",
+              total: memory.total_text || "--",
+            }),
         memory.percent,
       ),
       metric(
