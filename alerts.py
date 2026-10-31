@@ -489,7 +489,13 @@ class AlertEngine:
                 label = str(st.get("label") or "")
                 if label and label in labels:
                     st["alerted"] = False
-                    st.pop("last_sent", None)
+                    # Keep the episode retryable. Clearing ``last_sent``
+                    # removed the only signal the cooldown-retry path uses,
+                    # so the rule stayed latched-but-unannounced for the rest
+                    # of the outage: no alert, and (because ``alerted`` was
+                    # False) no recovery notice either. The user never heard
+                    # about the incident at all.
+                    st["summary_abandoned"] = True
                     # The window died with the abandon; leaving this set
                     # would delay a future recovery for no reason.
                     st.pop("awaiting_summary", None)
@@ -870,22 +876,26 @@ class AlertEngine:
         last_sent = _safe_float(st.get("last_sent"))
         if st.pop("send_inflight", False) and not alerting:
             # The process was reloaded or crashed while this alert was being
-            # sent. The message may already be in the chat, so treat the
-            # episode as announced instead of firing the same alert again
-            # after ``sustain`` more samples. ``alerted=False`` keeps the
-            # recovery notice quiet: if the alert never arrived, an
-            # unexplained "已恢复" is worse than the missing row.
+            # sent. The message may or may not have reached the chat, so the
+            # episode is latched -- but it must stay *retryable*: the previous
+            # version latched it with ``alerted=False`` and no cooldown
+            # reference, which left the rule silent for the whole outage and
+            # withheld the recovery notice as well. The operator ended up
+            # with no message at all. Retry it once the cooldown allows.
             alerting = True
             st["alerting"] = True
             st["alerted"] = False
             st["alert_since"] = _safe_float(st.get("last_attempt")) or now
             st["count"] = 0
+            # Mark it as "never announced" so the cooldown-retry path picks
+            # it up instead of treating it as an already-delivered alert.
+            st["summary_abandoned"] = True
             # Log an alert row so the episode has a start in the event log;
             # without it the later recovery had no matching beginning.
             self._record_event(
                 "resource",
                 name,
-                "上次告警发送被中断（重载/重启），已按告警中处理",
+                "上次告警发送被中断（重载/重启），将重新补发",
                 "alert",
             )
 
@@ -938,13 +948,22 @@ class AlertEngine:
             # A fault latched inside the cooldown was recorded but never
             # pushed. If it is still over the threshold when the cooldown
             # expires, the user has never seen it: send the alert now.
+            # ``summary_abandoned`` covers the case where the aggregation
+            # window was given up: the alert was never delivered either, and
+            # it must not wait for a cooldown that may never elapse.
+            abandoned = bool(st.pop("summary_abandoned", False))
             cooldown_retry = (
                 alerting
                 and not bool(st.get("alerted"))
                 and _safe_int(st.get("retry_count")) == 0
                 and _safe_float(st.get("next_attempt")) == 0
-                and _safe_float(st.get("last_sent")) > 0
-                and now - _safe_float(st.get("last_sent")) >= self.cooldown
+                and (
+                    abandoned
+                    or (
+                        _safe_float(st.get("last_sent")) > 0
+                        and now - _safe_float(st.get("last_sent")) >= self.cooldown
+                    )
+                )
             )
             if (
                 (not alerting and count >= self.sustain)
@@ -1238,6 +1257,13 @@ class AlertEngine:
 
         cfg = cfg_get(self.config, "alerts.offline_broadcast", {}) or {}
         if not isinstance(cfg, dict) or not cfg_bool(cfg, "enabled", False):
+            return
+        if not self.offline_notify:
+            # The operator turned the offline/recovery notices off, so the
+            # broadcast must not resurrect them: it posted a "已恢复" to
+            # every joined group even though no offline notice was ever
+            # sent, and the audit did not point out the contradiction.
+            logger.info("掉线广播已跳过：掉线/恢复通知开关处于关闭状态")
             return
         self_id = str(cfg_get(self.config, "alerts.self_id", "") or "").strip()
         client = _get_aiocqhttp_client(
@@ -1684,7 +1710,22 @@ class AlertEngine:
             # while the old recovery notice was being retried used to be
             # silent for up to ~30 minutes (v2.20.0).
 
-        if not alerting and streak >= self.provider_watch_threshold:
+        # The alert branch must run for a *latched* episode too: a streak
+        # that began inside the cooldown was recorded but never pushed, and
+        # without this the rule stayed silent for the whole outage (and its
+        # recovery notice was withheld as well, because ``alerted`` stayed
+        # False). The previous version computed ``cooldown_retry`` inside the
+        # ``not alerting`` guard, where it was always False -- dead code.
+        cooldown_retry = (
+            alerting
+            and not bool(watch.get("alerted"))
+            and _safe_float(watch.get("last_alert_ts")) > 0
+            and now - _safe_float(watch.get("last_alert_ts"))
+            >= self.provider_watch_cooldown
+        )
+        if (not alerting and streak >= self.provider_watch_threshold) or (
+            cooldown_retry and streak >= self.provider_watch_threshold
+        ):
             text = (
                 "⚠️ LLM 服务连续失败\n"
                 "──────────────\n"
@@ -1695,19 +1736,6 @@ class AlertEngine:
             )
             in_cooldown = bool(
                 last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown
-            )
-            # Push once the cooldown has expired even when the rule is already
-            # latched: a streak that began inside the cooldown left the
-            # operator with no alert at all (mirrors the resource-rule
-            # ``cooldown_retry`` -- the previous version latched and then went
-            # permanently silent, so a sustained LLM outage was invisible and
-            # its recovery notice was also withheld).
-            cooldown_retry = (
-                alerting
-                and not bool(watch.get("alerted"))
-                and _safe_float(watch.get("last_alert_ts")) > 0
-                and now - _safe_float(watch.get("last_alert_ts"))
-                >= self.provider_watch_cooldown
             )
             if in_cooldown and not cooldown_retry:
                 # Latch and record without pushing. ``alerted=False`` keeps
@@ -2077,8 +2105,10 @@ class AlertEngine:
             # pass the dedup check and push the same notice twice (the dedup
             # window only covered a serial retry). A failed send is removed so
             # it stays retryable; a successful send keeps the 5-second window.
-            if body_key not in self._webhook_inflight:
-                self._webhook_inflight.add(body_key)
+            if body_key in self._webhook_inflight:
+                logger.info("Komari Webhook 重复请求（同一内容正在处理中），已忽略")
+                return web.json_response({"status": "ok", "duplicate": True})
+            self._webhook_inflight.add(body_key)
             try:
                 data = json.loads(raw.decode("utf-8"))
             except Exception:

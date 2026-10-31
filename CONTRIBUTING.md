@@ -11,7 +11,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `419 passed`（会随版本增长，以 CI 实际输出为准）。GitHub Actions 工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在 push 和 pull request 时安装依赖并运行同一套测试，并校验 `version.py`、`metadata.yaml`、README badge 与 CHANGELOG 顶部四处的版本号一致。
+当前测试预期为 `460 passed`（会随版本增长，以 CI 实际输出为准）。GitHub Actions 工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在 push 和 pull request 时安装依赖并运行同一套测试，并校验 `version.py`、`metadata.yaml`、README badge 与 CHANGELOG 顶部四处的版本号一致。
 
 ## 代码结构
 

@@ -532,6 +532,25 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "请勾选至少一个模块，或关闭「启用趋势日报」。",
             )
         )
+    # A section list that names only unknown modules (a retired "todo", a
+    # typo, a Chinese label) filters down to an empty list at runtime, so
+    # the report silently never sends while the switch looks on and the
+    # audit stayed quiet. Point at the unrecognised names.
+    if daily_on and isinstance(daily_sections, list) and daily_sections:
+        from .report_view import VALID_SECTIONS
+
+        allowed = {str(item) for item in daily_sections if isinstance(item, str)}
+        unknown = sorted(allowed - set(VALID_SECTIONS))
+        if unknown:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "daily_report_sections_unknown",
+                    f"「日报内容」含无法识别的模块：{', '.join(unknown)}；"
+                    f"可用模块为 {', '.join(VALID_SECTIONS)}。"
+                    "这些名称会被忽略，若没有其它有效模块则日报不会发送。",
+                )
+            )
     try:
         history_days = int(cfg_get(config, "daily_report.history_days", 7) or 7)
         retention_days = int(cfg_get(config, "daily_report.retention_days", 30) or 30)

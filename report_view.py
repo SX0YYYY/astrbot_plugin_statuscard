@@ -37,7 +37,7 @@ from .provider_quality import (
 )
 from .redactor import Redactor, read_rules
 from .report_store import ReportStore
-from .utils import redact_url
+from .utils import redact_url, safe_int
 
 RESOURCE_KEYS = ("cpu", "ram", "swap", "disk", "load1")
 RESOURCE_LABELS = {
@@ -795,7 +795,7 @@ class DailyReportBuilder:
             )
             resolved_ts = event.get("resolved_ts")
             if status in {"alert", "failed"}:
-                open_alerts.setdefault(key, int(event.get("ts") or 0))
+                open_alerts.setdefault(key, safe_int(event.get("ts") or 0))
             outside = str(event.get("day") or "") not in window_days
             if status == "recovery" and outside:
                 # Events before the window must also close their episode: the
@@ -817,11 +817,13 @@ class DailyReportBuilder:
                 seen_ids = {sid for sid in seen_ids if sid[0] != key}
                 episode_open.discard(key)
                 if start:
-                    duration_text = format_duration(int(event.get("ts") or 0) - start)
+                    duration_text = format_duration(
+                        safe_int(event.get("ts") or 0) - start
+                    )
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
             elif status in {"alert", "failed"}:
-                episode_id = (key, int(resolved_ts or 0))
+                episode_id = (key, safe_int(resolved_ts or 0))
                 if episode_id in seen_ids:
                     continue
                 seen_ids.add(episode_id)
@@ -832,8 +834,8 @@ class DailyReportBuilder:
                     # written back). It is complete, so it must not inflate
                     # "未恢复 N 项" while showing a finished duration.
                     episode_open.discard(key)
-                    resolved_i = int(resolved_ts)
-                    started_i = int(event.get("ts") or 0)
+                    resolved_i = safe_int(resolved_ts)
+                    started_i = safe_int(event.get("ts") or 0)
                     if resolved_i - started_i > (span + 1) * 86400:
                         # close_all wrote the same resolved_ts onto every old
                         # open episode of a rule; pairing the newest alert
@@ -850,7 +852,7 @@ class DailyReportBuilder:
             items.append(
                 {
                     "time": datetime.fromtimestamp(
-                        int(event.get("ts") or 0), self.tz
+                        safe_int(event.get("ts") or 0), self.tz
                     ).strftime(time_format),
                     "kind": self._kind_text(str(event.get("kind") or "")),
                     "kind_slug": str(event.get("kind") or ""),
@@ -1280,11 +1282,21 @@ class DailyReportBuilder:
         window_keys = [(day - timedelta(days=i)).isoformat() for i in range(span)]
 
         def latency_values(items: list[dict[str, Any]]) -> list[float]:
-            return [
-                float(item["latency_ms"])
-                for item in items
-                if item.get("ok") and item.get("latency_ms") is not None
-            ]
+            # One dirty row (a hand-edited report.db can hold any text in a
+            # REAL column) used to raise and take the whole report down.
+            # Skip the bad row instead of losing the day's report.
+            values: list[float] = []
+            for item in items:
+                if not item.get("ok") or item.get("latency_ms") is None:
+                    continue
+                try:
+                    value = float(item["latency_ms"])
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(value):
+                    continue
+                values.append(value)
+            return values
 
         targets: list[dict[str, Any]] = []
         for name in names:
@@ -1898,6 +1910,12 @@ def build_report_text(view: dict[str, Any]) -> str:
                     recv_text,
                 )
             )
+            # The offset warning must reach the text version too: it was
+            # only shown in the picture, so a group chat received a badly
+            # under-estimated "接收" number with no hint at all.
+            recv_note = qq.get("recv_note")
+            if recv_note:
+                lines.append(f"（{recv_note}）")
     token = view.get("token") or {}
     if "token" in sections:
         if token.get("available"):

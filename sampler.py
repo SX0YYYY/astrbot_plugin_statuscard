@@ -451,3 +451,15 @@ class Sampler:
             recv["available"] = True
             recv["source_updated_at"] = source_updated
             recv["updated_at"] = now
+            # Remember the first reading of each calendar day. The daily
+            # report computes "yesterday's received messages" as the
+            # difference between two daily snapshots, and a snapshot taken
+            # hours after midnight (because the bot was down at 00:05)
+            # produced a badly under-estimated number -- sometimes 9% of the
+            # real value. The day's opening reading lets the report recover
+            # the correct interval.
+            day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+            if recv.get("day_open_day") != day_key:
+                recv["day_open_day"] = day_key
+                recv["day_open_total"] = total
+                recv["day_open_at"] = now

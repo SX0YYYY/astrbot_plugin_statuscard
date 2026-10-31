@@ -544,11 +544,48 @@ def test_daily_catch_up_needs_previous_marker() -> None:
     reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
     reporter._last_sent_day = None
     reporter._last_attempt_day = None
+    reporter._last_attempt_wall_day = None
+    reporter._daily_given_up_day = None
     assert reporter._daily_catch_up_allowed("2026-10-28") is False
     reporter._last_attempt_day = "2026-10-27"
+    reporter._last_attempt_wall_day = "2026-10-27"
     assert reporter._daily_catch_up_allowed("2026-10-28") is True
     reporter._last_attempt_day = "2026-10-28"
+    reporter._last_attempt_wall_day = "2026-10-28"
     assert reporter._daily_catch_up_allowed("2026-10-28") is False
+
+
+def test_daily_catch_up_uses_wall_day_not_report_day() -> None:
+    """A cross-midnight retry must not mark *today* as attempted.
+
+    ``_last_attempt_day`` names the report day (yesterday for the scheduled
+    run), so the catch-up guard has to consult the calendar day of the last
+    attempt instead. Using the report day re-armed the catch-up and made the
+    report loop re-send all night long.
+    """
+
+    reporter = object.__new__(DailyReporter)
+    reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
+    reporter._last_sent_day = None
+    reporter._daily_given_up_day = None
+    # The retry ran after midnight but delivered yesterday's report.
+    reporter._last_attempt_day = "2026-10-30"
+    reporter._last_attempt_wall_day = "2026-10-31"
+    assert reporter._daily_catch_up_allowed("2026-10-31") is False
+    # A fresh day is still allowed.
+    assert reporter._daily_catch_up_allowed("2026-11-01") is True
+
+
+def test_daily_given_up_blocks_catch_up() -> None:
+    """After the retry budget is exhausted the day must not restart."""
+
+    reporter = object.__new__(DailyReporter)
+    reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
+    reporter._last_sent_day = None
+    reporter._last_attempt_day = "2026-10-30"
+    reporter._last_attempt_wall_day = "2026-10-30"
+    reporter._daily_given_up_day = "2026-10-31"
+    assert reporter._daily_catch_up_allowed("2026-10-31") is False
 
 
 def test_state_save_retries_snapshot(monkeypatch, tmp_path: Path) -> None:

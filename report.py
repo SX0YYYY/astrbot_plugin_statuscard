@@ -488,6 +488,16 @@ class DailyReporter:
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._last_attempt_day: str | None = None
+        # The calendar day of the last attempt. ``_last_attempt_day`` names
+        # the *report* day, which is yesterday for a scheduled run and can be
+        # an older date for a retry; the catch-up guard needs to know whether
+        # *today* was already attempted.
+        self._last_attempt_wall_day: str | None = None
+        # A day whose report was given up must not restart the retry cycle.
+        # Without this marker the daily loop re-armed the catch-up after
+        # every abandon and sent the report all night long (11 attempts and
+        # two "stopped retrying" notices per evening).
+        self._daily_given_up_day: str | None = None
         self._weekly_last_sent_week: str | None = None
         # Week the last weekly send was ATTEMPTED in (set before any slow
         # work): a crash/reload mid-send then leaves a marker the catch-up
@@ -549,6 +559,8 @@ class DailyReporter:
 
         self._last_sent_day = saved.get("last_sent_day") or None
         self._last_attempt_day = saved.get("last_attempt_day") or None
+        self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
+        self._daily_given_up_day = saved.get("daily_given_up_day") or None
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
         self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
@@ -611,6 +623,8 @@ class DailyReporter:
                 {
                     "last_sent_day": self._last_sent_day,
                     "last_attempt_day": self._last_attempt_day,
+                    "last_attempt_wall_day": self._last_attempt_wall_day,
+                    "daily_given_up_day": self._daily_given_up_day,
                     "pending_retry": pending,
                     "pending_retry_count": self._pending_retry_count,
                     "pending_retry_day": self._pending_retry_day,
@@ -1337,6 +1351,10 @@ class DailyReporter:
         if self._pending_retry_count > 3:
             self._pending_retry = None
             self._pending_retry_count = 0
+            # Mark the day as given up: the weekly report has the same
+            # marker, and without it the daily loop re-armed the catch-up
+            # after every abandon and sent the report all night long.
+            self._daily_given_up_day = today
             self._save_delivery_state()
             logger.warning("日报 %s 连续发送失败 3 次，停止重试", day or "--")
             return False
@@ -1397,7 +1415,15 @@ class DailyReporter:
 
         if not self._last_attempt_day:
             return False
-        return not (self._last_sent_day == today or self._last_attempt_day == today)
+        # Already gave up on today's report: another catch-up would send the
+        # same failing report again (the give-up notice is already out).
+        if self._daily_given_up_day == today:
+            return False
+        # The calendar day of the last attempt (not the report day): a retry
+        # of yesterday's report must not look like "today was attempted",
+        # otherwise the fresh report is skipped for the whole day.
+        wall_day = self._last_attempt_wall_day or self._last_attempt_day
+        return not (self._last_sent_day == today or wall_day == today)
 
     def _week_key(self, day: str) -> str:
         try:
@@ -1440,12 +1466,16 @@ class DailyReporter:
         return self._weekly_last_sent_week != week_key
 
     async def _send_scheduled(self, day: str | None = None) -> None:
-        # Scope the "already attempted today" guard to the report day, not the
-        # wall-clock day. A stale retry that crosses midnight used to stamp
-        # ``_last_attempt_day`` with *today* here, so the catch-up check then
-        # concluded "today already attempted" and the fresh report was skipped
-        # for the whole day while the operator received an outdated one.
+        # Two separate markers, because they answer different questions:
+        # ``_last_attempt_day`` = "which report day was last attempted" and
+        # ``_last_attempt_wall_day`` = "on which calendar day was the last
+        # attempt made". The catch-up guard needs the *calendar* day: using
+        # the report day let a cross-midnight retry mark *yesterday* as
+        # attempted, which re-armed the catch-up and made the report loop
+        # re-send all night (a give-up notice was followed by another report
+        # one second later).
         self._last_attempt_day = day or self._today()
+        self._last_attempt_wall_day = self._today()
         self._save_delivery_state()
         targets = self._targets()
         if self._sections() is not None and not self._sections():
@@ -1514,6 +1544,7 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     self._last_sent_day = day
+                    self._daily_given_up_day = None
                     self._record(
                         day,
                         True,
@@ -1532,6 +1563,7 @@ class DailyReporter:
                         "日报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._last_sent_day = day
+                    self._daily_given_up_day = None
                     # Not a confirmed delivery: record it as failed so the
                     # dashboard's send history does not show a clean success
                     # (the detail still says "unconfirmed").
@@ -1546,6 +1578,7 @@ class DailyReporter:
         )
         if _delivered(result):
             self._last_sent_day = day
+            self._daily_given_up_day = None
             self._record(
                 day,
                 True,
@@ -1561,6 +1594,7 @@ class DailyReporter:
         elif _uncertain(result):
             logger.warning("日报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._last_sent_day = day
+            self._daily_given_up_day = None
             self._record(day, False, "text unconfirmed")
             self._image_retry_attempts = 0
             self._pending_image_retry = None

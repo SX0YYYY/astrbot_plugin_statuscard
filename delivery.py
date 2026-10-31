@@ -38,11 +38,14 @@ _LOCAL_SEND_ERRORS: tuple[type[BaseException], ...] = (
     ImportError,
     FileNotFoundError,
     IsADirectoryError,
-    PermissionError,
     # ValueError deliberately NOT in this list (v2.20.0): adapters can raise
     # it while parsing a response that was already on the wire, so treating
     # it as "definitely not sent" risks a duplicate message. It now counts
     # as uncertain -- the module never repeats a delivery it cannot rule out.
+    # PermissionError used to be here as well, but it is an OSError
+    # subclass and a socket write can fail with it *after* the frame left
+    # the process: retrying such a delivery can post the same message
+    # twice, which is exactly what the module avoids everywhere else.
 )
 
 
@@ -339,8 +342,14 @@ class DeliveryService:
             # Keep the last *real* notification separately: a dashboard
             # "verify" click used to overwrite the single slot, so the
             # diagnostics command showed a successful verify while the real
-            # alert had failed.
-            if not str(source).startswith(("verify", "broadcast")) and source != "test":
+            # alert had failed. The offline broadcast is excluded too --
+            # its source is "offline_broadcast", which does not start with
+            # "broadcast", so it used to overwrite the slot with the result
+            # of the last group it posted to.
+            if (
+                not str(source).startswith(("verify", "broadcast", "offline_broadcast"))
+                and source != "test"
+            ):
                 self.state.set("delivery_real", payload)
             self.state.save()
         except Exception as exc:

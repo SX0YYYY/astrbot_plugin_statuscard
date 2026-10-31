@@ -71,6 +71,18 @@ _CONFIG_ERROR_HINTS = (
     # fake outage every cooldown forever.
     "not found",
     "failed to get properties",
+    # A URL without a scheme ("internal:8080/health") and an unresolvable
+    # host are configuration typos, not outages. Reporting them as faults
+    # raised a fake alert every time the cooldown expired.
+    "unsupportedprotocol",
+    "request url is missing an 'http://' or 'https://' protocol",
+    "invalid url",
+    "invalidurl",
+    "name or service not known",
+    "nodename nor servname provided",
+    "temporary failure in name resolution",
+    "no address associated with hostname",
+    "getaddrinfo failed",
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
@@ -679,7 +691,14 @@ class ServiceMonitor:
                     st.pop("pending", None)
             else:
                 st["last_error"] = detail
-                st.setdefault("silent_since", now)
+                # Only a *new* fault gets a silence-window start marker. An
+                # item that was already alerting before the window started
+                # must keep its original episode: marking it here produced a
+                # second alert+recovery pair at the end of the window (the
+                # daily report then showed an extra row) and claimed the
+                # outage was never pushed even though it was.
+                if not st.get("alerting"):
+                    st.setdefault("silent_since", now)
             states[key] = st
             return
 
@@ -1039,6 +1058,14 @@ class ServiceMonitor:
             "send_exhausted",
             "stale",
             "silent_since",
+            # A recovery notice that was queued before the config broke
+            # describes an incident that is already over: delivering it after
+            # the operator fixed the config sent a stale "已恢复" with the
+            # old timestamps (and the event log kept two recovery rows).
+            "pending_recovery",
+            "recovery_attempt",
+            "recovery_next_attempt",
+            "recovery_retry_count",
         ):
             st.pop(stale_key, None)
         self._record_event(

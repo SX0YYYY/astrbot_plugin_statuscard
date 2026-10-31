@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import socket
 import time
@@ -39,7 +40,13 @@ from .collectors import (
 from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
-from .utils import mask_umo, normalize_targets, redact_url
+from .utils import (
+    mask_chat_ids,
+    mask_umo,
+    normalize_targets,
+    redact_url,
+    safe_int,
+)
 from .version import __version__, resolve_astrbot_version
 
 PLUGIN_NAME = "astrbot_plugin_statuscard"
@@ -51,7 +58,29 @@ def jsonify(payload: Any) -> Any:
 
     if _json_response is None:
         raise RuntimeError("当前 AstrBot 不支持 astrbot.api.web，插件页面 API 不可用")
-    return _json_response(payload)
+    return _json_response(_sanitize_json(payload))
+
+
+def _sanitize_json(value: Any) -> Any:
+    """Replace non-finite floats so the payload is valid JSON.
+
+    SQLite happily stores ``Infinity`` in a REAL column and Python writes it
+    as a bare ``Infinity`` literal -- which is *not* valid JSON. The browser
+    then rejected the whole response and the tab went blank instead of
+    showing a single field as ``--``.
+    """
+
+    import math
+
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {key: _sanitize_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_json(item) for item in value]
+    return value
 
 
 def _timezone_name(config: Any) -> str:
@@ -567,10 +596,14 @@ class PageApi:
                     state = "failed"
                 # The receipt error can quote the full target (for example
                 # "无法解析目标: default:GroupMessage:123"), which defeated the
-                # masked "target" field right above it.
+                # masked "target" field right above it. It can also quote
+                # only the bare session id ("会话 ID 不是数字: 461961169") or
+                # embed it in an exception message, so the full-UMO
+                # replacement alone was not enough.
                 error_text = str(receipt.get("error") or "")
                 if target:
                     error_text = error_text.replace(target, _mask_umo(target))
+                error_text = mask_chat_ids(error_text)
                 per_target.append(
                     {
                         # Keep enough to tell targets apart without echoing
@@ -744,7 +777,9 @@ class PageApi:
             # list_resources returns ascending rows, so the newest ones are
             # at the end; cutting [:limit] dropped the latest samples while
             # the toast promised "the most recent records".
-            rows = [row for row in fetched[-limit:] if int(row.get("ts") or 0) <= end]
+            rows = [
+                row for row in fetched[-limit:] if safe_int(row.get("ts") or 0) <= end
+            ]
             if "network" in self._redact():
                 # The overview and history honour the network rule; the CSV
                 # export is a file people forward, so it must not leak the
@@ -792,7 +827,9 @@ class PageApi:
             rows = [
                 {
                     **row,
-                    "name": redact_url(str(row.get("name") or "")),
+                    "name": self._redactor().mask_name(
+                        redact_url(str(row.get("name") or ""))
+                    ),
                 }
                 for row in fetched[-limit:]
             ]
@@ -809,7 +846,9 @@ class PageApi:
                     "ts": row.get("ts"),
                     "day": row.get("day"),
                     "kind": row.get("kind"),
-                    "name": redact_url(str(row.get("name") or "")),
+                    "name": self._redactor().mask_name(
+                        redact_url(str(row.get("name") or ""))
+                    ),
                     "detail": self._mask_host_text(str(row.get("detail") or "")),
                     "status": row.get("status"),
                     "resolved_ts": row.get("resolved_ts"),
@@ -870,7 +909,7 @@ class PageApi:
         # list_resources returns ascending rows, so the newest sample is at
         # the end: slicing from the front dropped "now" from the chart. Keep
         # the tail, matching the export endpoint.
-        rows = [row for row in fetched[-20000:] if int(row.get("ts") or 0) <= end]
+        rows = [row for row in fetched[-20000:] if safe_int(row.get("ts") or 0) <= end]
         sampled = self._downsample(rows)
         points = [
             {
@@ -941,7 +980,7 @@ class PageApi:
         gaps = [
             gap
             for gap in detect_resource_gaps(
-                [int(row.get("ts") or 0) for row in rows], 2 * sample_interval
+                [safe_int(row.get("ts") or 0) for row in rows], 2 * sample_interval
             )
             if gap["end"] > start and gap["start"] < end
         ]
@@ -1005,8 +1044,11 @@ class PageApi:
                 "kind": event.get("kind"),
                 # Event names can be a URL the operator pasted as the monitor
                 # name; strip query/credentials before the page or a forwarded
-                # CSV can see them.
-                "name": redact_url(str(event.get("name") or "")),
+                # CSV can see them, and hide the host entirely when the
+                # hostname rule is on (the daily report already does).
+                "name": self._redactor().mask_name(
+                    redact_url(str(event.get("name") or ""))
+                ),
                 # Mask first, then cut: truncating first can leave a partial
                 # token that no longer matches the redaction pattern.
                 "detail": self._mask_host_text(str(event.get("detail") or ""))[:200],
@@ -1017,8 +1059,8 @@ class PageApi:
         ]
         items.sort(
             key=lambda item: (
-                int(item.get("ts") or 0),
-                int(item.get("id") or 0),
+                safe_int(item.get("ts") or 0),
+                safe_int(item.get("id") or 0),
             ),
             reverse=True,
         )
@@ -1080,11 +1122,14 @@ class PageApi:
             and now_ts - cached[0] < self._reports_cache_seconds
             and cached[2] == cache_key
         ):
-            return jsonify(cached[1])
+            # Hand out a copy: the cached payload is the very object every
+            # later request would receive, so a caller mutating it in place
+            # would corrupt all subsequent responses.
+            return jsonify(copy.deepcopy(cached[1]))
         if self._reports_build_inflight and cached and cached[2] == cache_key:
             # A concurrent miss is already building the same payload; serve
             # the stale copy instead of building it twice (v2.20.0).
-            return jsonify(cached[1])
+            return jsonify(copy.deepcopy(cached[1]))
         self._reports_build_inflight = True
         try:
             return await self._build_reports_payload(

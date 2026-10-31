@@ -54,6 +54,12 @@ class _Bucket:
     # alert it summarizes.
     first_inflight: bool = False
     first_started: float = 0.0
+    # A summary is currently being sent. Recovery notices must wait for it:
+    # the previous version cleared ``until`` before the await, so
+    # ``window_remaining()`` returned 0 and the recovery notice was pushed
+    # *before* the summary that contained its own alert -- the user saw
+    # "recovered" for an incident they were never told about.
+    summary_inflight: bool = False
 
 
 class AlertAggregator:
@@ -85,6 +91,11 @@ class AlertAggregator:
         bucket = self._buckets.get(str(kind))
         if bucket is None:
             return 0.0
+        if bucket.summary_inflight:
+            # A summary is on its way: the recovery notice has to follow it,
+            # not race it. Report a short remaining time so the caller
+            # schedules the notice just after the summary lands.
+            return max(3.0, bucket.until - time.time())
         return max(0.0, bucket.until - time.time())
 
     def _bucket(self, kind: str) -> _Bucket:
@@ -270,7 +281,10 @@ class AlertAggregator:
             self._schedule_flush(key, 5.0)
             return
         pending, bucket.pending = bucket.pending, []
-        bucket.until = 0.0
+        # Keep ``until`` non-zero while the summary is in flight so a
+        # recovery notice for one of the buffered items queues behind the
+        # summary instead of overtaking it.
+        bucket.summary_inflight = True
         current = asyncio.current_task()
         if (
             bucket.flush_task
@@ -280,6 +294,8 @@ class AlertAggregator:
             bucket.flush_task.cancel()
         sender = send or bucket.send
         if not pending:
+            bucket.summary_inflight = False
+            bucket.until = 0.0
             return
         if sender is None:
             # The first send raised before the window could be reused: the
@@ -291,6 +307,8 @@ class AlertAggregator:
             )
             if bucket.on_abandon is not None:
                 bucket.on_abandon(list(pending))
+            bucket.summary_inflight = False
+            bucket.until = 0.0
             return
         total = len(pending) + bucket.dropped_count
         lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
@@ -333,6 +351,11 @@ class AlertAggregator:
             self._requeue(bucket, pending, key, "发送异常")
             logger.exception("告警汇总发送失败（%s）", key)
         finally:
+            # The summary is no longer in flight: a recovery notice may now
+            # be scheduled. The window itself stays closed until the next
+            # push opens a new one.
+            bucket.summary_inflight = False
+            bucket.until = 0.0
             # Alerts that arrived during the send opened a new window and
             # need a task of their own once this one is no longer "running".
             self._schedule_if_pending(key)

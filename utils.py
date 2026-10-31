@@ -40,6 +40,11 @@ def safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+    except OverflowError:
+        # int(float("inf")) raises OverflowError, not ValueError: a state
+        # file holding Infinity used to crash the caller that trusted
+        # safe_int never to raise.
+        return default
 
 
 def cfg_get(config: Any, path: str, default: Any = None) -> Any:
@@ -192,6 +197,10 @@ def redact_url(url: Any) -> str:
         port = None
     if port:
         host = f"{host}:{port}"
+    if not parts.scheme:
+        # A scheme-relative URL ("//host/path"): it has a netloc but no
+        # scheme, so the generic assembly produced the broken "://host/path".
+        return f"//{host}{parts.path}"
     return f"{parts.scheme}://{host}{parts.path}"
 
 
@@ -253,3 +262,22 @@ def mask_umo(target: object) -> str:
     keep = min(2, len(digits) - 1)
     masked = "*" * (len(digits) - keep) + digits[len(digits) - keep :]
     return f"{head}:{masked}" if head else masked
+
+
+def mask_chat_ids(text: str) -> str:
+    """Mask bare chat ids inside a free-form error message.
+
+    A receipt error can quote only the session id ("会话 ID 不是数字:
+    461961169abc") or embed it in an exception message, so replacing the
+    full UMO string did not hide it and the dashboard showed the complete
+    group id next to a masked target field.
+    """
+
+    import re
+
+    def _mask(match: re.Match[str]) -> str:
+        digits = match.group(0)
+        keep = min(2, len(digits) - 1)
+        return "*" * (len(digits) - keep) + digits[len(digits) - keep :]
+
+    return re.sub(r"\d{6,}", _mask, str(text or ""))

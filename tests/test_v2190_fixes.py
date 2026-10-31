@@ -114,7 +114,11 @@ def test_on_abandon_persists_withdrawal(tmp_path: Path) -> None:
     fresh = StateStore(tmp_path / "state.json")
     rule = fresh.data["alerts"]["rules"]["cpu"]
     assert rule["alerted"] is False
-    assert "last_sent" not in rule
+    # The rule stays retryable: the abandon marks it as "never announced"
+    # instead of clearing the cooldown reference (which used to make the
+    # rule silent for the whole outage).
+    assert rule["summary_abandoned"] is True
+    assert rule["last_sent"] > 0
 
 
 def test_flush_cancel_requeues_batch() -> None:
@@ -336,7 +340,12 @@ def test_abandon_clears_last_sent(tmp_path: Path) -> None:
 
     engine = alerts_module.AlertEngine(_Plugin(), state, config, report_store=store)
     engine._on_summary_abandoned([("CPU", "原因")])
-    assert "last_sent" not in state.data["alerts"]["rules"]["cpu"]
+    rule = state.data["alerts"]["rules"]["cpu"]
+    # The abandon no longer wipes ``last_sent``: clearing it removed the only
+    # signal the cooldown-retry path uses, so the rule stayed silent for the
+    # rest of the outage (and the recovery notice was withheld as well).
+    assert rule["summary_abandoned"] is True
+    assert rule["last_sent"] > 0
 
 
 # ----------------------------------------------------------------------

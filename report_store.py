@@ -680,8 +680,14 @@ class ReportStore:
         now: int | None = None,
     ) -> None:
         now = int(now if now is not None else time.time())
-        resource_cutoff = now - max(1, resource_days) * 86400
-        event_cutoff = now - max(1, event_days) * 86400
+        # Align the cutoff to a local-day boundary. Cutting at "now minus N
+        # days" (to the second) removed the oldest day of the N-day trend
+        # whenever the cleanup ran late in the evening, so the "30-day"
+        # chart silently started with a partial day that drifted by up to 24
+        # hours depending on the cleanup time.
+        day_start = now - (now % 86400)
+        resource_cutoff = day_start - max(1, resource_days) * 86400
+        event_cutoff = day_start - max(1, event_days) * 86400
         self._write(
             "DELETE FROM resource_samples WHERE ts < ?",
             (resource_cutoff,),

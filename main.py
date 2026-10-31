@@ -266,11 +266,22 @@ class StatusCardPlugin(Star):
             # off while the plugin still looked loaded.
             logger.exception("配置体检失败，已跳过（不影响插件启动）")
             self._audit_issues = []
-        self.sampler.start()
-        self.report.start()
-        self.daily_report.start()
-        self.alerts.start()
-        self.monitor.start()
+        # Isolate each component start, mirroring terminate(): one component
+        # raising used to abort initialize(), which made AstrBot unload the
+        # plugin without calling terminate() -- the already-started sampling
+        # tasks then kept running against an unregistered plugin instance
+        # and kept writing state.json every minute.
+        for name, start in (
+            ("sampler", self.sampler.start),
+            ("report", self.report.start),
+            ("daily_report", self.daily_report.start),
+            ("alerts", self.alerts.start),
+            ("monitor", self.monitor.start),
+        ):
+            try:
+                start()
+            except Exception:
+                logger.exception("%s 启动失败，已跳过（其余功能继续运行）", name)
         if self._audit_issues:
             for issue in self._audit_issues:
                 if issue.level == "error":
@@ -527,6 +538,14 @@ class StatusCardPlugin(Star):
 
         path = self.data_dir / f"statuscard_fallback_{int(time.time() * 1000)}.png"
         path.write_bytes(png)
+        try:
+            # The fallback card draws the top processes, the mount points and
+            # the traffic rates -- the same kind of data state.json holds,
+            # which the plugin keeps at 0600. Leave the file readable only
+            # by its owner as well.
+            os.chmod(path, 0o600)
+        except OSError:
+            logger.debug("设置本地简化卡权限失败")
         try:
             for old in self.data_dir.glob("statuscard_fallback_*.png"):
                 if old != path and old.stat().st_mtime < time.time() - 600:
