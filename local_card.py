@@ -338,7 +338,11 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
     footer_y = height - 56
     draw.text(
         (PADDING, footer_y),
-        "内容口径与脱敏规则与状态卡一致 · 由本地 Pillow 渲染生成",
+        # The simplified card does not show every block of the full card
+        # (no QQ counts, no website table). Claiming "identical to the
+        # status card" was wrong: the user compared the two images and saw
+        # content missing. The wording now says what is actually true.
+        "简化版：CPU / 内存 / SWAP / 磁盘 / 网络 / 进程 · 完整数据见状态卡 · 本地 Pillow 渲染",
         font=_font(20),
         fill=MUTED,
     )

@@ -1069,7 +1069,17 @@ class DailyReporter:
                         # reached the scheduled branch, and dropped the newest
                         # missed day for good. Only the newest one should be
                         # sent after a reconnect, so move the pin forward.
-                        newest = self._default_report_day()
+                        #
+                        # The pin may only move to a report whose window has
+                        # actually closed. ``_default_report_day()`` is the
+                        # calendar yesterday, but the report for that day is
+                        # not due until the NEXT day's send time: a retry
+                        # that fired at 00:01 used to move the pin to the
+                        # report of the new day, sent a report whose window
+                        # had just opened (all "--"), wrote ``last_sent_day``
+                        # for it and therefore skipped the real, complete
+                        # report of that evening -- losing both (v2.20.12).
+                        newest = self._latest_due_report_day()
                         if _day and newest > _day:
                             logger.info(
                                 "日报 %s 的掉线补发已更新为 %s（只补最近一份）",
@@ -1305,15 +1315,85 @@ class DailyReporter:
     def _default_report_day(self) -> str:
         return (now_in_timezone(self.config) - timedelta(days=1)).date().isoformat()
 
-    def _schedule_weekly_retry(self, transport_offline: bool = False) -> bool:
+    def _latest_due_report_day(self) -> str:
+        """The newest report day whose window has already closed.
+
+        The report for report day D is due at D+1's send time: a report
+        scheduled for 21:00 covers 00:00-24:00 of the previous day and is
+        therefore only complete once the next evening has arrived. The
+        calendar yesterday (``_default_report_day``) is NOT necessarily due
+        yet -- at 00:01 on 11-01 it names 10-31, whose report is not sent
+        until 11-01 21:00.
+
+        The offline-recovery path moves its pinned report day forward so a
+        multi-day outage delivers the newest report instead of the oldest
+        one. Moving it to a day that is not due yet sends a report whose
+        window has just opened (all "--"), marks that day as sent and
+        therefore skips the real, complete report of that evening (v2.20.12).
+
+        The result is the latest report day D with
+        ``now >= (D + 1 day) at the configured send time``; when the send
+        time is invalid the calendar yesterday is used, because the daily
+        loop cannot know when the report is due then.
+        """
+
+        now = now_in_timezone(self.config)
+        fallback = self._default_report_day()
+        try:
+            time_text = self._time_text()
+            hour, minute = [int(part) for part in time_text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("out of range")
+        except (TypeError, ValueError):
+            # The send time cannot be parsed, so the loop cannot know when a
+            # report is due. The calendar yesterday is NOT a safe fallback:
+            # it is the very value this function exists to avoid (a report
+            # whose window has just opened). Returning the day before it
+            # keeps the pin where it is -- a report that is one day late is
+            # much better than one that is empty and locks the evening
+            # (v2.20.12).
+            try:
+                return (date.fromisoformat(fallback) - timedelta(days=1)).isoformat()
+            except ValueError:
+                return fallback
+        # The candidate is the calendar yesterday; walk back until its window
+        # has closed. At most a few iterations are needed (the send time can
+        # be later in the day than the current time).
+        try:
+            candidate = date.fromisoformat(fallback)
+        except ValueError:
+            return fallback
+        tz = now.tzinfo
+        for _ in range(4):
+            due = datetime(
+                candidate.year,
+                candidate.month,
+                candidate.day,
+                hour,
+                minute,
+                tzinfo=tz,
+            ) + timedelta(days=1)
+            if now >= due:
+                return candidate.isoformat()
+            candidate -= timedelta(days=1)
+        return fallback
+
+    def _schedule_weekly_retry(
+        self,
+        transport_offline: bool = False,
+        store_unavailable: bool = False,
+    ) -> bool:
         # The marker belongs to the report week (Saturday), not to the day the
         # attempt happens: a Sunday-night retry that crosses midnight runs on
         # Monday, and keying it by "today" wrote the wrong week.
-        report_day = self._weekly_pending_report_day or self._default_report_day()
+        report_day = (
+            getattr(self, "_weekly_pending_report_day", None)
+            or self._default_report_day()
+        )
         week_key = self._week_key(report_day)
         if transport_offline:
             if (
-                self._weekly_pending_recovery_week
+                getattr(self, "_weekly_pending_recovery_week", None)
                 and self._weekly_pending_recovery_week != week_key
             ):
                 logger.warning(
@@ -1329,6 +1409,33 @@ class DailyReporter:
             logger.warning(
                 "周报发送失败（Bot 连接不可用），已排队，恢复后补发最近这一期"
             )
+            return True
+        if store_unavailable:
+            # The database heals on its own, so the content retry budget
+            # stays untouched. The weekly side used to queue nothing at all
+            # here: the only recovery path was the catch-up guard, whose
+            # window is 8.5 hours after the slot, so a longer database
+            # outage made the whole weekly report disappear silently
+            # (v2.20.12).
+            #
+            # The report day is pinned: a retry that crosses midnight would
+            # otherwise build "yesterday's" week and cover a different
+            # window than the one the slot announced.
+            #
+            # It is the day of the CURRENT slot, not a leftover from the
+            # previous week: the branch runs before the report day is
+            # computed, so keeping an old value would send last week's
+            # window (v2.20.12).
+            slot = self._weekly_slot_before(now_in_timezone(self.config))
+            if slot is not None:
+                self._weekly_pending_report_day = (
+                    (slot - timedelta(days=1)).date().isoformat()
+                )
+            elif getattr(self, "_weekly_pending_report_day", None) is None:
+                self._weekly_pending_report_day = report_day
+            self._weekly_pending = time.time() + 900
+            self._save_delivery_state()
+            logger.warning("周报发送失败（日报数据库不可用），已排队，数据库恢复后补发")
             return True
         self._weekly_retry_count += 1
         if self._weekly_retry_count > 3:
@@ -1380,6 +1487,12 @@ class DailyReporter:
             # like the empty-target/sections branches (a fresh attempt still
             # runs after the pause).
             self._weekly_pause_until = time.time() + 600
+            # Queue the report instead of dropping it. The weekly side used
+            # to queue nothing here, so the only recovery path was the
+            # catch-up guard and its 8.5 hour window: a longer database
+            # outage made the whole weekly report disappear without a
+            # trace (v2.20.12).
+            self._schedule_weekly_retry(store_unavailable=True)
             return
         try:
             view = await asyncio.to_thread(
@@ -1568,7 +1681,12 @@ class DailyReporter:
         except Exception:
             logger.debug("发送放弃重试提示失败", exc_info=True)
 
-    def _schedule_retry(self, day: str | None, transport_offline: bool = False) -> bool:
+    def _schedule_retry(
+        self,
+        day: str | None,
+        transport_offline: bool = False,
+        store_unavailable: bool = False,
+    ) -> bool:
         """Remember a failed delivery and queue the next attempt.
 
         ``day`` is ``None`` for the scheduled run, which resolves "yesterday"
@@ -1584,6 +1702,14 @@ class DailyReporter:
         ``pending_recovery_day`` and retried once the connection is back. Only
         the newest day is kept, so reconnecting after several missed days
         sends one report rather than a burst (v2.20.5).
+
+        ``store_unavailable`` means the report database could not be read.
+        That is the same kind of "it will heal on its own" failure as a
+        disconnected channel (a full disk, a read-only mount, a container
+        being rebuilt), so it must not consume the content retry budget
+        either: the three attempts (10/20/30 minutes) were spent within an
+        hour and the report was given up for good, while the database was
+        still broken (v2.20.12).
 
         Returns ``True`` when another attempt was scheduled and ``False``
         when the retry budget for this report day is exhausted.
@@ -1613,6 +1739,18 @@ class DailyReporter:
             self._save_delivery_state()
             logger.warning(
                 "日报 %s 发送失败（Bot 连接不可用），已排队，恢复后补发最近这一份",
+                budget_key,
+            )
+            return True
+        if store_unavailable:
+            # The database is temporarily unreadable. Like a disconnected
+            # channel this heals on its own, so the content retry budget
+            # stays untouched and the report is polled every 15 minutes
+            # instead of being given up after three attempts (v2.20.12).
+            self._pending_retry = (budget_key, time.time() + 900)
+            self._save_delivery_state()
+            logger.warning(
+                "日报 %s 发送失败（日报数据库不可用），已排队，数据库恢复后补发",
                 budget_key,
             )
             return True
@@ -1838,10 +1976,13 @@ class DailyReporter:
             logger.error("日报数据库不可用，跳过本次日报发送")
             self._record(day or self._default_report_day(), False, "db unavailable")
             # A database outage is usually transient (disk full, permissions,
-            # a half-written WAL): drop the day's report and the user gets
-            # nothing, while the store heals within a minute. Queue the normal
-            # retry ladder instead (v2.20.5).
-            self._schedule_retry(day or self._default_report_day())
+            # a half-written WAL): it heals on its own, so it must not
+            # consume the content retry budget. The three attempts (10/20/30
+            # minutes) were spent inside an hour and the report was given up
+            # for good while the store was still broken (v2.20.12).
+            self._schedule_retry(
+                day or self._default_report_day(), store_unavailable=True
+            )
             await self._notify_store_unavailable(targets)
             return
         try:

@@ -225,6 +225,7 @@
         "reason_process_since": "Process sampling has been accumulating since {first_day}; no data for {day}",
         "reason_process_none": "No process samples yet",
         "status_recovered": "Recovered",
+        "status_unresolved": "Unresolved",
         "method_weekly_sections_empty": "Weekly content not configured"
       }
     }

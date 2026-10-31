@@ -229,14 +229,18 @@ class AlertAggregator:
         if bucket is None or not bucket.pending or bucket.send is None:
             return
         now = time.time()
-        if bucket.until <= now:
-            bucket.until = now + 1.0
         if bucket.retry_at > now:
             # A failed summary is inside its backoff window. Retrying every
             # second let a short channel blip exhaust all attempts before the
             # channel recovered; wait as long as the single-alert path does.
+            # The window stays open until the retry is due, so a recovery
+            # notice that arrives meanwhile waits for the summary instead of
+            # racing ahead of it (v2.20.12).
+            bucket.until = max(bucket.until, bucket.retry_at)
             self._schedule_flush(kind, bucket.retry_at - now)
             return
+        if bucket.until <= now:
+            bucket.until = now + 1.0
         self._schedule_flush(kind)
 
     async def _flush_later(self, kind: str, delay: float) -> None:
@@ -409,6 +413,14 @@ class AlertAggregator:
         bucket.retry_at = time.time() + retry_delay(bucket.retries)
         bucket.pending[:0] = pending
         self._trim_pending(bucket, key)
+        # Keep the window open across the backoff. The summary is still
+        # queued, so a recovery notice that arrives now must wait for it
+        # instead of racing ahead: the user saw "已恢复" first and the
+        # "告警汇总" a minute later, which reads like two unrelated
+        # messages (v2.20.12). ``_schedule_if_pending`` used to shorten the
+        # window to a single second, which expired while the summary was
+        # still waiting for its retry.
+        bucket.until = max(bucket.until, bucket.retry_at)
         logger.warning(
             "告警汇总%s，%d 项放回队列等待重试（%s，第 %d 次，约 %d 秒后）",
             why,

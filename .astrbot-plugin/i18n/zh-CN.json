@@ -225,6 +225,7 @@
         "reason_process_since": "进程采样从 {first_day} 开始积累，暂无 {day} 数据",
         "reason_process_none": "暂无进程采样数据",
         "status_recovered": "已恢复",
+        "status_unresolved": "未恢复",
         "method_weekly_sections_empty": "周报未配置内容"
       }
     }

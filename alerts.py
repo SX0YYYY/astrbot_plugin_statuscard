@@ -224,6 +224,11 @@ class AlertEngine:
         # copy to the groups handled in the first pass (v2.20.5).
         self._broadcast_done: set[str] = set()
         self._client_missing_warned = False
+        # When the engine started. The OneBot client does not exist for the
+        # first seconds after a start-up (NapCat is still connecting), so a
+        # missing client is expected during that window and must not be
+        # reported as a configuration problem (v2.20.12).
+        self._started_at: float = time.time()
         self._primed = False
         self._disk_warned: set[str] = set()
         self._daily_last_sent_day: str | None = None
@@ -279,6 +284,19 @@ class AlertEngine:
             if isinstance(summary, dict):
                 pending = summary.get("pending")
                 if isinstance(pending, dict):
+                    # A queued image is only worth sending while it is
+                    # still today's picture. Six hours is the outer bound of
+                    # the in-loop retries (10 minutes apart, four attempts),
+                    # so a backlog older than that would push a stale image
+                    # into the chat hours after the slot (v2.20.12).
+                    queued_at = _safe_float(pending.get("queued_at"))
+                    if queued_at and time.time() - queued_at > 6 * 3600:
+                        logger.warning(
+                            "每日定时状态图的补发标记已超过 6 小时，丢弃（报告日 %s）",
+                            pending.get("day") or "--",
+                        )
+                        self._clear_daily_pending()
+                        return None
                     return pending
         except Exception:
             logger.debug("读取每日状态图补发标记失败", exc_info=True)
@@ -291,7 +309,22 @@ class AlertEngine:
                 if not isinstance(summary, dict):
                     summary = {}
                     alerts["daily_summary"] = summary
-                summary["pending"] = {"day": day, "next": float(next_ts)}
+                pending = summary.get("pending")
+                queued_at = time.time()
+                if isinstance(pending, dict) and pending.get("day") == day:
+                    # Keep the age of the FIRST failure: refreshing it on
+                    # every retry made the six-hour limit unreachable, so a
+                    # broken target could queue the picture forever (and
+                    # every attempt rendered a new image).
+                    queued_at = _safe_float(pending.get("queued_at")) or queued_at
+                summary["pending"] = {
+                    "day": day,
+                    "next": float(next_ts),
+                    # The age of the record, so an old backlog can be
+                    # dropped instead of sending a stale picture.
+                    "queued_at": queued_at,
+                }
+            self.state.save()
         except Exception:
             logger.debug("记录每日状态图补发标记失败", exc_info=True)
 
@@ -301,6 +334,7 @@ class AlertEngine:
                 summary = alerts.get("daily_summary")
                 if isinstance(summary, dict) and "pending" in summary:
                     summary.pop("pending", None)
+            self.state.save()
         except Exception:
             logger.debug("清除每日状态图补发标记失败", exc_info=True)
 
@@ -362,6 +396,7 @@ class AlertEngine:
         report the entire disabled window as one interruption.
         """
 
+        changed = False
         with self.state.section("alerts") as alerts:
             rules = alerts.get("rules") or {}
             offline = alerts.get("offline") or {}
@@ -374,7 +409,29 @@ class AlertEngine:
             if isinstance(offline, dict):
                 tracked.append(("offline", offline))
             for key, st in tracked:
-                if not isinstance(st, dict) or not st.get("alerting"):
+                if not isinstance(st, dict):
+                    continue
+                if st.get("recovery_awaits_summary"):
+                    # The recovery was queued because its alert sat in a
+                    # summary that lived only in the aggregator's memory. A
+                    # restart took that summary away, so the recovery must
+                    # go with it: otherwise the user receives a stale
+                    # "已恢复" for an incident they were never told about
+                    # (v2.20.12).
+                    #
+                    # This case is NOT covered by the ``alerting`` check
+                    # below: the recovery is queued after the episode was
+                    # closed, so ``alerting`` is already False.
+                    st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
+                    st.pop("recovery_awaits_summary", None)
+                    changed = True
+                    logger.info(
+                        "告警规则 %s 的排队恢复在重启前失去对应的汇总，已撤回", key
+                    )
+                if not st.get("alerting"):
                     continue
                 if st.get("awaiting_summary"):
                     # The buffered alert lived only in the aggregator's
@@ -388,6 +445,16 @@ class AlertEngine:
                     st["summary_abandoned"] = True
                     st.pop("awaiting_summary", None)
                     st.pop("summary_buffered", None)
+                    # The queued recovery belongs to the summary that never
+                    # arrived, so it has to go with it: leaving it behind
+                    # delivered a stale "已恢复" for an incident the user
+                    # was never told about (v2.20.12).
+                    st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
+                    st.pop("recovery_awaits_summary", None)
+                    changed = True
                     logger.info(
                         "告警规则 %s 的聚合汇总在重启前未送达，已标记为可重试", key
                     )
@@ -400,11 +467,17 @@ class AlertEngine:
                     last_seen = _safe_float(st.get("since"))
                 if last_seen and now - last_seen > 86400:
                     st["stale"] = True
+                    changed = True
                     logger.warning(
                         "告警规则 %s 已超过 24 小时未采样（可能关闭了告警），"
                         "恢复时只记事件、不发恢复消息",
                         key,
                     )
+        # These markers only matter across a restart, so they have to reach
+        # the disk: without the save the next process reads the stale
+        # "alerted=True" and loses the alert again (v2.20.12).
+        if changed:
+            self.state.save()
 
     def start(self) -> None:
         if self._running or (
@@ -575,6 +648,15 @@ class AlertEngine:
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
                     st.pop("recovery_awaits_summary", None)
+                    # The summary was the only thing that would have
+                    # announced this rule, so the rule was never notified.
+                    # Leaving ``alerted`` set kept every later fault of this
+                    # rule silent for the rest of the outage (the push gates
+                    # all require "not alerted"), while the recovery notice
+                    # still went out (v2.20.12).
+                    st["alerted"] = False
+                    st["summary_abandoned"] = True
+                    st.pop("awaiting_summary", None)
                     changed = True
                     continue
                 if not st.get("alerting"):
@@ -1136,6 +1218,13 @@ class AlertEngine:
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
+                        # The queued recovery is folded into this alert, so
+                        # it no longer waits for a summary. A stale marker
+                        # made the next abandon callback return early and
+                        # leave the rule marked "already notified" -- a
+                        # permanent silence for the rest of the outage
+                        # (v2.20.12).
+                        st.pop("recovery_awaits_summary", None)
                     text = (
                         f"⚠️ 系统告警 · {name}\n"
                         "──────────────\n"
@@ -1286,6 +1375,10 @@ class AlertEngine:
             # attempt and never deliver any alert at all.
             st["retry_count"] = 0
             st["next_attempt"] = 0
+            # ``summary_abandoned`` marks a summary that never reached the
+            # chat. Keeping it made the next fault skip the cooldown gate
+            # and push a duplicate alert (v2.20.12).
+            st.pop("summary_abandoned", None)
             pending_text = st.get("pending_recovery")
             if pending_text and not self.recover_notify:
                 # The operator turned recovery notices off after this one was
@@ -1305,6 +1398,15 @@ class AlertEngine:
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
+                        # The recovery reached the chat, so it no longer
+                        # depends on a pending summary. Leaving the marker
+                        # behind made the NEXT abandon callback take the
+                        # "drop the recovery" branch and return early, so
+                        # ``alerted`` was never cleared and the rule stayed
+                        # silent for the rest of the outage -- while the
+                        # recovery notice still went out for an incident the
+                        # user was never told about (v2.20.12).
+                        st.pop("recovery_awaits_summary", None)
                     else:
                         if self._transport_offline() or delivery_offline(result):
                             # Keep the recovery notice queued across the
@@ -1411,6 +1513,17 @@ class AlertEngine:
                         # an abandoned summary must not withdraw it.
                         st["recovery_awaits_summary"] = False
                         logger.warning("告警 %s 恢复通知未送达，已排队稍后补发", name)
+            else:
+                # The episode never latched (``alerting`` stayed False),
+                # which means no alert ever reached the chat -- the push
+                # failed every time. ``alert_since`` was still set when the
+                # push was attempted, so the NEXT episode inherited this
+                # stale start time and reported a duration measured from
+                # the old outage ("告警持续 10 分钟" for a 0.1 s blip).
+                # The latched branch above clears the marker itself (it
+                # needs it to compute the duration first), so only the
+                # never-latched case is handled here (v2.20.12).
+                st["alert_since"] = 0
 
     async def _broadcast_recovery(self, offline_ts: float, duration_text: str) -> None:
         """Announce the recovery to every group the bot has joined.
@@ -1594,9 +1707,28 @@ class AlertEngine:
             self.plugin.context, self.platform_id, self_id or None
         )
         if client is None:
-            # A platform_id that does not match the AstrBot instance id makes
-            # disconnect detection and OneBot direct sends silently no-op;
-            # warn once so the diagnosis is not "the bot just never alerts".
+            # The client is missing for two very different reasons:
+            #
+            # 1. The bot has not connected yet. Right after a start-up the
+            #    reverse WebSocket of NapCat is still coming up, so the
+            #    first sample lands before the client exists. That is the
+            #    normal case, and it says nothing about the configuration.
+            # 2. The ``platform_id`` does not match an AstrBot platform
+            #    instance. Then the disconnect detection and the OneBot
+            #    direct sends silently no-op forever.
+            #
+            # The old code reported both as a warning about the
+            # configuration, so every restart produced a scary "掉线告警
+            # 与 OneBot 直发不可用" line even though the configuration was
+            # perfectly fine and the bot connected a second later. The
+            # first samples are now expected, and only a client that stays
+            # missing is reported (v2.20.12).
+            if self._started_at and time.time() - self._started_at < 120:
+                # Still inside the start-up grace period: wait for the
+                # connection instead of warning about it. The warning flag
+                # stays untouched so a client that never shows up is still
+                # reported once the grace period is over.
+                return
             if not self._client_missing_warned:
                 self._client_missing_warned = True
                 logger.warning(
@@ -2411,6 +2543,22 @@ class AlertEngine:
             self._set_daily_pending(today, time.time() + 900)
             logger.warning(
                 "每日定时状态图发送失败（Bot 连接不可用），已排队，恢复后补发"
+            )
+        else:
+            # A content failure (the T2I renderer timed out, the target
+            # format is wrong) has no "the channel is back" hook, so the
+            # pending record was only written for outages. A restart before
+            # the four in-loop retries ran out therefore lost the whole
+            # day: the attempt marker was already set, so the catch-up
+            # guard refused to send it again (v2.20.12).
+            #
+            # The pending record is what the loop consults, so queue it for
+            # every failure. It expires after six hours, so a day-old
+            # backlog never resends a stale image.
+            self._set_daily_pending(today, time.time() + 600)
+            logger.warning(
+                "每日定时状态图发送失败，已排队，%d 分钟后重试",
+                10,
             )
         return False
 

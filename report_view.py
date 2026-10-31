@@ -779,7 +779,10 @@ class DailyReportBuilder:
             boundary = day - timedelta(days=offset)
             events += self.store.list_events(boundary.isoformat(), limit=5000)
         events.sort(
-            key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0))
+            key=lambda item: (
+                safe_int(item.get("ts") or 0),
+                safe_int(item.get("id") or 0),
+            )
         )
         window_start_dt = datetime.combine(
             day - timedelta(days=span - 1), time.min, tzinfo=self.tz
@@ -788,7 +791,19 @@ class DailyReportBuilder:
         # ``resolved_ts`` is filled in when a condition clears, so the
         # duration survives a plugin restart. Events recorded before that
         # field was used fall back to pairing them in memory.
-        open_alerts: dict[tuple[str, str, str], int] = {}
+        #
+        # The pairing walks the events of one rule in chronological order.
+        # A ``recovery`` closes the currently open episode of that rule, so
+        # the next alert starts a NEW episode. This matters because
+        # ``close_all`` writes ONE resolved_ts onto every open alert of a
+        # rule: an orphan from three days ago and yesterday's blip share
+        # that timestamp, and reading it as "this alert lasted until then"
+        # rendered a 90-second outage as "3天22:27:29" (v2.20.12).
+        #
+        # ``open_episode`` maps a rule to the episode that is currently open
+        # for it: the start of the interruption and the moment it ended (0
+        # while it is still running).
+        open_episode: dict[tuple[str, str, str], tuple[int, int]] = {}
         # An interruption that began before the window still has an alert row
         # outside ``events``; load the preceding month so a recovery inside
         # the window can be paired with it instead of showing "--".
@@ -800,7 +815,10 @@ class DailyReportBuilder:
             self.store.list_events_range(
                 window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
             ),
-            key=lambda item: (int(item.get("ts") or 0), int(item.get("id") or 0)),
+            key=lambda item: (
+                safe_int(item.get("ts") or 0),
+                safe_int(item.get("id") or 0),
+            ),
         ):
             status = str(alert.get("status") or "")
             name = str(alert.get("name") or "")
@@ -811,27 +829,93 @@ class DailyReportBuilder:
                 name,
                 str(alert.get("target") or ""),
             )
+            stamp = safe_int(alert.get("ts") or 0)
             if status in {"alert", "failed"}:
                 # A "failed" row means the fault happened but its push did
                 # not arrive; it still starts an interruption for pairing.
-                # setdefault keeps the earliest start of one episode: a
-                # failed push followed by a successful retry must not move
-                # the start time three minutes later.
-                open_alerts.setdefault(key, int(alert.get("ts") or 0))
+                # A row that already carries a ``resolved_ts`` belongs to a
+                # CLOSED episode: its own recovery has been accounted for,
+                # so it must not become the open episode (v2.20.12).
+                if alert.get("resolved_ts"):
+                    open_episode.pop(key, None)
+                    continue
+                current = open_episode.get(key)
+                if current is None:
+                    open_episode[key] = (stamp, 0)
+                else:
+                    # Keep the earliest start of the episode that is still
+                    # open: several rows of one flickering interruption
+                    # belong together.
+                    open_episode[key] = (min(current[0], stamp), 0)
             elif status == "recovery":
-                # A recovery before the window closes the alert for pairing
+                # A recovery before the window closes the episode for pairing
                 # purposes; otherwise a later recovery could be matched with
                 # an interruption that had already ended.
-                open_alerts.pop(key, None)
+                open_episode.pop(key, None)
         items: list[dict[str, Any]] = []
         count = 0
         # One interruption can leave both a "failed" row (the first push did
-        # not arrive) and an "alert" row (the retry succeeded). ``close_all``
-        # writes the same resolved_ts to both, so that value identifies the
-        # episode; the old code discarded the key as soon as it read
-        # resolved_ts, and the second row counted again (2 anomalies for one
-        # blip).
+        # not arrive) and an "alert" row (the retry succeeded), and a
+        # flickering threshold can leave several rows before the condition
+        # clears. All of them belong to ONE episode, so the episode must be
+        # counted once.
+        #
+        # The pairing walks the events of a rule in chronological order:
+        #
+        #   * an "alert"/"failed" row joins the episode that is currently
+        #     open for that rule, or opens one when there is none;
+        #   * a "recovery" row closes the open episode.
+        #
+        # A recovery is therefore the only thing that separates two
+        # outages of the same rule. This keeps the two rows of one
+        # interruption together, keeps a flickering threshold as one
+        # anomaly, and separates two genuine outages.
+        #
+        # ``close_all`` writes ONE resolved_ts onto every open alert of a
+        # rule, so that timestamp alone identifies nothing: the weekly
+        # report used to read it as "this alert lasted until then" and
+        # rendered "已恢复 3天22:27:29" for a 90-second outage, while the
+        # outage that really happened was swallowed by the de-duplication
+        # (v2.20.12).
         seen_ids: set[tuple[tuple[str, str, str], int]] = set()
+        # For every alert row: the start of its episode and the moment that
+        # episode ended (0 while it is still open).
+        episode_of: dict[tuple[tuple[str, str, str], int], tuple[int, int]] = {}
+        # For every recovery row: the episode it closed.
+        recovery_episode: dict[tuple[tuple[str, str, str], int], tuple[int, int]] = {}
+        # ``open_episode`` already holds the interruptions that began before
+        # the window; the scan below continues from there, so a recovery
+        # inside the window closes the right episode.
+        for event in events:
+            status = str(event.get("status") or "")
+            name = str(event.get("name") or "")
+            if not name:
+                continue
+            key = (
+                str(event.get("kind") or ""),
+                name,
+                str(event.get("target") or ""),
+            )
+            stamp = safe_int(event.get("ts") or 0)
+            if status in {"alert", "failed"}:
+                current = open_episode.get(key)
+                if current is None:
+                    # A new episode of this rule.
+                    current = (stamp, 0)
+                    open_episode[key] = current
+                episode_of[(key, stamp)] = current
+            elif status == "recovery":
+                current = open_episode.pop(key, None)
+                if current is None:
+                    continue
+                start = current[0]
+                # Every row of that episode now ends here.
+                for member, member_episode in list(episode_of.items()):
+                    if member[0] == key and member_episode[0] == start:
+                        episode_of[member] = (start, stamp)
+                # The recovery row itself describes that episode.
+                recovery_episode[(key, stamp)] = (start, stamp)
+
         # Keys whose episode started inside the window and is still open; the
         # unresolved count below reads this set.
         episode_open: set[tuple[str, str, str]] = set()
@@ -850,8 +934,7 @@ class DailyReportBuilder:
                 str(event.get("target") or ""),
             )
             resolved_ts = event.get("resolved_ts")
-            if status in {"alert", "failed"}:
-                open_alerts.setdefault(key, safe_int(event.get("ts") or 0))
+            started_i = safe_int(event.get("ts") or 0)
             outside = str(event.get("day") or "") not in window_days
             if status == "recovery" and outside:
                 # Events before the window must also close their episode: the
@@ -859,7 +942,6 @@ class DailyReportBuilder:
                 # while its alert had already been registered here, so an
                 # in-window recovery was paired with a stale start time from
                 # the day before (16 hours for a 30-second blip).
-                open_alerts.pop(key, None)
                 continue
             if outside:
                 continue
@@ -867,15 +949,20 @@ class DailyReportBuilder:
                 continue
             duration_text = "--"
             if status == "recovery":
-                start = open_alerts.pop(key, None)
+                episode = recovery_episode.get((key, started_i))
+                if episode is None:
+                    # A recovery without a matching alert row (an old
+                    # database, or a row that was pruned): there is no start
+                    # to measure the duration from.
+                    start = None
+                else:
+                    start = episode[0]
                 # The episode is over: a later alert with the same key is a
                 # new one and must count again.
                 seen_ids = {sid for sid in seen_ids if sid[0] != key}
                 episode_open.discard(key)
                 if start:
-                    duration_text = format_duration(
-                        safe_int(event.get("ts") or 0) - start
-                    )
+                    duration_text = format_duration(started_i - start)
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
                 prior = emitted.get(key)
@@ -894,7 +981,19 @@ class DailyReportBuilder:
                     previous["duration"] = duration_text
                     continue
             elif status in {"alert", "failed"}:
-                episode_id = (key, safe_int(resolved_ts or 0))
+                episode = episode_of.get((key, started_i))
+                if episode is None:
+                    episode_start, episode_end = started_i, 0
+                else:
+                    episode_start, episode_end = episode
+                if not episode_end:
+                    # The recovery of this episode is not inside the window
+                    # (a fault that ended after midnight). The row carries the
+                    # exact end in ``resolved_ts``, which the alert engine
+                    # wrote when the condition cleared; use it instead of
+                    # pretending the duration is unknown (v2.20.12).
+                    episode_end = safe_int(resolved_ts or 0)
+                episode_id = (key, episode_start)
                 if episode_id in seen_ids:
                     continue
                 seen_ids.add(episode_id)
@@ -905,15 +1004,18 @@ class DailyReportBuilder:
                     # written back). It is complete, so it must not inflate
                     # "未恢复 N 项" while showing a finished duration.
                     episode_open.discard(key)
-                    resolved_i = safe_int(resolved_ts)
-                    started_i = safe_int(event.get("ts") or 0)
-                    if resolved_i - started_i > (span + 1) * 86400:
+                    if not episode_end:
+                        # Neither a recovery event nor a resolved_ts: the real
+                        # end of the outage is unknown, so no duration is
+                        # invented.
+                        duration_text = "跨窗口关闭"
+                    elif episode_end - episode_start > (span + 1) * 86400:
                         # close_all wrote the same resolved_ts onto every old
                         # open episode of a rule; pairing the newest alert
                         # with it turned a 5-minute outage into "5 days".
                         duration_text = "跨窗口关闭"
                     else:
-                        duration_text = format_duration(resolved_i - started_i)
+                        duration_text = format_duration(episode_end - episode_start)
                 else:
                     episode_open.add(key)
                     duration_text = "进行中"
@@ -982,7 +1084,7 @@ class DailyReportBuilder:
                 stale[key] = alert
         unresolved_items: list[dict[str, Any]] = []
         for alert in stale.values():
-            started = datetime.fromtimestamp(int(alert.get("ts") or 0), self.tz)
+            started = datetime.fromtimestamp(safe_int(alert.get("ts") or 0), self.tz)
             unresolved_items.append(
                 {
                     "time": started.strftime("%m-%d %H:%M"),
@@ -992,7 +1094,12 @@ class DailyReportBuilder:
                         redact_url(str(alert.get("name") or "--"))
                     ),
                     "status": "未恢复",
-                    "status_key": "alert",
+                    # A dedicated key, not "alert": the English dashboard
+                    # maps "alert" to "Alert", which told the operator that
+                    # a NEW incident had happened instead of showing the
+                    # outage that is still open. The report image also
+                    # coloured the row with the alert badge (v2.20.12).
+                    "status_key": "unresolved",
                     "detail": "开始于此处，未记录恢复时刻（可能已恢复）",
                     "duration": "进行中",
                 }

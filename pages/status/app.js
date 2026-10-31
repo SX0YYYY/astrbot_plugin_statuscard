@@ -29,6 +29,10 @@
     recovered: "status_recovered",
     failed: "status_failed",
     unknown: "status_unknown",
+    // An outage that is still open. It used to reuse "alert", so the
+    // English page showed "Alert" (a new incident) for a row whose text
+    // says "未恢复" (an incident that never recovered).
+    unresolved: "status_unresolved",
   };
 
   // Backend empty_reason strings are Chinese. Translate the known ones so the

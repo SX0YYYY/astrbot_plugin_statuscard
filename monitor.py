@@ -233,26 +233,74 @@ class ServiceMonitor:
         ``since`` in state.json. Reporting that whole window as one recovery
         duration would be misleading, so such a recovery only writes the
         event and skips the notification.
+
+        A hard restart inside the aggregation window has the same shape as
+        the resource rules: the buffered alert lived only in the aggregator's
+        memory, so it is gone, while state.json still says the item was
+        "notified". The resource rules already handle this (see
+        ``alerts._mark_stale_rules``); the monitor side did not, so a restart
+        inside the window lost the alert for good and the later recovery
+        announced an outage the user never heard about (v2.20.12).
         """
 
+        changed = False
         with self.state.section("monitors") as monitors:
             items = monitors.get("items") or {}
             if not isinstance(items, dict):
                 return
             now = time.time()
             for key, st in items.items():
-                if not isinstance(st, dict) or not st.get("alerting"):
+                if not isinstance(st, dict):
                     continue
+                if st.get("recovery_awaits_summary"):
+                    # The recovery was queued because its alert sat in a
+                    # summary that lived only in the aggregator's memory.
+                    # A restart took that summary away, so the recovery must
+                    # go with it: otherwise the user receives a "✅ 服务恢复"
+                    # for an outage they were never told about (v2.20.12).
+                    #
+                    # This case is NOT covered by the ``alerting`` check
+                    # below: the recovery is queued after the episode was
+                    # closed, so ``alerting`` is already False.
+                    st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
+                    st.pop("recovery_awaits_summary", None)
+                    changed = True
+                    logger.info(
+                        "监测项 %s 的排队恢复在重启前失去对应的汇总，已撤回", key
+                    )
+                if not st.get("alerting"):
+                    continue
+                if st.get("awaiting_summary"):
+                    # The buffered summary is gone with the process. Treat
+                    # the item like an interrupted direct send: retryable,
+                    # not announced.
+                    st["alerted"] = False
+                    st["summary_abandoned"] = True
+                    st.pop("awaiting_summary", None)
+                    st.pop("summary_buffered", None)
+                    changed = True
+                    logger.info(
+                        "监测项 %s 的聚合汇总在重启前未送达，已标记为可重试", key
+                    )
                 last_checked = safe_float(
                     st.get("last_checked") or st.get("since") or 0
                 )
                 if last_checked and now - last_checked > 86400:
                     st["stale"] = True
+                    changed = True
                     logger.warning(
                         "监测项 %s 已超过 24 小时未探测（可能关闭了监测），"
                         "恢复时只记事件、不发恢复消息",
                         key,
                     )
+        # The markers only matter across a restart, so they have to reach
+        # the disk: without the save the next process reads the stale
+        # "alerted=True" and loses the alert again.
+        if changed:
+            self.state.save()
 
     def start(self) -> None:
         if self._running or (self._task is not None and not self._task.done()):
@@ -875,6 +923,11 @@ class ServiceMonitor:
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
+                    # The queued recovery is folded into this alert, so it
+                    # no longer waits for a summary. A stale marker made the
+                    # next abandon callback withdraw the recovery of an
+                    # unrelated episode (v2.20.12).
+                    st.pop("recovery_awaits_summary", None)
                     text = (
                         f"🔴 服务异常 · {name}\n"
                         "──────────────\n"
@@ -1022,6 +1075,11 @@ class ServiceMonitor:
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
+                        # The recovery reached the chat, so it no longer
+                        # depends on a pending summary. Leaving the marker
+                        # behind made the next abandon callback withdraw the
+                        # recovery of an unrelated episode (v2.20.12).
+                        st.pop("recovery_awaits_summary", None)
                     else:
                         if self._transport_offline() or delivery_offline(result):
                             st["recovery_next_attempt"] = now + 900
@@ -1095,12 +1153,15 @@ class ServiceMonitor:
                         # This item's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat; queue it so the summary is
-                        # posted first. On abandon the queued notice still
-                        # goes out -- the user then at least learns the
-                        # episode happened.
+                        # posted first. On abandon the queued notice is
+                        # withdrawn together with the summary, because the
+                        # user never learned about the outage (v2.20.12).
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + max(15.0, remaining + 3.0)
+                        # This recovery may only be posted if the summary
+                        # that carries its alert actually reaches the chat.
+                        st["recovery_awaits_summary"] = True
                         logger.info(
                             "监测项 %s 在聚合窗口内恢复，恢复通知延后 %.0f 秒发送",
                             name,
@@ -1112,6 +1173,10 @@ class ServiceMonitor:
                             st["pending_recovery"] = text
                             st["recovery_retry_count"] = 1
                             st["recovery_next_attempt"] = now + retry_delay(1)
+                            # This notice does not depend on a buffered
+                            # summary: an abandoned summary must not
+                            # withdraw it.
+                            st["recovery_awaits_summary"] = False
                             logger.warning(
                                 "监测项 %s 恢复通知未送达，已排队稍后补发", name
                             )
@@ -1529,24 +1594,44 @@ class ServiceMonitor:
             if not isinstance(states, dict):
                 return
             for st in states.values():
-                if not isinstance(st, dict) or not st.get("alerting"):
+                if not isinstance(st, dict):
                     continue
-                if str(st.get("name") or "") in labels:
-                    # Only withdraw items that were actually buffered: a
-                    # same-named item whose alert went out on its own keeps
-                    # its "notified" state.
-                    if not st.pop("summary_buffered", None):
-                        continue
-                    st["alerted"] = False
-                    # Keep ``last_sent``: ``cooldown_retry`` needs it as the
-                    # "this episode was announced" reference. A summary that
-                    # never arrived used to clear it, and the latched item then
-                    # had no path back to a push -- no alert during the whole
-                    # outage and no recovery notice either (v2.20.8). The
-                    # marker lets the next tick retry immediately.
-                    st["summary_abandoned"] = True
-                    st.pop("awaiting_summary", None)
+                if str(st.get("name") or "") not in labels:
+                    continue
+                # A recovery that was queued because its alert sat in the
+                # summary may only be posted when that summary reaches the
+                # chat. The summary never arrived, so the recovery goes with
+                # it: otherwise the user receives a "✅ 服务恢复" for an
+                # outage they were never told about.
+                #
+                # This check comes BEFORE the ``summary_buffered`` gate: the
+                # recovery path clears that marker when the episode closes,
+                # so the gate below would skip the item and the queued
+                # recovery would survive (v2.20.12).
+                if st.get("recovery_awaits_summary"):
+                    st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
+                    st.pop("recovery_awaits_summary", None)
                     changed = True
+                if not st.get("alerting"):
+                    continue
+                # Only withdraw items that were actually buffered: a
+                # same-named item whose alert went out on its own keeps
+                # its "notified" state.
+                if not st.pop("summary_buffered", None):
+                    continue
+                st["alerted"] = False
+                # Keep ``last_sent``: ``cooldown_retry`` needs it as the
+                # "this episode was announced" reference. A summary that
+                # never arrived used to clear it, and the latched item then
+                # had no path back to a push -- no alert during the whole
+                # outage and no recovery notice either (v2.20.8). The
+                # marker lets the next tick retry immediately.
+                st["summary_abandoned"] = True
+                st.pop("awaiting_summary", None)
+                changed = True
         # Abandon can be the last write before a reload (stop() runs after
         # the flush tasks are cancelled); persist it or the new instance
         # reads the stale "alerted=True" from disk.

@@ -775,6 +775,16 @@ main.is-refreshing::after {
   color: var(--warn);
 }
 
+/* An outage that is still open: neither the red "alert" nor the green
+   "recovered" badge describes it. It used to reuse the alert badge, so a
+   row that says "未恢复" looked like a brand-new incident. The accent hue
+   is deliberately not the yellow of "failed": the two were almost
+   impossible to tell apart. */
+.badge.unresolved {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .event-detail {
   margin-top: 2px;
   color: var(--muted);

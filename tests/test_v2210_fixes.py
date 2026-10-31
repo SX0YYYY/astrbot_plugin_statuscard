@@ -539,7 +539,10 @@ def test_offline_recovery_keeps_the_newest_report_day(tmp_path: Path) -> None:
     reporter._pending_recovery_day = old_day
     reporter._pending_recovery_since = time.time() - 86400
     reporter._pending_retry = (old_day, time.time() - 1)
-    newest = reporter._default_report_day()
+    # The pin moves forward to the newest report whose window has closed --
+    # not to the calendar yesterday, whose report is not due until the next
+    # evening (v2.20.12).
+    newest = reporter._latest_due_report_day()
     sent: list[str] = []
 
     async def fake_send(day=None):

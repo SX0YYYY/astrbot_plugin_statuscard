@@ -325,6 +325,16 @@ body {
   color: #b45309;
 }
 
+/* An outage that is still open: neither the red "alert" nor the green
+   "recovered" colour describes it. It used to reuse the alert badge, so a
+   row that says "未恢复" was painted like a brand-new incident. The hue is
+   deliberately not the yellow of "failed": the two were almost impossible
+   to tell apart in the rendered image. */
+.badge.unresolved {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
 .model-table {
   width: 100%;
   margin-top: 10px;
@@ -518,6 +528,11 @@ body {
 [data-theme="dark"] .badge.failed {
   background: #451a03;
   color: #fcd34d;
+}
+
+[data-theme="dark"] .badge.unresolved {
+  background: #2e1065;
+  color: #c4b5fd;
 }
 
 /* Long unbroken strings (cloud FQDNs, container names, model ids) used to
