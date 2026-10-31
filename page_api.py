@@ -779,6 +779,27 @@ class PageApi:
     # GET /export
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _process_cpu_pct_total(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Add the whole-machine CPU percentage next to the per-core one.
+
+        ``process_samples.cpu`` is a REAL column in a dynamically typed
+        SQLite database, so a text value is possible (older writers, a
+        hand-edited db). A bare ``float()`` aborted the whole /export request
+        and the page lost every CSV after the first one.
+        """
+
+        cores = psutil.cpu_count(logical=True) or 1
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            cpu = row.get("cpu")
+            item = dict(row)
+            item["cpu_pct_total"] = (
+                round(safe_float(cpu) / cores, 1) if cpu is not None else None
+            )
+            out.append(item)
+        return out
+
     async def export(self):
         """Return raw history rows; the page turns them into a CSV file.
 
@@ -840,12 +861,7 @@ class PageApi:
             # process_samples stores the per-core percentage; the dashboard
             # shows whole-machine percentages. Export both so a CSV consumer
             # can tell which one it is looking at.
-            cores = psutil.cpu_count(logical=True) or 1
-            for row in rows:
-                cpu = row.get("cpu")
-                row["cpu_pct_total"] = (
-                    round(float(cpu) / cores, 1) if cpu is not None else None
-                )
+            rows = self._process_cpu_pct_total(rows)
             if "process" in self._redact():
                 rows = [dict(row, name="已隐藏", pid=None) for row in rows]
         elif kind == "websites":
@@ -959,7 +975,9 @@ class PageApi:
         sampled = self._downsample(rows)
         points = [
             {
-                "ts": int(row["ts"]),
+                # safe_int: a text ts in the db used to raise here and turn
+                # the whole history route into a 500.
+                "ts": safe_int(row.get("ts")),
                 "cpu": row.get("cpu"),
                 "ram": row.get("ram"),
                 "swap": row.get("swap"),
@@ -979,7 +997,7 @@ class PageApi:
             # 24h/7d/30d window instead of only the last ~2h in state.json.
             from_db = [
                 {
-                    "ts": int(row["ts"]),
+                    "ts": safe_int(row.get("ts")),
                     "up": row.get("net_up"),
                     "down": row.get("net_down"),
                 }

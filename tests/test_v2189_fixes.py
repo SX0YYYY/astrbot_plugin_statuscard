@@ -386,7 +386,7 @@ def test_pre_window_recovery_does_not_leak_start_time(tmp_path: Path) -> None:
     builder = DailyReportBuilder(store, {"display": {"timezone": "Asia/Shanghai"}})
     view = builder.build(day="2026-10-29", history_days=7, sections=["anomaly"])
     recovery = [
-        item for item in view["anomalies"]["items"] if item["status_key"] == "recovery"
+        item for item in view["anomalies"]["items"] if item["status_key"] == "recovered"
     ]
     assert recovery and recovery[0]["duration"].startswith("00:00:30")
     assert "窗口前开始" not in recovery[0]["duration"]

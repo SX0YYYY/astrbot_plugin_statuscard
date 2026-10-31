@@ -359,8 +359,13 @@ class Sampler:
                 net["month_down"] = 0
                 logger.info("已进入 %s，本月流量统计已重置", month)
             if not stale:
-                net["month_up"] = int(net.get("month_up") or 0) + sent_delta
-                net["month_down"] = int(net.get("month_down") or 0) + recv_delta
+                # safe_int, like every other read of state.json: a hand-edited
+                # "12.3GB" used to raise here on *every* tick, which aborted
+                # the whole sample before state.save() -- network rate, month
+                # traffic, disk IO and receive counters froze until the file
+                # was fixed by hand.
+                net["month_up"] = safe_int(net.get("month_up") or 0) + sent_delta
+                net["month_down"] = safe_int(net.get("month_down") or 0) + recv_delta
 
                 history = net.get("history")
                 if not isinstance(history, list):
@@ -453,7 +458,7 @@ class Sampler:
                 recv["baseline_at"] = now
                 recv["accum"] = 0
 
-            baseline = int(recv.get("baseline") or 0)
+            baseline = safe_int(recv.get("baseline") or 0)
             recv["last_total"] = total
             recv["accum"] = max(0, total - baseline)
             recv["available"] = True
@@ -466,7 +471,7 @@ class Sampler:
             # produced a badly under-estimated number -- sometimes 9% of the
             # real value. The day's opening reading lets the report recover
             # the correct interval.
-            day_key = time.strftime("%Y-%m-%d", time.localtime(now))
+            day_key = now_in_timezone(self.config).strftime("%Y-%m-%d")
             if recv.get("day_open_day") != day_key:
                 recv["day_open_day"] = day_key
                 recv["day_open_total"] = total

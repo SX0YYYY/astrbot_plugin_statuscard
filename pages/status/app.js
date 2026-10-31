@@ -49,9 +49,23 @@
     return key ? t(key, text) : text;
   }
 
+  // Structured codes carry the date placeholders; the whitelist below can
+  // only translate a fixed sentence, so a dynamic "since {date}" reason
+  // stayed Chinese in the English dashboard.
+  const EMPTY_REASON_CODE_KEYS = {
+    website_since: "reason_website_since",
+    website_none: "reason_website_none",
+    process_since: "reason_process_since",
+    process_none: "reason_process_none",
+  };
+
   function emptyReasonText(section) {
     if (!section || section.available !== false || !section.empty_reason) {
       return null;
+    }
+    const key = EMPTY_REASON_CODE_KEYS[section.empty_reason_code];
+    if (key) {
+      return t(key, section.empty_reason, section.empty_reason_vars || {});
     }
     return translateEmptyReason(section.empty_reason);
   }
@@ -349,9 +363,14 @@
     if (!Number.isFinite(first) || !Number.isFinite(last)) return "";
     const days = Math.max(0, (last - first) / 86400);
     const shownDays = Math.max(1, Math.round(days));
-    const sameDay =
-      new Date(first * 1000).toDateString() ===
-      new Date(last * 1000).toDateString();
+    // Compare days in the *display* timezone (display.timezone), not the
+    // browser's: toDateString() ignores timeZone, so a viewer in UTC saw
+    // "23:00 – 07:00" without dates for a window that really crossed midnight.
+    const dayOf = (ts) =>
+      new Date(ts * 1000).toLocaleDateString(currentLocale(), {
+        timeZone: tzName(),
+      });
+    const sameDay = dayOf(first) === dayOf(last);
     const text = t(
       "history_range_note",
       "数据范围 {from} – {to}（{days} 天）",
@@ -1212,9 +1231,10 @@
               "网络折线来自日报采样（按所选范围自动抽样），与资源趋势同一时间窗口。",
             )
           : noteKind === "state"
-            ? // The backend note already carries the full sentence; joining a
-              // translated copy in front used to print the same text twice.
-              data.network_note || ""
+            ? // The backend sentence is Chinese only; the i18n key carries
+              // the same text per language (it used to be a dead key, so the
+              // English dashboard printed the Chinese sentence verbatim).
+              t("network_note_state", data.network_note || "")
             : data.network_note || "";
     if (data.truncated) {
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
@@ -1404,6 +1424,40 @@
   // reports
   // ------------------------------------------------------------------
 
+  function formatReportDay(day) {
+    const parsed = new Date(String(day) + "T00:00:00Z");
+    if (Number.isNaN(parsed.getTime())) return String(day || "");
+    return parsed.toLocaleDateString(currentLocale(), {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  }
+
+  // The backend used to send a Chinese-only window_label ("昨日" / "10月30日"
+  // / "近 7 天"); it now also sends a structured code so the label can be
+  // translated while still following the real report day.
+  function reportScopeLabel(data, summary) {
+    const code = String((summary && summary.window_label_code) || "");
+    if (code === "today") return t("report_today", "今天");
+    if (code === "yesterday") return t("report_yesterday", "昨日");
+    if (code === "last_day") return t("report_last_day", "最后一天");
+    if (code === "last_days") {
+      const days = Number(
+        (summary && summary.window_label_days) ||
+          (summary && summary.span_days) ||
+          0,
+      );
+      return t("report_scope_last_days", "近 {days} 天", { days });
+    }
+    if (code === "date") {
+      return formatReportDay(String((data && data.day) || ""));
+    }
+    return (
+      (summary && summary.window_label) || t("report_yesterday", "昨日")
+    );
+  }
+
   function reportDetails(data) {
     const blocks = [];
     // The backend computes an empty_reason per section; dropping it left a
@@ -1499,7 +1553,11 @@
                     : item.status || "--",
                 ) +
                 "</td><td>" +
-                esc(item.duration || "--") +
+                esc(
+                  item.duration_code === "ongoing"
+                    ? t("report_ongoing", "进行中")
+                    : item.duration || "--",
+                ) +
                 "</td></tr>",
             )
             .join("") +
@@ -1749,6 +1807,20 @@
     return blocks.join("");
   }
 
+  function updateReportNav() {
+    const next = $("report-next");
+    if (!next) return;
+    const limit = state.reportToday;
+    const current = state.reportDayShown;
+    // Disable "next day" once the shown report is today's: clicking it did
+    // nothing (the bound check returned early), which read as a broken arrow.
+    const atLimit = Boolean(
+      limit && current && String(current) >= String(limit),
+    );
+    next.disabled = atLimit;
+    next.setAttribute("aria-disabled", atLimit ? "true" : "false");
+  }
+
   function shiftReportDay(delta) {
     const current = state.reportDay || state.reportDayShown;
     if (!current) return;
@@ -1810,6 +1882,7 @@
       ? t("report_data_day", "数据日 {day}", { day: data.day })
       : t("report_no_data", "暂无数据");
     state.reportDayShown = data.day || null;
+    updateReportNav();
     // An empty selection used to render as a page of "未开启" values with no
     // explanation of why nothing was built.
     const sectionsEmpty =
@@ -1822,10 +1895,7 @@
     }
     const summary = data.summary || {};
     const notEnabled = t("report_not_enabled", "未开启");
-    // The backend labels the report day itself (昨日 / 10月30日 / 今天);
-    // hard-coding 昨日 here contradicted the pushed report for a retried or
-    // recovered day (v2.20.9).
-    const scopeLabel = summary.window_label || t("report_yesterday", "昨日");
+    const scopeLabel = reportScopeLabel(data, summary);
     const anomalyValue =
       summary.anomaly_enabled === false
         ? notEnabled
@@ -2207,6 +2277,10 @@
 
   function setRefreshState(button, status) {
     if (!button) return;
+    // A "done" state schedules a 2s reset; a new refresh starting inside that
+    // window used to leave the timer alive, so it fired mid-flight and put the
+    // button back to idle (clickable) while the request was still running.
+    clearTimeout(button._resetTimer);
     const panels = $("panels");
     button.classList.remove("refreshing", "refresh-done", "refresh-failed");
     if (panels) panels.classList.remove("is-refreshing");

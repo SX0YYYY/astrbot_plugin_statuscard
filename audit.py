@@ -130,7 +130,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "error",
                 "monitors_no_targets",
                 "服务监测已启用，但没有可用的推送目标（通知中心无 service 规则，"
-                "默认推送目标也为空），监测项不会探测也不会告警。"
+                "默认推送目标也为空）。监测项仍会探测并记录事件，但告警与恢复"
+                "通知不会送达任何会话。"
                 "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
@@ -268,6 +269,10 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         webhook_host = str(
             cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or "127.0.0.1"
         ).strip()
+        # Same normalisation as the runtime check (_webhook_bind_allowed):
+        # "0:0:0:0:0:0:0:0" and "[::]" are wildcard binds too, and the audit
+        # used to accept them while the listener refused to start.
+        webhook_host_norm = webhook_host.strip("[]").lower()
         if cfg_bool(config, "alerts.komari_webhook.require_token", True) and not (
             webhook_token
         ):
@@ -279,9 +284,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "Webhook 会拒绝启动。请填写 Token 或关闭该开关。",
                 )
             )
-        elif webhook_host in ("0.0.0.0", "::") and not cfg_bool(
-            config, "alerts.komari_webhook.require_token", True
-        ):
+        elif webhook_host_norm in {
+            "0.0.0.0",
+            "::",
+            "0:0:0:0:0:0:0:0",
+        } and not cfg_bool(config, "alerts.komari_webhook.require_token", True):
             # A token that is configured but not enforced leaves the listener
             # open to anyone who can reach the port, so the runtime refuses to
             # start it; report the same condition here instead of only

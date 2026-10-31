@@ -76,7 +76,13 @@ class ReportStore:
         try:
             with self._lock:
                 con = self._connect()
-                con.execute("SELECT 1").fetchone()
+                # "SELECT 1" succeeds on a database file that was deleted or
+                # replaced (sqlite3.connect silently creates a new empty one),
+                # so every business query returned [] and the scheduler sent
+                # an all-"--" report while marking the day as delivered. Touch
+                # a real table so a missing schema surfaces here; the next
+                # ensure_ready() then rebuilds it.
+                con.execute("SELECT MAX(ts) FROM resource_samples").fetchone()
             return True
         except Exception:
             logger.exception("日报数据库探针失败")

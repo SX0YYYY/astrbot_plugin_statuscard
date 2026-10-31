@@ -262,13 +262,22 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
                 radius=15,
                 fill=_percent_color(percent),
             )
-        label = f"{first.get('path', '')}  {first.get('percent_text', '--')}"
-        detail = f"{first.get('used', '--')} / {first.get('total', '--')}"
         label_font = _font(22)
         detail_font = _font(18)
+        right_edge = WIDTH - PADDING - 24
+        # The bar ends at bar_right and the label is right-aligned at
+        # right_edge: a long mount point (or a CJK path) ran straight through
+        # the progress bar and could be clipped off the canvas. Trim it to the
+        # space that is actually free, like ``net_text`` already does.
+        label = _clip_text(
+            draw,
+            f"{first.get('path', '')}  {first.get('percent_text', '--')}",
+            label_font,
+            max(80, right_edge - bar_right - 12),
+        )
+        detail = f"{first.get('used', '--')} / {first.get('total', '--')}"
         _, _, label_right, _ = draw.textbbox((0, 0), label, font=label_font)
         _, _, detail_right, _ = draw.textbbox((0, 0), detail, font=detail_font)
-        right_edge = WIDTH - PADDING - 24
         draw.text(
             (right_edge - label_right, disk_y + 14),
             label,

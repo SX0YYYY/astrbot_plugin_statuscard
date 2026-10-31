@@ -159,6 +159,14 @@ button:hover {
   filter: brightness(1.06);
 }
 
+/* A disabled control (export in progress, "next day" at today's report)
+   must look inactive, otherwise the click that does nothing reads as a bug. */
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
+}
+
 button:focus-visible,
 input:focus-visible {
   outline: 2px solid var(--accent);

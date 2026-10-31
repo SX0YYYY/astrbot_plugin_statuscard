@@ -298,12 +298,18 @@ def test_verify_cooldown_is_not_charged_for_empty_targets() -> None:
 
 
 def test_report_headline_uses_backend_label() -> None:
-    """The overview cards must follow the backend's window_label (v2.20.9)."""
+    """The overview cards must follow the backend's window_label (v2.20.9).
+
+    v2.20.10 keeps that behaviour but reads the structured
+    ``window_label_code`` first, so the label can be translated while still
+    following the real report day.
+    """
 
     js = (Path(__file__).resolve().parents[1] / "pages/status/app.js").read_text(
         encoding="utf-8"
     )
-    assert 'summary.window_label || t("report_yesterday"' in js
+    assert "summary.window_label_code" in js
+    assert "reportScopeLabel(data, summary)" in js
     assert js.count('t("report_yesterday", "昨日"),') == 0
 
 

@@ -66,11 +66,13 @@ def test_failed_alert_pairs_with_recovery_duration(tmp_path) -> None:
     builder = DailyReportBuilder(store, {"display": {"timezone": "Asia/Shanghai"}})
     view = builder.build(day="2026-10-27", history_days=7, sections=["anomaly"])
     items = view["anomalies"]["items"]
-    recovery_items = [item for item in items if item["status_key"] == "recovery"]
-    assert len(recovery_items) == 1
+    # One row per episode: the recovery completes the failed row (duration
+    # filled in) instead of appending a second "恢复" line.
+    assert len(items) == 1
+    row = items[0]
+    assert row["status_key"] == "recovered"
     # 00:02 -> 00:09 paired across the failed row: the duration is filled
     # instead of "--".
-    assert recovery_items[0]["duration"] == "00:07:00"
-    # The failed row itself stays visible as the fault record.
-    failed_items = [item for item in items if item["status_key"] == "failed"]
-    assert len(failed_items) == 1
+    assert row["duration"] == "00:07:00"
+    # The failed push is still disclosed in the row's detail.
+    assert "推送失败" in row["detail"]

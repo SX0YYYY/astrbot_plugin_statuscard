@@ -376,6 +376,21 @@ class AlertEngine:
             for key, st in tracked:
                 if not isinstance(st, dict) or not st.get("alerting"):
                     continue
+                if st.get("awaiting_summary"):
+                    # The buffered alert lived only in the aggregator's
+                    # memory. A hard stop (systemctl restart, OOM) inside the
+                    # window leaves the rule marked "notified" while the
+                    # summary that carried it is gone: the alert is lost for
+                    # good, and a later recovery announces an outage the user
+                    # never heard about. Treat it like an interrupted direct
+                    # send: retryable, not announced.
+                    st["alerted"] = False
+                    st["summary_abandoned"] = True
+                    st.pop("awaiting_summary", None)
+                    st.pop("summary_buffered", None)
+                    logger.info(
+                        "告警规则 %s 的聚合汇总在重启前未送达，已标记为可重试", key
+                    )
                 # A corrupted/hand-edited state value must not abort startup:
                 # monitor.start() and every later background task would never
                 # run while the plugin still looked loaded. Degrade to "no
@@ -543,28 +558,45 @@ class AlertEngine:
             if not isinstance(rules, dict):
                 return
             for st in rules.values():
-                if not isinstance(st, dict) or not st.get("alerting"):
+                if not isinstance(st, dict):
                     continue
                 label = str(st.get("label") or "")
-                if label and label in labels:
-                    st["alerted"] = False
-                    # Keep the episode retryable. Clearing ``last_sent``
-                    # removed the only signal the cooldown-retry path uses,
-                    # so the rule stayed latched-but-unannounced for the rest
-                    # of the outage: no alert, and (because ``alerted`` was
-                    # False) no recovery notice either. The user never heard
-                    # about the incident at all.
-                    st["summary_abandoned"] = True
-                    # ``last_sent`` is deliberately kept: it is the only
-                    # signal the cooldown-retry path has for *later* episodes,
-                    # and v2.20.4 relies on it. The abandoned summary itself
-                    # skips the cooldown gate below instead (v2.20.5) -- that
-                    # was the actual 30-minute delay, without breaking the
-                    # retryable state.
-                    # The window died with the abandon; leaving this set
-                    # would delay a future recovery for no reason.
-                    st.pop("awaiting_summary", None)
+                if not label or label not in labels:
+                    continue
+                if st.get("recovery_awaits_summary"):
+                    # The rule recovered while its alert was still buffered in
+                    # this very summary, so the queued "已恢复" exists only
+                    # because the summary promised to announce the alert. The
+                    # summary never arrived: drop the recovery too, otherwise
+                    # the chat gets "✅ 已恢复 · 内存使用率" for an outage the
+                    # user was never told about.
+                    st.pop("pending_recovery", None)
+                    st.pop("recovery_attempt", None)
+                    st.pop("recovery_next_attempt", None)
+                    st.pop("recovery_retry_count", None)
+                    st.pop("recovery_awaits_summary", None)
                     changed = True
+                    continue
+                if not st.get("alerting"):
+                    continue
+                st["alerted"] = False
+                # Keep the episode retryable. Clearing ``last_sent``
+                # removed the only signal the cooldown-retry path uses,
+                # so the rule stayed latched-but-unannounced for the rest
+                # of the outage: no alert, and (because ``alerted`` was
+                # False) no recovery notice either. The user never heard
+                # about the incident at all.
+                st["summary_abandoned"] = True
+                # ``last_sent`` is deliberately kept: it is the only
+                # signal the cooldown-retry path has for *later* episodes,
+                # and v2.20.4 relies on it. The abandoned summary itself
+                # skips the cooldown gate below instead (v2.20.5) -- that
+                # was the actual 30-minute delay, without breaking the
+                # retryable state.
+                # The window died with the abandon; leaving this set
+                # would delay a future recovery for no reason.
+                st.pop("awaiting_summary", None)
+                changed = True
         # Abandon can be the last write before a reload (stop() runs after
         # the aggregator is cancelled); persist it or the new instance reads
         # the stale "alerted=True" from disk and announces a recovery for an
@@ -1042,7 +1074,17 @@ class AlertEngine:
                 or (
                     alerting
                     and not bool(st.get("alerted"))
-                    and _safe_int(st.get("retry_count")) > 0
+                    and (
+                        _safe_int(st.get("retry_count")) > 0
+                        # A cooldown-retry push that failed while the
+                        # connection was down only writes ``next_attempt``
+                        # (v2.20.5 keeps the budget untouched then), leaving
+                        # retry_count at 0. Without this the rule matched
+                        # none of the three gates and stayed silent for the
+                        # whole episode -- no alert, and the recovery notice
+                        # was swallowed too.
+                        or _safe_float(st.get("next_attempt")) > 0
+                    )
                 )
             ):
                 # Remember when the fault started, even if every push fails:
@@ -1334,6 +1376,10 @@ class AlertEngine:
                         # episode happened.
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
+                        # This recovery may only be posted if the summary that
+                        # carries its alert actually reaches the chat. The
+                        # abandon callback reads this marker to drop it.
+                        st["recovery_awaits_summary"] = True
                         # Schedule after the window actually closes: a fixed
                         # 15s raced the flush whenever the sampling interval
                         # was shorter than the window.
@@ -1349,6 +1395,9 @@ class AlertEngine:
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
+                        # This notice does not depend on a buffered summary:
+                        # an abandoned summary must not withdraw it.
+                        st["recovery_awaits_summary"] = False
                         logger.warning("告警 %s 恢复通知未送达，已排队稍后补发", name)
 
     async def _broadcast_recovery(self, offline_ts: float, duration_text: str) -> None:
@@ -2524,7 +2573,11 @@ class AlertEngine:
 
         lines = [f"{icon} Komari 监控通知", "──────────────"]
         if title:
-            lines.append(f"事件: {title}")
+            # ``message`` and the fallback ``event`` field were masked while
+            # the title was forwarded verbatim, so a node named
+            # "10.1.2.3:8080" leaked the internal address with the hostname
+            # rule on (the same leak was fixed for monitor names and reports).
+            lines.append(f"事件: {redactor.mask_address_tokens(title)}")
         if message:
             message = redactor.mask_address_tokens(message)
             cleaned: list[str] = []

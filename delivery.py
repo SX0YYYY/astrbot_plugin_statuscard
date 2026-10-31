@@ -49,6 +49,28 @@ _LOCAL_SEND_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+# AstrBot resolves the target string before anything reaches an adapter:
+# ``MessageSesion.from_str`` raises ValueError("不合法的 session 字符串: ...")
+# for a malformed UMO, and the aiocqhttp dispatcher raises
+# ValueError("无法发送消息：缺少有效的数字 session_id(...)") for a non-numeric
+# id. Both happen while the request is still local, so they are "definitely
+# not sent" even though ValueError is otherwise treated as uncertain.
+_UMO_ERROR_HINTS: tuple[str, ...] = (
+    "不合法的 session 字符串",
+    "无法发送消息",
+    "无效的 session",
+)
+
+
+def _is_local_umo_error(exc: BaseException) -> bool:
+    """True when the framework rejected the *target string* before sending."""
+
+    if not isinstance(exc, ValueError):
+        return False
+    text = str(exc)
+    return any(hint in text for hint in _UMO_ERROR_HINTS)
+
+
 # Markers that prove the transport itself is gone rather than the message
 # being wrong. ``ApiNotAvailable`` is raised by aiocqhttp when no reverse-WS
 # client is registered; ``InvalidURL``/``API root url invalid`` mean the
@@ -316,6 +338,20 @@ class DeliveryService:
                     # retry/alert is safe (v2.20.2).
                     logger.warning(
                         "主动发送%s到 %s 被平台明确拒绝（请求未执行，未送达）: %s",
+                        label,
+                        target,
+                        detail,
+                    )
+                    return False, False, False
+                if _is_local_umo_error(exc):
+                    # A hand-written target such as "default:GroupMessage:abc"
+                    # (or a lowercase/unknown message type) is rejected by the
+                    # framework before a request exists. Treating it as
+                    # uncertain marked a misconfigured target as delivered --
+                    # no retry, no failed event, and the recovery notice later
+                    # claimed the alert had arrived.
+                    logger.error(
+                        "主动发送%s到 %s 的目标格式无效（请求未发出）: %s",
                         label,
                         target,
                         detail,

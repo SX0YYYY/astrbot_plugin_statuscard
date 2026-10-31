@@ -343,10 +343,13 @@ class DailyReportBuilder:
         if span == 1:
             if delta_days <= 0:
                 day_label = "今天"
+                day_label_code = "today"
             elif delta_days == 1:
                 day_label = "昨日"
+                day_label_code = "yesterday"
             else:
                 day_label = f"{target.month}月{target.day}日"
+                day_label_code = "date"
             title = "系统日报"
             window = f"{target.isoformat()} 00:00–24:00"
             window_label = day_label
@@ -355,6 +358,7 @@ class DailyReportBuilder:
             title = "系统周报"
             window = f"{start_day.isoformat()} 00:00 – {target.isoformat()} 24:00"
             day_label = "最后一天"
+            day_label_code = "last_day"
             window_label = f"近 {span} 天"
             token_label = f"近 {span} 天合计 · 趋势最近 {history_days} 天"
 
@@ -364,7 +368,12 @@ class DailyReportBuilder:
             "start_day": start_day.isoformat(),
             "span_days": span,
             "day_label": day_label,
+            "day_label_code": day_label_code,
             "window_label": window_label,
+            # Structured marker so a non-Chinese dashboard can translate the
+            # label instead of printing "昨日" / "10月30日" verbatim.
+            "window_label_code": (day_label_code if span == 1 else "last_days"),
+            "window_label_days": span if span > 1 else 0,
             "token_label": token_label,
             "previous_day": previous.isoformat(),
             "window": window,
@@ -440,6 +449,8 @@ class DailyReportBuilder:
             "window_label": str(
                 view.get("window_label") or ("昨日" if span == 1 else f"近 {span} 天")
             ),
+            "window_label_code": str(view.get("window_label_code") or ""),
+            "window_label_days": int(view.get("window_label_days") or 0),
             "last_day_label": "最后一天",
             "anomaly_count": (
                 anomalies.get("count", 0) if "anomaly" in sections else "未开启"
@@ -824,6 +835,12 @@ class DailyReportBuilder:
         # Keys whose episode started inside the window and is still open; the
         # unresolved count below reads this set.
         episode_open: set[tuple[str, str, str]] = set()
+        # Row index of the last alert/failed row per key. A recovery that
+        # belongs to a row already shown must not append a second line: an
+        # outage that started AND ended inside the window used to appear twice
+        # ("已恢复 00:01:30" followed by "恢复 00:01:30"), which reads like two
+        # incidents.
+        emitted: dict[tuple[str, str, str], int] = {}
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
@@ -861,6 +878,21 @@ class DailyReportBuilder:
                     )
                     if start < window_start_ts:
                         duration_text += "（窗口前开始）"
+                prior = emitted.get(key)
+                if prior is not None and prior < len(items):
+                    previous = items[prior]
+                    if previous.get("status_key") == "recovered":
+                        # The episode is already rendered with its duration
+                        # (resolved_ts was written back), so this recovery
+                        # event tells the same story. Appending it printed the
+                        # same outage twice: "已恢复 00:01:30" + "恢复 00:01:30".
+                        continue
+                    # The alert row is still "进行中" because old data has no
+                    # resolved_ts; complete that row instead of adding another.
+                    previous["status"] = "已恢复"
+                    previous["status_key"] = "recovered"
+                    previous["duration"] = duration_text
+                    continue
             elif status in {"alert", "failed"}:
                 episode_id = (key, safe_int(resolved_ts or 0))
                 if episode_id in seen_ids:
@@ -914,8 +946,13 @@ class DailyReportBuilder:
                         str(event.get("detail") or "")
                     )[:80],
                     "duration": duration_text,
+                    # Structured marker so the English dashboard can translate
+                    # "进行中" instead of mixing a Chinese word into the table.
+                    "duration_code": "ongoing" if duration_text == "进行中" else None,
                 }
             )
+            if status in {"alert", "failed"}:
+                emitted[key] = len(items) - 1
 
         # An interruption that began before the window and never got a
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
@@ -1222,8 +1259,11 @@ class DailyReportBuilder:
             "sent_available": sent_available,
             "snapshot_note": snapshot_note,
             "recv_note": (
+                # "still accumulating" only when there really are fewer than
+                # two snapshots; a missing next-day snapshot is a different
+                # (and much more common) reason for an empty value.
                 "接收趋势需要至少两份每日快照，当前仍在积累。"
-                if yesterday_recv is None and not next_day
+                if yesterday_recv is None and len(snapshots) < 2
                 else (
                     "该日或次日缺少快照，无法计算接收差值。"
                     if yesterday_recv is None
@@ -1440,14 +1480,19 @@ class DailyReportBuilder:
             else None
         )
         available = bool(targets)
+        empty_reason_code = None
+        empty_reason_vars: dict[str, Any] = {}
         if available:
             empty_reason = None
         elif first_day:
             empty_reason = (
                 f"网站延迟从 {first_day} 开始积累，暂无 {day.isoformat()} 数据"
             )
+            empty_reason_code = "website_since"
+            empty_reason_vars = {"first_day": first_day, "day": day.isoformat()}
         else:
             empty_reason = "暂无网站延迟采样数据"
+            empty_reason_code = "website_none"
         history_note = None
         if first_day and first_day > days[0].isoformat():
             history_note = (
@@ -1456,6 +1501,8 @@ class DailyReportBuilder:
         return {
             "available": available,
             "empty_reason": empty_reason,
+            "empty_reason_code": empty_reason_code,
+            "empty_reason_vars": empty_reason_vars,
             "first_day": first_day,
             "targets": targets,
             "chart": chart,
@@ -1539,14 +1586,19 @@ class DailyReportBuilder:
             else None
         )
         available = bool(cpu_top or mem_top)
+        empty_reason_code = None
+        empty_reason_vars: dict[str, Any] = {}
         if available:
             empty_reason = None
         elif first_day:
             empty_reason = (
                 f"进程采样从 {first_day} 开始积累，暂无 {day.isoformat()} 数据"
             )
+            empty_reason_code = "process_since"
+            empty_reason_vars = {"first_day": first_day, "day": day.isoformat()}
         else:
             empty_reason = "暂无进程采样数据"
+            empty_reason_code = "process_none"
         note = (
             f"按进程名聚合{day_label}采样峰值；同一程序的多进程会合并显示。"
             if span == 1
@@ -1555,6 +1607,8 @@ class DailyReportBuilder:
         return {
             "available": available,
             "empty_reason": empty_reason,
+            "empty_reason_code": empty_reason_code,
+            "empty_reason_vars": empty_reason_vars,
             "first_day": first_day,
             "top_n": top_n,
             "cpu": cpu_top,

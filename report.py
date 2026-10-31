@@ -427,6 +427,21 @@ class ReportCollector:
 
         recv_total, _ = await asyncio.to_thread(read_message_stats_total)
         recv_state = self.state.get("recv", {}) or {}
+        # The snapshot is meant to hold the counter at the *start* of the day.
+        # If the bot was disconnected at 00:05 and reconnected at 08:00,
+        # reading the counter now stores the 08:00 value and the day's receive
+        # delta silently loses the first eight hours (measured as low as 9% of
+        # the real number). The sampler records the day's first reading in
+        # ``day_open_*``; prefer it when it belongs to this day.
+        if isinstance(recv_state, dict):
+            open_day = str(recv_state.get("day_open_day") or "")
+            open_total = recv_state.get("day_open_total")
+            if (
+                open_day == day
+                and isinstance(open_total, int)
+                and (recv_total is None or open_total <= recv_total)
+            ):
+                recv_total = open_total
         bot = await collect_bot_info(self.plugin.context, None, self.config, recv_state)
         friends = bot.get("friends")
         groups = bot.get("groups")
@@ -528,6 +543,12 @@ class DailyReporter:
         # reports into the chat (v2.20.5).
         self._pending_recovery_day: str | None = None
         self._pending_recovery_since = 0.0
+        # A configuration problem ("targets empty" / "sections empty") cannot
+        # heal within the second the loop otherwise waits before re-entering
+        # the send path: without a pause the daily loop spun at 1 Hz from the
+        # scheduled time to midnight, rebuilding the report and fsyncing
+        # state.json every second (the weekly loop already had this pause).
+        self._daily_pause_until = 0.0
         self._weekly_pending_recovery_week: str | None = None
         self._weekly_pending_recovery_since = 0.0
         self._weekly_last_sent_week: str | None = None
@@ -707,6 +728,7 @@ class DailyReporter:
             self._weekly_pending_report_day = None
         self._image_retry_attempts = _safe_int(saved.get("image_retry_attempts"))
         self._weekly_image_attempts = _safe_int(saved.get("weekly_image_attempts"))
+        now_ts = time.time()
         for attribute, key in (
             ("_pending_image_retry", "pending_image_retry"),
             ("_weekly_image_pending", "weekly_image_pending"),
@@ -716,6 +738,18 @@ class DailyReporter:
                 value = float(raw) if raw else None
             except (TypeError, ValueError):
                 value = None
+            if value is not None and value < now_ts - 6 * 3600:
+                # A process killed inside the 10-minute image-retry window
+                # left its due timestamp behind; restoring it unconditionally
+                # sent a day-old report at an arbitrary hour the next time the
+                # plugin started. The text retry already had this 6-hour rule.
+                logger.warning("丢弃过期的图片重试排程（%s）", key)
+                value = None
+                if attribute == "_pending_image_retry":
+                    self._pending_image_retry_report_day = None
+                    self._pending_image_retry_send_day = None
+                else:
+                    self._weekly_image_report_day = None
             setattr(self, attribute, value)
         if migrated:
             # Persist the converted markers so the migration runs exactly once
@@ -1028,6 +1062,23 @@ class DailyReporter:
                             "日报 %s 的重试已跨天，继续用原报告日发送",
                             _day or "--",
                         )
+                    if self._pending_recovery_day:
+                        # An outage spanning a whole day leaves the retry
+                        # pinned to the first report day it failed on. The
+                        # loop only ever re-sent that (older) report, never
+                        # reached the scheduled branch, and dropped the newest
+                        # missed day for good. Only the newest one should be
+                        # sent after a reconnect, so move the pin forward.
+                        newest = self._default_report_day()
+                        if _day and newest > _day:
+                            logger.info(
+                                "日报 %s 的掉线补发已更新为 %s（只补最近一份）",
+                                _day,
+                                newest,
+                            )
+                            _day = newest
+                            self._pending_recovery_day = newest
+                            self._pending_recovery_since = time.time()
                     try:
                         await self._send_scheduled(_day)
                     except asyncio.CancelledError:
@@ -1060,6 +1111,12 @@ class DailyReporter:
                     or "Asia/Shanghai"
                 )
                 now = now_in_timezone(self.config)
+                pause_until = float(getattr(self, "_daily_pause_until", 0.0) or 0.0)
+                if time.time() < pause_until:
+                    # A config problem paused the send path; do not re-enter it
+                    # every second (the catch-up guard alone kept re-arming).
+                    await asyncio.sleep(min(60.0, max(1.0, pause_until - time.time())))
+                    continue
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if target <= now:
                     if self._daily_catch_up_allowed(self._today()):
@@ -1307,7 +1364,9 @@ class DailyReporter:
                 # Record the misconfiguration once per week, not once per
                 # second (the loop retried immediately after the early return).
                 self._weekly_empty_recorded_week = week_key
-                self._record(self._default_report_day(), False, "weekly sections empty")
+                self._record(
+                    day or self._default_report_day(), False, "weekly sections empty"
+                )
             self._weekly_pause_until = time.time() + 600
             self._clear_retry()
             return
@@ -1766,7 +1825,11 @@ class DailyReporter:
         targets = self._targets()
         if self._sections() is not None and not self._sections():
             logger.warning("日报内容为空（daily_report.sections=[]），跳过发送")
-            self._record(self._default_report_day(), False, "sections empty")
+            # Record the day that was actually attempted (a pinned retry may be
+            # older than yesterday) and pause the loop: without the pause the
+            # catch-up guard re-armed every second until midnight.
+            self._record(day or self._default_report_day(), False, "sections empty")
+            self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
         if not self.store.ensure_ready() or not self.store.probe():
@@ -1802,6 +1865,7 @@ class DailyReporter:
             # the empty list at startup; here one record is enough.
             logger.warning("日报推送目标为空，跳过发送（请先在配置里填写推送目标）")
             self._record(day, False, "targets empty")
+            self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
         if self._last_sent_day == day:

@@ -279,7 +279,14 @@ class MemStat:
 def memory_stat() -> MemStat:
     try:
         m = psutil.virtual_memory()
-        return MemStat(total=m.total, used=m.used, percent=m.percent)
+        # psutil's ``percent`` divides by (total - available) while the card
+        # prints ``used / total`` next to it; on Linux the two disagree by
+        # 2-4 points because ``available`` also counts reclaimable cache, so
+        # the ring looked like an arithmetic error. The disk percentage was
+        # unified on used/total for the same reason (v2.18.4); RAM now
+        # matches its own text, the alert text and the dashboard.
+        percent = (m.used / m.total * 100.0) if m.total else 0.0
+        return MemStat(total=m.total, used=m.used, percent=percent)
     except Exception:
         # Same reasoning as cpu_freq: an unavailable /proc/meminfo must not
         # take the whole card down.
@@ -358,6 +365,16 @@ _DISK_WARN_AT = 0.0
 # out path is skipped for a few minutes instead of being submitted again.
 _DISK_DEAD_UNTIL: dict[str, float] = {}
 _DISK_DEAD_COOLDOWN = 300.0
+# A statvfs that never returns keeps its worker forever: ``future.cancel()``
+# cannot stop a worker already blocked inside the syscall. A 300-second
+# cooldown only slowed the leak to one worker per five minutes -- after ~40
+# minutes all eight workers were hung and every healthy mount started timing
+# out as well, permanently (v2.20.8 measured; the pool is shared by the card,
+# the daily report, the dashboard and the disk alert). After this many
+# consecutive timeouts the mount is not submitted again until the process
+# restarts, which bounds the leak to three workers and keeps the rest usable.
+_DISK_FAIL_COUNT: dict[str, int] = {}
+_DISK_MAX_TIMEOUTS = 3
 
 
 def disk_usage_bounded(
@@ -394,6 +411,7 @@ def disk_usage_bounded(
             try:
                 results[name] = future.result()
                 _DISK_DEAD_UNTIL.pop(name, None)
+                _DISK_FAIL_COUNT.pop(name, None)
             except Exception as exc:  # pragma: no cover - defensive
                 results[name] = DiskUsage(
                     name=name,
@@ -404,7 +422,22 @@ def disk_usage_bounded(
                 )
         else:
             future.cancel()  # queued jobs die here; running ones keep hanging
-            _DISK_DEAD_UNTIL[name] = time.time() + _DISK_DEAD_COOLDOWN
+            failures = _DISK_FAIL_COUNT.get(name, 0) + 1
+            _DISK_FAIL_COUNT[name] = failures
+            if failures >= _DISK_MAX_TIMEOUTS:
+                # Give up on this mount for the rest of the process: every
+                # further submission would leak one more worker and healthy
+                # mounts would eventually time out behind it (the pool is
+                # shared by the card, the report, the dashboard and the alert).
+                _DISK_DEAD_UNTIL[name] = float("inf")
+                logger.warning(
+                    "磁盘挂载点 %s 连续 %d 次读取超时，本次运行不再尝试"
+                    "（请检查挂载点，重启插件后可重试）",
+                    name,
+                    failures,
+                )
+            else:
+                _DISK_DEAD_UNTIL[name] = time.time() + _DISK_DEAD_COOLDOWN
             results[name] = DiskUsage(
                 name=name,
                 used=None,

@@ -175,7 +175,10 @@ def test_anomaly_items_carry_english_slugs(tmp_path: Path) -> None:
     items = view["anomalies"]["items"]
     assert items
     assert all(item["kind_slug"] == "service" for item in items)
-    assert {item["status_key"] for item in items} == {"alert", "recovery"}
+    # The recovery completes the alert row instead of appending a second line:
+    # one episode used to be listed twice ("已恢复" + "恢复").
+    assert len(items) == 1
+    assert items[0]["status_key"] == "recovered"
 
 
 def test_version_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:

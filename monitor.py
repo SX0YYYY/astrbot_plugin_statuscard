@@ -693,7 +693,49 @@ class ServiceMonitor:
                 st["last_ok"] = now
                 st["last_error"] = ""
                 started = float(st.pop("silent_since", 0) or 0)
-                if started:
+                if alerting:
+                    # An item that was ALREADY alerting when the window began
+                    # heals inside the window as well. The old code only ended
+                    # the episode when ``silent_since`` existed, and the
+                    # ``else`` branch deliberately never set it for an
+                    # alerting item -- so ``alerting`` stayed True forever.
+                    # Consequences: the alert row kept no resolved_ts (daily
+                    # report showed "未恢复"), and the first post-window
+                    # failure looked like the same continuous outage, so it
+                    # pushed nothing and wrote no event until the eventual
+                    # recovery billed the whole window as downtime.
+                    origin = started or safe_float(st.get("since") or 0) or now
+                    if not st.get("alerted"):
+                        # The alert never reached the operator; record its
+                        # beginning so the recovery below has a matching row.
+                        self._record_event(
+                            name,
+                            target_text,
+                            f"{prev_error}（维护静默期内自愈，未推送）",
+                            "alert",
+                        )
+                    self._record_event(
+                        name,
+                        target_text,
+                        f"持续 {format_duration(now - origin)}（维护静默期内，未推送）",
+                        "recovery",
+                    )
+                    st["alerting"] = False
+                    st["since"] = 0
+                    st["retry_count"] = 0
+                    st["next_attempt"] = 0
+                    for stale_key in (
+                        "alerted",
+                        "pending",
+                        "summary_buffered",
+                        "send_exhausted",
+                        "awaiting_summary",
+                        "recovery_attempt",
+                        "recovery_next_attempt",
+                        "recovery_retry_count",
+                    ):
+                        st.pop(stale_key, None)
+                elif started:
                     self._record_event(
                         name,
                         target_text,
