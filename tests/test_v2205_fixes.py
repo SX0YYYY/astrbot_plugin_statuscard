@@ -193,3 +193,12 @@ def test_legacy_given_up_marker_is_migrated(tmp_path: Path) -> None:
     assert reporter._pending_retry_day is None
     # The old attempt marker names the report day already; it stays.
     assert reporter._last_attempt_day == "2026-10-30"
+    # The conversion persisted itself (schema 2): a reload must not shift the
+    # marker a second time.
+    again = DailyReporter(
+        SimpleNamespace(state=state),
+        ReportStore(tmp_path / "report2.db"),
+        {"display": {"timezone": "Asia/Shanghai"}},
+    )
+    assert again._daily_given_up_day == "2026-10-30"
+    assert state.get("report_delivery", {}).get("schema") == 2

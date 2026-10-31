@@ -580,6 +580,8 @@ class DailyReporter:
             except (TypeError, ValueError):
                 return default
 
+        migrated = _safe_int(saved.get("schema")) < 2
+
         self._last_sent_day = saved.get("last_sent_day") or None
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
@@ -588,7 +590,7 @@ class DailyReporter:
         self._weekly_pending_recovery_week = (
             saved.get("weekly_pending_recovery_week") or None
         )
-        if _safe_int(saved.get("schema")) < 2:
+        if migrated:
             # v2.20.5 migration: the day-scoped markers switched from "the
             # calendar day of the attempt" to "the report day". An old marker
             # can equal the report day that is due today, and the catch-up then
@@ -686,6 +688,11 @@ class DailyReporter:
             except (TypeError, ValueError):
                 value = None
             setattr(self, attribute, value)
+        if migrated:
+            # Persist the converted markers so the migration runs exactly once
+            # and the on-disk state reflects what the process is using
+            # (v2.20.6).
+            self._save_delivery_state()
 
     def _save_delivery_state(self) -> None:
         state = getattr(getattr(self, "plugin", None), "state", None)
