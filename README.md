@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.20.8-blue)
+![Version](https://img.shields.io/badge/version-2.20.9-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -659,6 +659,7 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 最近几个版本对使用者的影响：
 
+- **v2.20.9**：看板日报页的四张摘要卡片跟随实际报告日（回看旧报告时不再一律写「昨日」），与推送的日报一致
 - **v2.20.8**：补发/重试的旧日报不再标成「昨日」；周报周日掉线后周一凌晨也能补发、临时故障暂停后不再整周丢失；数据库运行中损坏不再发空日报并锁定当天；掉线恢复的全群广播不再只生效一次；掉线告警增加冷却（抖动不再刷屏）；服务监测在汇总放弃后仍能补发告警与恢复；每日定时状态图掉线后会排队补发；监测告警/恢复按主机名脱敏；DNS 临时解析失败不再当配置错误；挂死挂载点不再拖垮全部磁盘读取；看板日报页「后一天」凌晨不再失效
 - **v2.20.7**：升级标记转换结果落盘（写入 schema 2），重启不再重复转换
 - **v2.20.6**：修复 v2.20.5 的升级迁移遗漏——旧版「日报已放弃」标记存的是执行日，升级当天可能让当晚 21:00 的日报被跳过；升级时会自动转换一次

@@ -297,6 +297,16 @@ def test_verify_cooldown_is_not_charged_for_empty_targets() -> None:
     assert charge > empty_branch, "cooldown must be charged after the guard"
 
 
+def test_report_headline_uses_backend_label() -> None:
+    """The overview cards must follow the backend's window_label (v2.20.9)."""
+
+    js = (Path(__file__).resolve().parents[1] / "pages/status/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'summary.window_label || t("report_yesterday"' in js
+    assert js.count('t("report_yesterday", "昨日"),') == 0
+
+
 def test_badge_recovered_style_and_i18n_key_exist() -> None:
     root = Path(__file__).resolve().parents[1]
     css = (root / "pages/status/style.css").read_text(encoding="utf-8")

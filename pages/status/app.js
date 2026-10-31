@@ -1822,6 +1822,10 @@
     }
     const summary = data.summary || {};
     const notEnabled = t("report_not_enabled", "未开启");
+    // The backend labels the report day itself (昨日 / 10月30日 / 今天);
+    // hard-coding 昨日 here contradicted the pushed report for a retried or
+    // recovered day (v2.20.9).
+    const scopeLabel = summary.window_label || t("report_yesterday", "昨日");
     const anomalyValue =
       summary.anomaly_enabled === false
         ? notEnabled
@@ -1846,25 +1850,25 @@
       metric(
         t("report_anomaly", "异常 / 失败"),
         anomalyValue,
-        t("report_yesterday", "昨日"),
+        scopeLabel,
         null,
       ),
       metric(
         t("report_token", "Token"),
         tokenValue,
-        t("report_yesterday", "昨日"),
+        scopeLabel,
         null,
       ),
       metric(
         t("report_sent", "发送"),
         sentValue,
-        t("report_yesterday", "昨日"),
+        scopeLabel,
         null,
       ),
       metric(
         t("report_recv", "接收"),
         recvValue,
-        t("report_yesterday", "昨日"),
+        scopeLabel,
         null,
       ),
       metric(
