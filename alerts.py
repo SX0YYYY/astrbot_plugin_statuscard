@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -89,7 +90,8 @@ def _webhook_bind_allowed(host: str, require_token: bool, token: str) -> bool:
     required is not checked at all, so both cases refuse to start.
     """
 
-    if host not in {"0.0.0.0", "::", ""}:
+    normalized = host.strip().strip("[]").lower()
+    if normalized not in {"0.0.0.0", "::", "0:0:0:0:0:0:0:0", ""}:
         return True
     return bool(require_token and token)
 
@@ -205,6 +207,10 @@ class AlertEngine:
         self._running = False
         self._webhook_runner: Any = None
         self._webhook_site: Any = None
+        # Body hash of the last successfully delivered webhook request: Komari
+        # retries the same payload after a timeout, which used to post the
+        # event to the group twice.
+        self._webhook_last: tuple[str, float] = ("", 0.0)
         self._broadcast_task: asyncio.Task | None = None
         self._client_missing_warned = False
         self._primed = False
@@ -543,8 +549,22 @@ class AlertEngine:
         # real alert went to a mistyped group id -- the most common reason
         # "alerts are not arriving".
         targets: list[str] = []
-        for candidate in [target_umo, *(self._targets_for("resource") or [])]:
-            text_candidate = str(candidate or "").strip()
+        candidates: list[str] = [str(target_umo or "").strip()]
+        # Every notification kind may route elsewhere through the notification
+        # center; testing only "resource" missed a broken daily/service target.
+        for kind in (
+            "resource",
+            "service",
+            "offline",
+            "provider",
+            "daily",
+            "weekly",
+            "daily_image",
+        ):
+            candidates.extend(
+                str(item or "").strip() for item in self._targets_for(kind) or []
+            )
+        for text_candidate in candidates:
             if text_candidate and text_candidate not in targets:
                 targets.append(text_candidate)
         if not targets:
@@ -557,7 +577,13 @@ class AlertEngine:
             "如果你收到这条消息，说明主动推送链路正常。"
         )
         result = await self.plugin.send_text(targets, text, source="test")
-        return self._delivered(result)
+        if isinstance(result, DeliveryResult):
+            # A partial or unconfirmed result must not read as "sent": the
+            # whole point of this command is to diagnose a broken target.
+            return bool(result.ok_targets) and not (
+                result.failed_targets or result.uncertain_targets
+            )
+        return bool(result)
 
     # ------------------------------------------------------------------
     # monitor loop
@@ -708,6 +734,13 @@ class AlertEngine:
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
                         st.pop("awaiting_summary", None)
+                        for stale_key in (
+                            "pending_recovery",
+                            "recovery_attempt",
+                            "recovery_next_attempt",
+                            "recovery_retry_count",
+                        ):
+                            st.pop(stale_key, None)
                         closed = True
                         if notified and self.recover_notify:
                             close_text = (
@@ -728,7 +761,11 @@ class AlertEngine:
                         "recovery",
                     )
                 if close_text is not None:
-                    await self._send(close_text, source="resource", kind="resource")
+                    result = await self._send(
+                        close_text, source="resource", kind="resource"
+                    )
+                    if not self._delivered(result):
+                        logger.warning("磁盘挂载点 %s 的告警关闭通知未送达", disk_path)
 
         if hasattr(os, "getloadavg"):
             try:
@@ -865,6 +902,15 @@ class AlertEngine:
             # the next recovery would queue behind a window that no longer
             # exists (v2.20.0).
             st.pop("awaiting_summary", None)
+            # A queued recovery from the disabled rule must not survive:
+            # after re-enabling it would be delivered as a stale notice.
+            for stale_key in (
+                "pending_recovery",
+                "recovery_attempt",
+                "recovery_next_attempt",
+                "recovery_retry_count",
+            ):
+                st.pop(stale_key, None)
             if was_alerting:
                 self._record_event(
                     "resource",
@@ -884,7 +930,18 @@ class AlertEngine:
             if not alerting:
                 count += 1
                 st["count"] = count
-            if not alerting and count >= self.sustain:
+            # A fault latched inside the cooldown was recorded but never
+            # pushed. If it is still over the threshold when the cooldown
+            # expires, the user has never seen it: send the alert now.
+            cooldown_retry = (
+                alerting
+                and not bool(st.get("alerted"))
+                and _safe_int(st.get("retry_count")) == 0
+                and _safe_float(st.get("next_attempt")) == 0
+                and _safe_float(st.get("last_sent")) > 0
+                and now - _safe_float(st.get("last_sent")) >= self.cooldown
+            )
+            if (not alerting and count >= self.sustain) or cooldown_retry:
                 if last_sent and now - last_sent < self.cooldown:
                     # A second episode inside the cooldown used to vanish
                     # completely. Latch it and write one event (with the
@@ -935,19 +992,15 @@ class AlertEngine:
                     st["last_attempt"] = now
                     st.pop("send_inflight", None)
                     st["last_error"] = "" if delivered or buffered else "send_failed"
-                    # Persist the post-send state right away: the loop's
-                    # trailing save used to leave a reload window where the
-                    # disk still claimed send_inflight=True while the
-                    # in-memory aggregator bucket was already gone, so a
-                    # restart resurrected an episode whose summary could
-                    # never be delivered (v2.20.0).
-                    self.state.save()
                     if buffered:
                         # Covered by the aggregator summary; the rule is in
                         # alerting and the event log stays complete.
                         st["alerting"] = True
                         st["alerted"] = True
-                        st["alert_since"] = now
+                        if not alerting:
+                            # A cooldown-retry keeps the episode's original
+                            # start; only a fresh episode sets it.
+                            st["alert_since"] = now
                         st["count"] = 0
                         # The summary did reach the chat, so the cooldown
                         # applies to this rule too; without it the next
@@ -965,7 +1018,8 @@ class AlertEngine:
                     elif delivered:
                         st["alerting"] = True
                         st["alerted"] = True
-                        st["alert_since"] = now
+                        if not alerting:
+                            st["alert_since"] = now
                         st["count"] = 0
                         st["last_sent"] = now
                         st["retry_count"] = 0
@@ -993,8 +1047,12 @@ class AlertEngine:
                             st["alerted"] = True
                             # Keep the episode's original start: resetting it
                             # here shrank the recovery notice's "告警持续" to
-                            # just the retry window.
-                            st.setdefault("alert_since", now)
+                            # just the retry window. A stored 0 (set when a
+                            # previous episode recovered) must not survive:
+                            # now - 0 rendered as "20757 天".
+                            st["alert_since"] = (
+                                _safe_float(st.get("alert_since")) or now
+                            )
                             st["count"] = 0
                             st["retry_count"] = 0
                             st["next_attempt"] = 0
@@ -1010,6 +1068,11 @@ class AlertEngine:
                                     f"{value_text}（阈值 {threshold:.1f}{unit}）",
                                     "failed",
                                 )
+                    # Persist alerting/alerted/last_sent in the same write that
+                    # clears send_inflight: saving before those fields were set
+                    # left a reload window where the disk said "not alerting",
+                    # and the same outage alerted again after restart (v2.20.2).
+                    self.state.save()
         else:
             st["count"] = 0
             # A push that failed and then recovered before the retry budget
@@ -1098,6 +1161,10 @@ class AlertEngine:
                     f"持续 {format_duration(duration)}",
                     "recovery",
                 )
+                # Consume the flag even when no notice is sent (recover_notify
+                # off / stale / suppressed): leaving it behind made the next
+                # unrelated recovery queue behind an already-closed window.
+                awaiting = st.pop("awaiting_summary", False)
                 if self.recover_notify and not stale and notified:
                     text = (
                         f"✅ 已恢复 · {name}\n"
@@ -1109,7 +1176,6 @@ class AlertEngine:
                     )
                     if had_failed:
                         text += "\n（异常告警此前未能送达）"
-                    awaiting = st.pop("awaiting_summary", False)
                     remaining = (
                         self._aggregator.window_remaining("resource")
                         if self._aggregator is not None
@@ -1312,6 +1378,19 @@ class AlertEngine:
             st["unreachable"] = 0
             st["unreachable_warned"] = False
             pending_text = st.get("pending_recovery") if self.offline_notify else None
+            if pending_text and not self.recover_notify:
+                # Recovery notices were turned off after this one was queued:
+                # honour the switch and drop the backlog instead of delivering
+                # it on the next online sample (resource/provider paths do the
+                # same).
+                for key in (
+                    "pending_recovery",
+                    "recovery_attempt",
+                    "recovery_next_attempt",
+                    "recovery_retry_count",
+                ):
+                    st.pop(key, None)
+                pending_text = None
             if not self.offline_notify:
                 for key in (
                     "pending_recovery",
@@ -1421,9 +1500,10 @@ class AlertEngine:
             # The status call itself failed, so the state of the connection is
             # unknown. Count it separately and stay quiet: a restarting
             # NapCat container must not be reported as a confirmed offline
-            # bot, which would raise a false alarm.
+            # bot, which would raise a false alarm. The confirmed-offline
+            # counter is left untouched instead of reset, so alternating
+            # timeouts cannot keep the alert from ever firing (v2.20.2).
             st["unreachable"] = unreachable + 1
-            st["count"] = 0
             if unreachable + 1 >= OFFLINE_ALERT_SAMPLES * 3 and not st.get(
                 "unreachable_warned"
             ):
@@ -1436,8 +1516,11 @@ class AlertEngine:
 
         st["unreachable"] = 0
         st["unreachable_warned"] = False
-        count += 1
-        st["count"] = count
+        if not st.get("alerting"):
+            # Once latched the counter is not used and grew without bound for
+            # multi-day outages (state.json bloat).
+            count += 1
+            st["count"] = count
         if not st.get("alerting") and count >= OFFLINE_ALERT_SAMPLES:
             st["alerting"] = True
             st["since"] = now
@@ -1477,17 +1560,20 @@ class AlertEngine:
 
         alerts_state = self.state.setdefault("alerts", {})
         watch = alerts_state.get("provider_watch")
-        if not isinstance(watch, dict) or not watch.get("alerting"):
+        if not isinstance(watch, dict):
             return
-        watch["alerting"] = False
-        watch["alerted"] = False
-        watch["alert_since"] = 0
-        # A queued recovery from the previous episode must not resurface as a
-        # stale notice after the watch is turned back on (v2.20.1).
+        # Drop a queued recovery even when the rule is no longer alerting:
+        # pending_recovery survives in exactly that state, and re-enabling the
+        # watch used to deliver a stale "已恢复" from the previous episode.
         watch.pop("pending_recovery", None)
         watch.pop("recovery_retry_count", None)
         watch.pop("recovery_next_attempt", None)
         watch.pop("send_failed", None)
+        if not watch.get("alerting"):
+            return
+        watch["alerting"] = False
+        watch["alerted"] = False
+        watch["alert_since"] = 0
         self._record_event("provider", "LLM 服务", reason, "recovery")
         logger.info("LLM 服务告警已关闭：%s", reason)
 
@@ -1671,6 +1757,15 @@ class AlertEngine:
                     watch["recovery_next_attempt"] = now + retry_delay(1)
                     self.state.save()
                     logger.warning("LLM 服务恢复通知发送失败，稍后补发")
+                else:
+                    # A queued notice from an earlier episode must not fire a
+                    # second "已恢复" after this one was delivered.
+                    for stale_key in (
+                        "pending_recovery",
+                        "recovery_retry_count",
+                        "recovery_next_attempt",
+                    ):
+                        watch.pop(stale_key, None)
             logger.info("LLM 服务已恢复（最近一次调用成功）")
 
     def _hostname(self) -> str:
@@ -1768,12 +1863,25 @@ class AlertEngine:
                 if current_time_text != time_text or current_tz_name != tz_name:
                     # 最后一分钟内改了时间/时区，重新计算，不按旧目标发送。
                     continue
+                attempt_day = now_in_timezone(self.config).strftime("%Y-%m-%d")
                 try:
                     sent_ok = await self._send_daily_summary()
                     if not sent_ok:
                         for attempt in range(3):
                             await asyncio.sleep(600)
                             if not self._running:
+                                break
+                            if (
+                                now_in_timezone(self.config).strftime("%Y-%m-%d")
+                                != attempt_day
+                            ):
+                                # Crossed midnight: the next attempt would
+                                # render "today's" image for yesterday's slot
+                                # and mark the new day as sent, skipping its
+                                # scheduled run. Let the new day start clean.
+                                logger.warning(
+                                    "每日定时状态图重试跨天，已停止；等待当天计划时间"
+                                )
                                 break
                             if await self._send_daily_summary():
                                 break
@@ -1788,9 +1896,10 @@ class AlertEngine:
                     # attempts" path, so the loop retried the whole collect +
                     # T2I cycle every 60 seconds for the rest of the day.
                     logger.exception("每日定时状态图发送异常，今天不再重试")
-                self._mark_daily_attempt(
-                    now_in_timezone(self.config).strftime("%Y-%m-%d")
-                )
+                if now_in_timezone(self.config).strftime("%Y-%m-%d") == attempt_day:
+                    # Only mark the day the attempt started on; a cross-midnight
+                    # break must not consume the new day's scheduled run.
+                    self._mark_daily_attempt(attempt_day)
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -1926,6 +2035,11 @@ class AlertEngine:
                     {"status": "error", "message": "payload too large"},
                     status=413,
                 )
+            body_key = hashlib.sha256(raw).hexdigest()
+            last_key, last_ts = self._webhook_last
+            if body_key == last_key and time.time() - last_ts < 5.0:
+                logger.info("Komari Webhook 重复请求（5 秒内相同内容），已忽略")
+                return web.json_response({"status": "ok", "duplicate": True})
             try:
                 data = json.loads(raw.decode("utf-8"))
             except Exception:
@@ -1937,6 +2051,9 @@ class AlertEngine:
                     {"status": "error", "message": "delivery failed"},
                     status=503,
                 )
+            # Only remember a body that really reached the chat; a failed send
+            # must stay retryable.
+            self._webhook_last = (body_key, time.time())
             return web.json_response({"status": "ok"})
 
         app.router.add_post(path, handle)
@@ -2026,6 +2143,8 @@ class AlertEngine:
 
     def status(self) -> dict[str, Any]:
         alerts = self.state.get("alerts", {}) or {}
+        if not isinstance(alerts, dict):
+            alerts = {}
         return {
             "enabled": cfg_bool(self.config, "alerts.enabled", False),
             "running": self._running,

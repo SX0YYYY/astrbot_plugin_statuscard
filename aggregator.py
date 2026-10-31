@@ -49,6 +49,11 @@ class _Bucket:
     # then withdraws "alerted" so the user does not receive a recovery notice
     # for an alert that never reached the chat.
     on_abandon: Callable[[list[tuple[str, str]]], None] | None = None
+    # The first alert of this window is still being sent. A slow channel can
+    # take longer than the window, and the summary must not appear before the
+    # alert it summarizes.
+    first_inflight: bool = False
+    first_started: float = 0.0
 
 
 class AlertAggregator:
@@ -68,16 +73,6 @@ class AlertAggregator:
             return False
         now = time.time()
         return any(bucket.until > now for bucket in self._buckets.values())
-
-    def active_for(self, kind: str) -> bool:
-        """True while follow-up alerts of ``kind`` should be buffered."""
-
-        bucket = self._buckets.get(str(kind))
-        return bool(
-            self.window_seconds > 0
-            and bucket is not None
-            and time.time() < bucket.until
-        )
 
     def window_remaining(self, kind: str) -> float:
         """Seconds until the open window for ``kind`` closes (0 if none).
@@ -131,6 +126,8 @@ class AlertAggregator:
             if self.window_seconds > 0:
                 bucket.until = time.time() + self.window_seconds
                 bucket.send = send
+                bucket.first_inflight = True
+                bucket.first_started = time.time()
                 self._schedule_flush(key)
             try:
                 return await send(text)
@@ -158,9 +155,15 @@ class AlertAggregator:
                     else:
                         bucket.pending.clear()
                 raise
+            finally:
+                bucket.first_inflight = False
         bucket.pending.append((label, reason))
         # Keep a bounded buffer (max_items are listed, the rest are counted).
         self._trim_pending(bucket, key)
+        # A summary send in progress blocks _schedule_flush; without this the
+        # alerts that arrive afterwards sit in pending with no task to flush
+        # them (the send's finally only sees a buffer that was empty then).
+        self._schedule_if_pending(key)
         return None
 
     def _trim_pending(self, bucket: _Bucket, key: str) -> list[tuple[str, str]]:
@@ -258,6 +261,13 @@ class AlertAggregator:
         key = str(kind or "default")
         bucket = self._buckets.get(key)
         if bucket is None:
+            return
+        if bucket.first_inflight and time.time() - bucket.first_started < 60:
+            # The first alert is still in flight (a slow channel can exceed
+            # the aggregation window). Posting the summary now would show it
+            # before the alert it summarizes; wait a little. The 60s cap keeps
+            # a hung send from holding the buffer forever.
+            self._schedule_flush(key, 5.0)
             return
         pending, bucket.pending = bucket.pending, []
         bucket.until = 0.0

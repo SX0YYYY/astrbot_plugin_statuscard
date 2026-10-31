@@ -854,7 +854,7 @@ class DailyReportBuilder:
                     ).strftime(time_format),
                     "kind": self._kind_text(str(event.get("kind") or "")),
                     "kind_slug": str(event.get("kind") or ""),
-                    "name": name or "--",
+                    "name": redact_url(name) if name else "--",
                     "status": self._status_text(status),
                     "status_key": status,
                     "detail": self.redactor.mask_addresses(
@@ -898,7 +898,7 @@ class DailyReportBuilder:
                     "time": started.strftime("%m-%d %H:%M"),
                     "kind": self._kind_text(str(alert.get("kind") or "")),
                     "kind_slug": str(alert.get("kind") or ""),
-                    "name": str(alert.get("name") or "--"),
+                    "name": redact_url(str(alert.get("name") or "--")),
                     "status": "未恢复",
                     "status_key": "alert",
                     "detail": "开始于此处，未记录恢复时刻（可能已恢复）",
@@ -1297,7 +1297,9 @@ class DailyReportBuilder:
             peak = max(latencies) if latencies else None
             targets.append(
                 {
-                    "name": name,
+                    # Old rows were written before URL redaction existed; a
+                    # forwarded report must not show their query tokens.
+                    "name": redact_url(name),
                     "ok_count": ok_count,
                     "fail_count": len(window_rows) - ok_count,
                     "total": len(window_rows),
@@ -1320,7 +1322,7 @@ class DailyReportBuilder:
                 values.append(sum(latencies) / len(latencies) if latencies else None)
             series.append(
                 {
-                    "name": name,
+                    "name": redact_url(name),
                     "color": colors[index % len(colors)],
                     "values": values,
                 }

@@ -174,8 +174,28 @@ def test_send_direct_uses_private_action() -> None:
 
 def test_send_direct_rejects_unsupported_target() -> None:
     client = _FakeClient({"status": "ok", "retcode": 0})
-    receipt = asyncio.run(send_direct(client, "default:FriendMessage:123", []))
+    receipt = asyncio.run(send_direct(client, "default:TempMessage:123", []))
     assert receipt.ok is False
+    assert client.calls == []
+
+
+def test_send_direct_supports_friend_message() -> None:
+    # The schema tells users to write default:FriendMessage:<QQ> for private
+    # delivery; treating it as unsupported meant private alerts never got a
+    # receipt (and a framework rejection silently lost them).
+    client = _FakeClient({"status": "ok", "retcode": 0, "data": {}})
+    receipt = asyncio.run(send_direct(client, "default:FriendMessage:123", []))
+    assert receipt.ok is True
+    assert client.calls[0][0] == "send_private_msg"
+
+
+def test_send_direct_skips_other_platform_target() -> None:
+    client = _FakeClient({"status": "ok", "retcode": 0})
+    receipt = asyncio.run(send_direct(client, "telegram:GroupMessage:123", []))
+    assert receipt.ok is False
+    assert receipt.skipped
+    # Never send a telegram target through the QQ client: it would land in
+    # whichever QQ group happens to have the same number.
     assert client.calls == []
 
 

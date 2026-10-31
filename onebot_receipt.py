@@ -197,6 +197,21 @@ def is_definitely_not_sent(exc: BaseException) -> bool:
     return "API root url invalid" in text
 
 
+def is_action_rejected(exc: BaseException) -> bool:
+    """OneBot answered ``ActionFailed``: the action was refused, nothing sent.
+
+    This is stronger than "uncertain": the protocol implementation did not
+    execute the action, so a retry (or the framework fallback) cannot produce
+    a duplicate message. Treating it as uncertain silently dropped alerts when
+    the framework path rejected the same target (muted bot, wrong group).
+    """
+
+    name = type(exc).__name__
+    if "ActionFailed" in name:
+        return True
+    return "action failed" in str(exc).lower()
+
+
 def should_retry_send(exc: BaseException) -> bool:
     """Tell whether a failed send may be retried safely.
 
@@ -233,13 +248,23 @@ async def send_direct(
     if parsed is None:
         return OnebotReceipt(ok=False, error=f"无法解析目标: {target}")
     platform, kind, session_id = parsed
-    del platform
-    if kind.lower() not in ("groupmessage", "privatemessage"):
+    if str(platform or "").lower() not in ("", "default", "aiocqhttp"):
+        # Another platform instance (telegram/another bot): this OneBot client
+        # must not send it, or the message lands in a same-numbered QQ chat.
+        # Return a skipped receipt so the delivery layer uses the framework
+        # path, which routes by the full UMO.
+        return OnebotReceipt(
+            ok=False,
+            skipped=f"platform:{platform}",
+            error=f"目标属于其他平台: {platform}",
+        )
+    kind_lower = kind.lower()
+    if kind_lower not in ("groupmessage", "privatemessage", "friendmessage"):
         return OnebotReceipt(ok=False, error=f"不支持的目标类型: {kind}")
     if not str(session_id).isdigit():
         return OnebotReceipt(ok=False, error=f"会话 ID 不是数字: {session_id}")
-    action = "send_group_msg" if kind.lower() == "groupmessage" else "send_private_msg"
-    key = "group_id" if kind.lower() == "groupmessage" else "user_id"
+    action = "send_group_msg" if kind_lower == "groupmessage" else "send_private_msg"
+    key = "group_id" if kind_lower == "groupmessage" else "user_id"
     try:
         payload = await asyncio.wait_for(
             client.call_action(action, **{key: int(session_id), "message": segments}),

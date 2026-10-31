@@ -23,7 +23,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .onebot_receipt import send_direct, should_retry_send
+from .onebot_receipt import is_action_rejected, send_direct, should_retry_send
 
 # Failures that happen before the request can reach the platform: a broken
 # message chain (Comp.Image on a missing file), a framework signature change,
@@ -259,6 +259,17 @@ class DeliveryService:
                         detail,
                     )
                     return False, False
+                if is_action_rejected(exc):
+                    # OneBot's framework answered ActionFailed: the action
+                    # was refused, so the message never reached the chat and a
+                    # retry/alert is safe (v2.20.2).
+                    logger.warning(
+                        "主动发送%s到 %s 被平台明确拒绝（请求未执行，未送达）: %s",
+                        label,
+                        target,
+                        detail,
+                    )
+                    return False, False
                 if not should_retry_send(exc):
                     logger.warning(
                         "主动发送%s到 %s 未确认送达（可能已发出，不重发以免重复）: %s",
@@ -329,7 +340,7 @@ class DeliveryService:
             # "verify" click used to overwrite the single slot, so the
             # diagnostics command showed a successful verify while the real
             # alert had failed.
-            if not str(source).startswith("verify") and source != "test":
+            if not str(source).startswith(("verify", "broadcast")) and source != "test":
                 self.state.set("delivery_real", payload)
             self.state.save()
         except Exception as exc:

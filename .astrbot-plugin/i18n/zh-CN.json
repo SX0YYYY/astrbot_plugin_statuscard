@@ -204,7 +204,14 @@
         "db_unavailable": "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据",
         "db_unavailable_retry": "数据库暂时不可用，正在自动恢复，请稍后重试导出",
         "verify_monitor_items_incomplete": "{count} 个监测项配置不完整（缺少 URL/端口等），请在配置页补全后重试",
-        "verify_monitor_items_empty": "没有已启用的监测项"
+        "verify_monitor_items_empty": "没有已启用的监测项",
+        "reason_no_resource_samples": "暂无资源采样数据",
+        "reason_no_qq_data": "暂无 QQ 快照或发送数据；从日报数据底座启用后开始积累",
+        "reason_qq_redacted": "已按脱敏配置隐藏 QQ 统计",
+        "reason_no_website_samples": "暂无网站延迟采样数据",
+        "reason_no_process_samples": "暂无进程采样数据",
+        "reason_no_provider_data": "暂无数据（所选时间范围内没有 provider 请求）",
+        "reason_no_trend_data": "暂无趋势数据"
       }
     }
   }

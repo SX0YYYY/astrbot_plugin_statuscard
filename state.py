@@ -46,8 +46,13 @@ class StateStore:
             with self._lock:
                 self.data = parsed
         except FileNotFoundError:
-            with self._lock:
-                self.data = {}
+            # The main file can be deleted by an external cleaner while the
+            # previous good copy is still on disk; restoring it keeps the
+            # month counters, latches and catch-up markers instead of
+            # silently starting from zero.
+            if not self._restore_from_backup():
+                with self._lock:
+                    self.data = {}
         except Exception as exc:
             logger.warning("读取状态文件失败 %s: %s", self.path, exc)
             restored = self._restore_from_backup()

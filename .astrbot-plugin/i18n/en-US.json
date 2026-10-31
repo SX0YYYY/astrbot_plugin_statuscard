@@ -204,7 +204,14 @@
         "db_unavailable": "The database is temporarily unavailable and is recovering automatically; what you see may be stale",
         "db_unavailable_retry": "The database is temporarily unavailable and is recovering automatically; please retry the export later",
         "verify_monitor_items_incomplete": "{count} monitor item(s) have incomplete config (missing URL/port etc.); complete them and retry",
-        "verify_monitor_items_empty": "No enabled monitor items"
+        "verify_monitor_items_empty": "No enabled monitor items",
+        "reason_no_resource_samples": "No resource samples yet",
+        "reason_no_qq_data": "No QQ snapshots yet; data accumulates after the report history is enabled",
+        "reason_qq_redacted": "QQ statistics are hidden by the redaction settings",
+        "reason_no_website_samples": "No website latency samples yet",
+        "reason_no_process_samples": "No process samples yet",
+        "reason_no_provider_data": "No provider requests in the selected range",
+        "reason_no_trend_data": "No trend data yet"
       }
     }
   }

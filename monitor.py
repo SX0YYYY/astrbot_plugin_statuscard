@@ -158,6 +158,11 @@ class ServiceMonitor:
         self._suppress_warned: set[str] = set()
         self._targets_warned = False
         self._bg_tasks: set[asyncio.Task] = set()
+        # Reuse one HTTP client per (verify, follow_redirects) pair: a fresh
+        # AsyncClient per probe repeated the TLS handshake every interval and
+        # left each item its own connection pool.
+        self._http_clients: dict[tuple[bool, bool], httpx.AsyncClient] = {}
+        self._prune_keys: set[str] | None = None
 
     def _normalize_items(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
@@ -369,6 +374,12 @@ class ServiceMonitor:
         if background:
             await asyncio.gather(*background, return_exceptions=True)
         self._bg_tasks.clear()
+        for client in self._http_clients.values():
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        self._http_clients.clear()
 
     async def _loop(self) -> None:
         while self._running:
@@ -432,15 +443,31 @@ class ServiceMonitor:
                 st = states.get(key)
                 if not isinstance(st, dict) or not st.get("alerting"):
                     continue
+                target_text = str(
+                    item.get("url")
+                    or item.get("host")
+                    or item.get("container")
+                    or item.get("unit")
+                    or item.get("pattern")
+                    or name
+                )
                 self._close_episode_for_config_error(
                     st,
                     name,
-                    redact_url(str(item.get("name") or name)),
+                    redact_url(target_text),
                     kind,
                     f"配置不完整（{item.get('config_error')}）",
                 )
         with self.state.section("monitors") as monitors:
             monitors["last_run"] = time.time()
+        # A config change that does not reload the plugin (rare, but the WebUI
+        # can rewrite items in place) used to leave the removed item latched:
+        # its alert stayed "unresolved" until a restart. Prune whenever the
+        # key set changes.
+        current_keys = {self._item_key(item) for item in self.items}
+        if self._prune_keys is None or current_keys != self._prune_keys:
+            self._prune_keys = current_keys
+            await asyncio.to_thread(self._prune_state)
         self.state.save()
 
     def _silence_until(self) -> datetime | None:
@@ -1023,6 +1050,20 @@ class ServiceMonitor:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    def _http_client(self, verify: bool, follow: bool) -> httpx.AsyncClient:
+        key = (verify, follow)
+        client = self._http_clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                follow_redirects=follow,
+                verify=verify,
+                # Per-request timeout is passed to stream(); this is only the
+                # pool-wide default for anything that forgets it.
+                timeout=httpx.Timeout(60.0),
+            )
+            self._http_clients[key] = client
+        return client
+
     async def _probe(self, item: dict[str, Any]) -> tuple[bool, str, str]:
         kind = str(item.get("__template_key") or "")
         timeout = max(1, min(60, cfg_int(item, "timeout_seconds", 10)))
@@ -1042,12 +1083,9 @@ class ServiceMonitor:
                     # A 3xx expected status cannot be matched while redirects
                     # are followed: the probe would compare the final 200.
                     follow = not (300 <= expected < 400)
-                    async with (
-                        httpx.AsyncClient(
-                            follow_redirects=follow, timeout=timeout
-                        ) as cli,
-                        cli.stream("GET", url) as resp,
-                    ):
+                    verify_tls = cfg_bool(item, "verify_tls", True)
+                    cli = self._http_client(verify_tls, follow)
+                    async with cli.stream("GET", url, timeout=timeout) as resp:
                         status_code = resp.status_code
                         if expected and status_code != expected:
                             return (

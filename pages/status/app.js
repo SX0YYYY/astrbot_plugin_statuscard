@@ -25,6 +25,31 @@
     failed: "status_failed",
     unknown: "status_unknown",
   };
+
+  // Backend empty_reason strings are Chinese. Translate the known ones so the
+  // English page does not show Chinese sentences inside an otherwise English
+  // report; unknown strings pass through unchanged.
+  const EMPTY_REASON_I18N = {
+    "暂无资源采样数据": "reason_no_resource_samples",
+    "暂无 QQ 快照或发送数据；从日报数据底座启用后开始积累": "reason_no_qq_data",
+    "已按脱敏配置隐藏 QQ 统计": "reason_qq_redacted",
+    "暂无网站延迟采样数据": "reason_no_website_samples",
+    "暂无进程采样数据": "reason_no_process_samples",
+    "暂无数据（所选时间范围内没有 provider 请求）": "reason_no_provider_data",
+    "暂无趋势数据": "reason_no_trend_data",
+  };
+
+  function translateEmptyReason(text) {
+    const key = EMPTY_REASON_I18N[String(text || "").trim()];
+    return key ? t(key, text) : text;
+  }
+
+  function emptyReasonText(section) {
+    if (!section || section.available !== false || !section.empty_reason) {
+      return null;
+    }
+    return translateEmptyReason(section.empty_reason);
+  }
   const ESC = {
     "&": "&amp;",
     "<": "&lt;",
@@ -1352,12 +1377,7 @@
     // The backend computes an empty_reason per section; dropping it left a
     // blank page with no explanation for a fresh install or a disabled module.
     const emptyReasons = ["resources", "token", "process", "website", "qq", "provider_quality"]
-      .map((key) => {
-        const section = data[key] || {};
-        return section.available === false && section.empty_reason
-          ? section.empty_reason
-          : null;
-      })
+      .map((key) => emptyReasonText(data[key]))
       .filter(Boolean);
     if (emptyReasons.length) {
       blocks.push(
@@ -2042,6 +2062,14 @@
     button.classList.remove("verify-armed");
     button.disabled = true;
     verifyInflight = true;
+    // The other two buttons share the result box; leaving them clickable made
+    // the page look stuck (clicks only printed "verifying…" in the box).
+    const otherButtons = ["verify-targets", "verify-monitors", "verify-webhook"]
+      .map((id) => $(id))
+      .filter((element) => element && element !== button);
+    otherButtons.forEach((element) => {
+      element.disabled = true;
+    });
     button.textContent = t("verifying", "验证中…");
     const box = $("verify-result");
     if (box) {
@@ -2060,6 +2088,9 @@
     } finally {
       verifyInflight = false;
       button.disabled = false;
+      otherButtons.forEach((element) => {
+        element.disabled = false;
+      });
       // Restore this button's own label, not a fixed one: the old code wrote
       // "验证推送目标" for every kind, so after checking monitors the page
       // showed two "push targets" buttons and the second one did not send.

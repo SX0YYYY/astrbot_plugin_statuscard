@@ -274,14 +274,19 @@ class PageApi:
             usages = []
         mounts: list[dict[str, Any]] = []
         for usage in usages:
-            if usage.percent is None or usage.used is None or usage.total is None:
-                continue
+            # A configured mount that cannot be read stays visible with "--":
+            # dropping it made a pulled disk disappear from the dashboard while
+            # the status card showed the failed row (v2.20.2).
             mounts.append(
                 {
                     "path": str(usage.name or ""),
-                    "percent": round(float(usage.percent), 1),
-                    "used": int(usage.used),
-                    "total": int(usage.total),
+                    "percent": (
+                        round(float(usage.percent), 1)
+                        if usage.percent is not None
+                        else None
+                    ),
+                    "used": int(usage.used) if usage.used is not None else None,
+                    "total": int(usage.total) if usage.total is not None else None,
                     "used_text": format_bytes(usage.used),
                     "total_text": format_bytes(usage.total),
                 }
@@ -301,7 +306,8 @@ class PageApi:
         # to stay invisible here). ``worst`` is an element of ``mounts``, so
         # the list must be attached to a copy -- putting it on the element
         # itself created a cycle and the JSON response blew the stack.
-        worst = max(mounts, key=lambda item: item["percent"])
+        usable = [item for item in mounts if item["percent"] is not None]
+        worst = max(usable, key=lambda item: item["percent"]) if usable else mounts[0]
         return {**worst, "disks": mounts}
 
     async def _latest_processes(self, top_n: int) -> list[dict[str, Any]]:
@@ -799,7 +805,7 @@ class PageApi:
                     "ts": row.get("ts"),
                     "day": row.get("day"),
                     "kind": row.get("kind"),
-                    "name": row.get("name"),
+                    "name": redact_url(str(row.get("name") or "")),
                     "detail": self._mask_host_text(str(row.get("detail") or "")),
                     "status": row.get("status"),
                     "resolved_ts": row.get("resolved_ts"),
@@ -993,8 +999,13 @@ class PageApi:
                 "ts": event.get("ts"),
                 "day": event.get("day"),
                 "kind": event.get("kind"),
-                "name": event.get("name"),
-                "detail": self._mask_host_text(str(event.get("detail") or "")[:200]),
+                # Event names can be a URL the operator pasted as the monitor
+                # name; strip query/credentials before the page or a forwarded
+                # CSV can see them.
+                "name": redact_url(str(event.get("name") or "")),
+                # Mask first, then cut: truncating first can leave a partial
+                # token that no longer matches the redaction pattern.
+                "detail": self._mask_host_text(str(event.get("detail") or ""))[:200],
                 "status": event.get("status"),
                 "resolved_ts": event.get("resolved_ts"),
             }

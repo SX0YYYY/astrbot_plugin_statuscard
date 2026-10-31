@@ -136,14 +136,34 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         )
     if monitors_on and monitor is not None and not monitor.items:
         # "Enabled but empty" is the classic silent configuration: the switch
-        # looks on, nothing is probed, and only a log line says so.
-        issues.append(
-            AuditIssue(
-                "warning",
-                "monitors_no_items",
-                "服务监测已启用，但监测项列表为空，不会有任何探测或告警。",
+        # looks on, nothing is probed, and only a log line says so. Distinguish
+        # "all items disabled" from "all item types unknown/incomplete": the
+        # old text told the user to add items even when they had some.
+        raw_items = cfg_get(config, "monitors.items", [])
+        raw_items = raw_items if isinstance(raw_items, list) else []
+        enabled_items = [
+            item
+            for item in raw_items
+            if isinstance(item, dict) and cfg_bool(item, "enabled", True)
+        ]
+        if enabled_items:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "monitors_all_invalid",
+                    "服务监测已启用，但所有监测项的类型不受支持或配置不完整，"
+                    "不会有任何探测或告警；请检查每个条目的类型与必填项。",
+                )
             )
-        )
+        else:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "monitors_no_items",
+                    "服务监测已启用，但监测项列表为空（或全部停用），"
+                    "不会有任何探测或告警。",
+                )
+            )
     if monitors_on:
         for problem in (
             _monitor_config_errors(config)
@@ -166,17 +186,30 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
-    elif alerts_on and not offline_targets:
-        # The offline rule has its own notification kind: a rule that only
-        # covers "resource" leaves disconnect notices without a destination.
-        issues.append(
-            AuditIssue(
-                "warning",
-                "alerts_offline_no_targets",
-                "掉线 / 恢复通知没有可用的推送目标（通知中心无 offline 规则，"
-                "默认推送目标也为空），掉线时不会收到消息。",
+    elif alerts_on:
+        if not resource_targets:
+            # The resource rule has its own kind: a notification center that
+            # only covers "offline" leaves CPU/RAM alerts with nowhere to go,
+            # and the old check stayed silent in exactly that case.
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "alerts_resource_no_targets",
+                    "资源告警（CPU / 内存 / SWAP / 磁盘 / 负载）没有可用的推送目标"
+                    "（通知中心无 resource 规则，默认推送目标也为空），触发时不会送达。",
+                )
             )
-        )
+        if not offline_targets and cfg_bool(config, "alerts.offline_notify", True):
+            # The offline rule has its own notification kind: a rule that only
+            # covers "resource" leaves disconnect notices without a destination.
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "alerts_offline_no_targets",
+                    "掉线 / 恢复通知没有可用的推送目标（通知中心无 offline 规则，"
+                    "默认推送目标也为空），掉线时不会收到消息。",
+                )
+            )
     if daily_on and not daily_targets:
         issues.append(
             AuditIssue(
@@ -277,6 +310,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         )
     # A hand-edited schedule like "9:00" (or "25:00") only logs a warning and
     # the task never fires, while the diagnostics still show the raw value.
+    schedule_defaults = {
+        "daily_report.time": "21:00",
+        "alerts.daily_summary.time": "09:00",
+        "daily_report.weekly_time": "21:30",
+    }
     for enabled_key, time_key, label in (
         ("daily_report.enabled", "daily_report.time", "趋势日报"),
         ("alerts.daily_summary.enabled", "alerts.daily_summary.time", "每日定时状态图"),
@@ -285,6 +323,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         if not cfg_bool(config, enabled_key, False):
             continue
         raw = str(cfg_get(config, time_key, "") or "").strip()
+        if not raw:
+            # Runtime reads an empty/missing value as the documented default
+            # (21:00 / 09:00 / 21:30). Reporting "定时任务不会触发" here was a
+            # false error banner on a perfectly working install.
+            raw = schedule_defaults.get(time_key, "")
         # Runtime (alerts/report) parses int(hour)/int(minute), so "9:05"
         # and "9:5" both schedule fine; the audit used to reject them with
         # a false "定时任务不会触发" error (v2.20.0).
@@ -300,6 +343,22 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "invalid_schedule_time",
                     f"{label}的发送时间「{raw}」格式非法（应为 HH:MM），"
                     "定时任务不会触发。",
+                )
+            )
+    tz_name = str(cfg_get(config, "display.timezone", "Asia/Shanghai") or "").strip()
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(tz_name)
+        except Exception:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "display_timezone_invalid",
+                    f"时区「{tz_name}」无法识别，将回退到服务器本地时区；"
+                    "状态卡、告警和日报的时间会整体偏移，请检查拼写"
+                    "（例如 Asia/Shanghai）。",
                 )
             )
     if alerts_on:
@@ -356,49 +415,58 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "只有当某类型收不到通知时才需要检查这里的覆盖关系。",
             )
         )
-    else:
-        raw_rules = cfg_get(config, "notify.rules", []) or []
-        valid_kinds = {
-            "resource",
-            "service",
-            "offline",
-            "provider",
-            "daily",
-            "weekly",
-            "daily_image",
-        }
-        invalid_rules = 0
-        unknown_kinds: set[str] = set()
-        for rule in raw_rules:
-            if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
-                continue
-            kinds = cfg_get(rule, "kinds", []) or []
-            if not str(cfg_get(rule, "target", "") or "").strip() or not kinds:
-                invalid_rules += 1
-                continue
-            for kind in kinds:
-                if str(kind).strip() and str(kind).strip() not in valid_kinds:
-                    unknown_kinds.add(str(kind).strip())
-        if invalid_rules:
-            issues.append(
-                AuditIssue(
-                    "warning",
-                    "notify_rule_invalid",
-                    f"通知中心有 {invalid_rules} 条规则未生效："
-                    "缺少推送目标或未勾选任何通知类型。",
-                )
+    # Validate every rule, not just when no rule is active: one working rule
+    # used to hide a second rule with a typo or a missing target.
+    raw_rules = cfg_get(config, "notify.rules", []) or []
+    if not isinstance(raw_rules, list):
+        # A hand-edited scalar here used to raise TypeError inside run_audit
+        # and abort plugin initialization entirely.
+        raw_rules = []
+    valid_kinds = {
+        "resource",
+        "service",
+        "offline",
+        "provider",
+        "daily",
+        "weekly",
+        "daily_image",
+    }
+    invalid_rules = 0
+    unknown_kinds: set[str] = set()
+    for rule in raw_rules:
+        if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
+            continue
+        kinds = cfg_get(rule, "kinds", []) or []
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if not isinstance(kinds, list):
+            kinds = []
+        if not str(cfg_get(rule, "target", "") or "").strip() or not kinds:
+            invalid_rules += 1
+            continue
+        for kind in kinds:
+            if str(kind).strip() and str(kind).strip() not in valid_kinds:
+                unknown_kinds.add(str(kind).strip())
+    if invalid_rules:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "notify_rule_invalid",
+                f"通知中心有 {invalid_rules} 条规则未生效："
+                "缺少推送目标或未勾选任何通知类型。",
             )
-        if unknown_kinds:
-            issues.append(
-                AuditIssue(
-                    "warning",
-                    "notify_rule_unknown_kind",
-                    "通知中心的规则里有无法识别的通知类型："
-                    + "、".join(sorted(unknown_kinds))
-                    + "（可选：resource / service / offline / provider / "
-                    "daily / weekly / daily_image），这些类型不会生效。",
-                )
+        )
+    if unknown_kinds:
+        issues.append(
+            AuditIssue(
+                "warning",
+                "notify_rule_unknown_kind",
+                "通知中心的规则里有无法识别的通知类型："
+                + "、".join(sorted(unknown_kinds))
+                + "（可选：resource / service / offline / provider / "
+                "daily / weekly / daily_image），这些类型不会生效。",
             )
+        )
     # The per-module target lists are legacy: they still work (and win over
     # the shared default), but they are hidden behind "show advanced" now.
     # Surface them so a user who forgot about them knows why that module

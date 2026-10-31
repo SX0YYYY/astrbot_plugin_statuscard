@@ -401,4 +401,10 @@ def test_send_test_uses_center_targets_when_taken_over(tmp_path: Path) -> None:
     }
     engine = alerts_module.AlertEngine(plugin, state, config)
     asyncio.run(engine.send_test())
-    assert plugin.texts[0][0] == ["default:GroupMessage:555"]
+    # The resource alert goes to the rule target (555); the other kinds have no
+    # rule and use the default target (999). v2.20.2 tests every kind instead
+    # of only resource, so a broken daily/service target is caught too.
+    assert set(plugin.texts[0][0]) == {
+        "default:GroupMessage:555",
+        "default:GroupMessage:999",
+    }

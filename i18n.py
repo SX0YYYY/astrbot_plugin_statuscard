@@ -8,6 +8,9 @@ from .collectors import cfg_get
 
 DEFAULT_LANGUAGE = "zh-CN"
 LANGUAGES = ("zh-CN", "en-US")
+# Values already reported; a bad display.language is read on every tr() call
+# and used to log one warning per message.
+_INVALID_LANGUAGE_WARNED: set[str] = set()
 
 MESSAGES: dict[str, dict[str, str]] = {
     "zh-CN": {
@@ -105,7 +108,8 @@ def get_language(config: Any = None) -> str:
     for lang in LANGUAGES:
         if normalized == lang.lower():
             return lang
-    if value.strip():
+    if value.strip() and value.strip() not in _INVALID_LANGUAGE_WARNED:
+        _INVALID_LANGUAGE_WARNED.add(value.strip())
         logger.warning(
             "display.language 值 %r 不是 %s 之一，已回退 %s",
             value,

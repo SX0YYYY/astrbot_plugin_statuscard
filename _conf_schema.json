@@ -1038,6 +1038,15 @@
                 },
                 "hint": "填写另一个监测项的名称（例如 NapCat 容器）；该项异常时不再重复推送本 HTTP 告警。"
               },
+              "verify_tls": {
+                "description": "校验 HTTPS 证书",
+                "type": "bool",
+                "default": true,
+                "condition": {
+                  "show_advanced": true
+                },
+                "hint": "默认开启。只有内网服务使用自签证书、且你信任该地址时才关闭；关闭后不再校验证书有效性。"
+              },
               "timeout_seconds": {
                 "description": "超时（秒）",
                 "type": "int",

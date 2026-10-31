@@ -47,6 +47,7 @@ from .utils import (
     clean_report_sections,
     is_supported_platform,
     mask_umo,
+    safe_float,
 )
 from .version import __version__
 
@@ -149,10 +150,12 @@ class StatusCardPlugin(Star):
                 out[name] = str(value)
         return out
 
-    def _save_diag(self) -> None:
+    async def _save_diag(self) -> None:
         try:
             self.state.set("diag", dict(self._diag))
-            self.state.save()
+            # state.save() fsyncs and copies a backup; doing that inline on the
+            # event loop stalled message handling on every rendered image.
+            await asyncio.to_thread(self.state.save)
         except Exception as exc:
             logger.warning("保存诊断信息失败: %s", exc)
 
@@ -253,9 +256,16 @@ class StatusCardPlugin(Star):
         self.state.save()
 
     async def initialize(self):
-        self._audit_issues = await asyncio.to_thread(
-            run_audit, self.config, monitor=self.monitor
-        )
+        try:
+            self._audit_issues = await asyncio.to_thread(
+                run_audit, self.config, monitor=self.monitor
+            )
+        except Exception:
+            # A hand-edited config (for example a scalar notify.rules) used to
+            # raise here and abort initialization: every background task stayed
+            # off while the plugin still looked loaded.
+            logger.exception("配置体检失败，已跳过（不影响插件启动）")
+            self._audit_issues = []
         self.sampler.start()
         self.report.start()
         self.daily_report.start()
@@ -263,8 +273,12 @@ class StatusCardPlugin(Star):
         self.monitor.start()
         if self._audit_issues:
             for issue in self._audit_issues:
-                log = logger.error if issue.level == "error" else logger.warning
-                log("配置体检[%s] %s", issue.level, issue.message)
+                if issue.level == "error":
+                    logger.error("配置体检[%s] %s", issue.level, issue.message)
+                elif issue.level == "info":
+                    logger.info("配置体检[%s] %s", issue.level, issue.message)
+                else:
+                    logger.warning("配置体检[%s] %s", issue.level, issue.message)
         else:
             logger.info("配置体检：未发现问题")
         logger.info(
@@ -277,12 +291,20 @@ class StatusCardPlugin(Star):
         )
 
     async def terminate(self):
-        await self.daily_report.stop()
-        await self.report.stop()
-        await self.monitor.stop()
-        await self.alerts.stop()
-        await self._alert_aggregator.stop()
-        await self.sampler.stop()
+        # Isolate each stop: one component raising used to skip every cleanup
+        # after it (tasks kept running against a half-unloaded plugin).
+        for name, stop in (
+            ("daily_report", self.daily_report.stop),
+            ("report", self.report.stop),
+            ("monitor", self.monitor.stop),
+            ("alerts", self.alerts.stop),
+            ("aggregator", self._alert_aggregator.stop),
+            ("sampler", self.sampler.stop),
+        ):
+            try:
+                await stop()
+            except Exception:
+                logger.exception("停止 %s 失败，继续清理其余组件", name)
         logger.info("StatusCard plugin terminated")
 
     # ------------------------------------------------------------------
@@ -341,7 +363,11 @@ class StatusCardPlugin(Star):
         ):
             self._privacy_notified.add(chat_key)
             if len(self._privacy_notified) > 500:
-                self._privacy_notified.clear()
+                # Drop the oldest entries instead of clearing the whole set:
+                # a clear() re-notified every session that had already seen
+                # the notice.
+                for stale_key in list(self._privacy_notified)[:100]:
+                    self._privacy_notified.discard(stale_key)
                 self._privacy_notified.add(chat_key)
             notices.append(tr(self.config, "privacy_notice"))
         if cfg_bool(self.config, "display.progress_notice", True):
@@ -363,7 +389,7 @@ class StatusCardPlugin(Star):
                     "last_error_at": time.time(),
                 }
             )
-            self._save_diag()
+            await self._save_diag()
             logger.exception("生成系统状态图片失败")
             # Prefer the local Pillow card over a plain text summary: the
             # T2I outage should degrade to a plain-looking image, not to no
@@ -446,7 +472,7 @@ class StatusCardPlugin(Star):
                     self._diag.get("last_render_ms", 0),
                     self._diag.get("last_collect_ms", 0),
                 )
-            self._save_diag()
+            await self._save_diag()
             raise
         self._diag.update(
             {
@@ -555,7 +581,7 @@ class StatusCardPlugin(Star):
                     "T2I 日报渲染失败：%.1fms",
                     self._diag.get("last_report_render_ms", 0),
                 )
-            self._save_diag()
+            await self._save_diag()
             raise
         self._diag.update(
             {
@@ -934,7 +960,7 @@ class StatusCardPlugin(Star):
             lines.append("配置体检: 未发现问题")
 
         if self._diag.get("last_render_at"):
-            age = max(0, int(time.time() - float(self._diag["last_render_at"])))
+            age = max(0, int(time.time() - safe_float(self._diag["last_render_at"])))
             ok = "成功" if self._diag.get("last_render_ok") else "失败"
             lines.append(
                 f"最近状态卡渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
@@ -945,7 +971,7 @@ class StatusCardPlugin(Star):
         if self._diag.get("last_report_render_at"):
             age = max(
                 0,
-                int(time.time() - float(self._diag["last_report_render_at"])),
+                int(time.time() - safe_float(self._diag["last_report_render_at"])),
             )
             ok = "成功" if self._diag.get("last_report_render_ok") else "失败"
             lines.append(
@@ -962,7 +988,7 @@ class StatusCardPlugin(Star):
         # successful verify_targets while the real alert had failed.
         delivery = self.state.get("delivery_real") or self.state.get("delivery", {})
         if isinstance(delivery, dict) and delivery.get("ts"):
-            age = max(0, int(time.time() - float(delivery["ts"])))
+            age = max(0, int(time.time() - safe_float(delivery["ts"])))
             uncertain_targets = delivery.get("uncertain_targets") or []
             if delivery.get("ok"):
                 push_state = "部分成功" if delivery.get("partial") else "成功"
