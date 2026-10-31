@@ -119,6 +119,9 @@ def test_broadcast_template_keeps_unknown_braces() -> None:
 
 
 def test_network_sample_skips_history_after_downtime(tmp_path: Path) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     state = StateStore(tmp_path / "state.json")
     state.data["net"] = {
         "last_ts": time.time() - 7200,
@@ -126,7 +129,11 @@ def test_network_sample_skips_history_after_downtime(tmp_path: Path) -> None:
         "last_recv": 2000,
         "month_up": 1000,
         "month_down": 2000,
-        "month": time.strftime("%Y-%m"),
+        # The sampler compares against the *configured* timezone, so the
+        # fixture must use the same one. ``time.strftime`` used the runner's
+        # local timezone (UTC on CI), which rolls the month at a different
+        # moment and made this test fail on the first day of a month.
+        "month": datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m"),
         "history": [],
     }
     sampler = Sampler(state=state, config={"display": {"timezone": "Asia/Shanghai"}})
