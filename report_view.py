@@ -37,7 +37,7 @@ from .provider_quality import (
 )
 from .redactor import Redactor, read_rules
 from .report_store import ReportStore
-from .utils import redact_url, safe_int
+from .utils import redact_url, safe_float, safe_int
 
 RESOURCE_KEYS = ("cpu", "ram", "swap", "disk", "load1")
 RESOURCE_LABELS = {
@@ -135,6 +135,15 @@ def _nice_ceil(value: float) -> float:
     return 10 ** (exp + 1)
 
 
+def _numeric(value: Any) -> float | None:
+    """Best-effort float for chart input; non-numeric values become gaps."""
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _line_chart(
     labels: list[str],
     series: list[dict[str, Any]],
@@ -150,10 +159,12 @@ def _line_chart(
     plot_w = width - left - right
     plot_h = height - top - bottom
     values = [
-        value
+        number
         for item in series
         for value in item.get("values", [])
         if value is not None
+        for number in (_numeric(value),)
+        if number is not None
     ]
     if not values:
         return {
@@ -193,7 +204,7 @@ def _line_chart(
                     segments.append(" ".join(current))
                     current = []
                 continue
-            x, y = xy(index, float(value))
+            x, y = xy(index, safe_float(value, 0.0))
             current.append(f"{x},{y}")
         if current:
             segments.append(" ".join(current))
@@ -205,7 +216,7 @@ def _line_chart(
             }
         )
         numeric = [
-            (index, float(value))
+            (index, safe_float(value, 0.0))
             for index, value in enumerate(item_values)
             if value is not None
         ]
@@ -323,12 +334,23 @@ class DailyReportBuilder:
         if self.redactor.hostname:
             host = "已隐藏"
 
+        # The label must follow the report day, not the wall clock: a retry or
+        # an offline-recovery delivery can send a report that is two or more
+        # days old, and calling it "昨日" made the numbers look like they
+        # belonged to yesterday (v2.20.8).
+        today = now_in_timezone(self.config).date()
+        delta_days = (today - target).days
         if span == 1:
+            if delta_days <= 0:
+                day_label = "今天"
+            elif delta_days == 1:
+                day_label = "昨日"
+            else:
+                day_label = f"{target.month}月{target.day}日"
             title = "系统日报"
             window = f"{target.isoformat()} 00:00–24:00"
-            day_label = "昨日"
-            window_label = "昨日"
-            token_label = f"昨日 · 趋势最近 {history_days} 天"
+            window_label = day_label
+            token_label = f"{day_label} · 趋势最近 {history_days} 天"
         else:
             title = "系统周报"
             window = f"{start_day.isoformat()} 00:00 – {target.isoformat()} 24:00"
@@ -359,14 +381,20 @@ class DailyReportBuilder:
         }
         if "resource" in selected:
             view["resources"] = self._resource_section(
-                target, previous, history_days, span
+                target, previous, history_days, span, day_label=day_label
             )
         if "anomaly" in selected:
-            view["anomalies"] = self._anomaly_section(target, previous, span)
+            view["anomalies"] = self._anomaly_section(
+                target, previous, span, day_label=day_label
+            )
         if "qq" in selected:
-            view["qq"] = self._qq_section(target, history_days, span)
+            view["qq"] = self._qq_section(
+                target, history_days, span, day_label=day_label
+            )
         if "token" in selected:
-            view["token"] = self._token_section(target, history_days, span)
+            view["token"] = self._token_section(
+                target, history_days, span, day_label=day_label
+            )
         if "provider" in selected:
             view["provider_quality"] = self._provider_quality_section(
                 target, history_days, span
@@ -377,7 +405,7 @@ class DailyReportBuilder:
             )
         if "process" in selected:
             view["process"] = self._process_section(
-                target, previous, history_days, span
+                target, previous, history_days, span, day_label=day_label
             )
         view["summary"] = self._summary(view, span)
         return view
@@ -409,7 +437,9 @@ class DailyReportBuilder:
             # and tokens cover 7 days, sent/received only the last day); the
             # template prints these labels so the numbers are not misread.
             "span_days": max(1, int(span or 1)),
-            "window_label": "昨日" if span == 1 else f"近 {span} 天",
+            "window_label": str(
+                view.get("window_label") or ("昨日" if span == 1 else f"近 {span} 天")
+            ),
             "last_day_label": "最后一天",
             "anomaly_count": (
                 anomalies.get("count", 0) if "anomaly" in sections else "未开启"
@@ -463,7 +493,12 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _resource_section(
-        self, day: date, previous: date, history_days: int, span: int = 1
+        self,
+        day: date,
+        previous: date,
+        history_days: int,
+        span: int = 1,
+        day_label: str = "昨日",
     ) -> dict[str, Any]:
         span = max(1, int(span or 1))
         # A weekly report compares against the previous period, so the query
@@ -517,7 +552,7 @@ class DailyReportBuilder:
             else:
                 empty_reason = "暂无资源采样数据"
         elif not available:
-            scope = "昨日" if span == 1 else f"近 {span} 天"
+            scope = day_label if span == 1 else f"近 {span} 天"
             empty_reason = f"资源采样从 {first_day or '--'} 开始，暂无完整{scope}数据"
         else:
             empty_reason = None
@@ -547,7 +582,7 @@ class DailyReportBuilder:
                 local = datetime.fromtimestamp(int(row["ts"]), self.tz)
                 buckets[f"{local.hour:02d}"].append(row)
             hour_labels = list(buckets)
-            hour_label = "昨日 24 小时"
+            hour_label = f"{day_label} 24 小时"
             hour_note = "按小时均值"
         else:
             # One bucket per day for a weekly report: averaging the last day
@@ -648,7 +683,7 @@ class DailyReportBuilder:
                 f"{len(gaps)} 段共约 {total_minutes} 分钟"
                 "（采样缺失，期间插件或 Bot 停机、无法监测）"
             )
-        scope_text = "昨日" if span == 1 else f"近 {span} 天"
+        scope_text = day_label if span == 1 else f"近 {span} 天"
         coverage_note = (
             f"{scope_text}资源采样 {len(yesterday_rows)} 个点"
             f"（约覆盖 {coverage * 100:.0f}%），"
@@ -719,7 +754,11 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _anomaly_section(
-        self, day: date, previous: date, span: int = 1
+        self,
+        day: date,
+        previous: date,
+        span: int = 1,
+        day_label: str = "昨日",
     ) -> dict[str, Any]:
         window_days = {
             (day - timedelta(days=offset)).isoformat() for offset in range(span)
@@ -857,8 +896,20 @@ class DailyReportBuilder:
                     "kind": self._kind_text(str(event.get("kind") or "")),
                     "kind_slug": str(event.get("kind") or ""),
                     "name": self.redactor.mask_name(redact_url(name)) if name else "--",
-                    "status": self._status_text(status),
-                    "status_key": status,
+                    "status": (
+                        "已恢复"
+                        if status in {"alert", "failed"}
+                        and resolved_ts
+                        and duration_text not in ("跨窗口关闭",)
+                        else self._status_text(status)
+                    ),
+                    "status_key": (
+                        "recovered"
+                        if status in {"alert", "failed"}
+                        and resolved_ts
+                        and duration_text not in ("跨窗口关闭",)
+                        else status
+                    ),
                     "detail": self.redactor.mask_addresses(
                         str(event.get("detail") or "")
                     )[:80],
@@ -910,17 +961,26 @@ class DailyReportBuilder:
                 }
             )
         raw_total = len(items)
+        unresolved_total = len(unresolved_items)
+        hidden_unresolved = 0
+        dropped_in_window = 0
         if unresolved_items:
-            # Keep the unresolved rows visible: prepending them after the
-            # 20-row cut used to hide today's real events once 20 stale rows
-            # had accumulated. Keep the newest in-window rows alongside them.
+            # Unresolved rows are capped at half the table: with 20+ stale
+            # incidents the old formula left room=0 and the day's real events
+            # disappeared completely (v2.20.8). The newest in-window rows keep
+            # the remaining slots, and anything hidden is disclosed below.
+            cap = 10
+            if len(unresolved_items) > cap:
+                hidden_unresolved = len(unresolved_items) - cap
+                unresolved_items = unresolved_items[:cap]
             room = max(0, 20 - len(unresolved_items))
             head = items[-room:] if room else []
+            dropped_in_window = max(0, len(items) - len(head))
             items = unresolved_items + head
         return {
             "available": bool(items),
             "empty_reason": (
-                "昨日无异常事件" if span == 1 else f"近 {span} 天无异常事件"
+                f"{day_label}无异常事件" if span == 1 else f"近 {span} 天无异常事件"
             )
             if not items
             else None,
@@ -928,10 +988,11 @@ class DailyReportBuilder:
             # Episodes that started inside the window and never recovered are
             # shown as "进行中" but were not counted here, so the headline said
             # "未恢复 0 项" right above a row that said otherwise.
-            "unresolved": len(unresolved_items) + len(episode_open - set(stale.keys())),
+            "unresolved": unresolved_total + len(episode_open - set(stale.keys())),
             # Count before the display cut: with unresolved rows prepended the
             # old total became 20 and the "另有 N 条未列出" disclosure vanished.
-            "total": raw_total + len(unresolved_items),
+            "total": raw_total + unresolved_total,
+            "truncated": dropped_in_window + hidden_unresolved,
             "items": items[-20:],
             "normal": {
                 "monitors": self._monitor_count(),
@@ -973,7 +1034,11 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _qq_section(
-        self, day: date, history_days: int, span: int = 1
+        self,
+        day: date,
+        history_days: int,
+        span: int = 1,
+        day_label: str = "昨日",
     ) -> dict[str, Any]:
         if self.redactor.qq_stats:
             return {
@@ -1022,7 +1087,9 @@ class DailyReportBuilder:
                 and current.get("recv_total") is not None
                 and following.get("recv_total") is not None
             ):
-                delta = int(following["recv_total"]) - int(current["recv_total"])
+                delta = safe_int(following["recv_total"]) - safe_int(
+                    current["recv_total"]
+                )
                 if delta < 0:
                     delta = 0
                     reset_days.append(item.isoformat())
@@ -1161,7 +1228,7 @@ class DailyReportBuilder:
                     "该日或次日缺少快照，无法计算接收差值。"
                     if yesterday_recv is None
                     else (
-                        f"昨日快照的记录时刻有偏移（实际覆盖 {recv_gap_text}），"
+                        f"{day_label}快照的记录时刻有偏移（实际覆盖 {recv_gap_text}），"
                         "接收差值仅供参考。"
                         if recv_skewed
                         else None
@@ -1406,6 +1473,7 @@ class DailyReportBuilder:
         previous: date,
         history_days: int,
         span: int = 1,
+        day_label: str = "昨日",
     ) -> dict[str, Any]:
         window_start = day - timedelta(days=span - 1)
         start_ts = int(
@@ -1435,10 +1503,10 @@ class DailyReportBuilder:
                         "samples": 0,
                     },
                 )
-                item["cpu"] = max(float(item["cpu"]), float(row.get("cpu") or 0.0))
+                item["cpu"] = max(float(item["cpu"]), safe_float(row.get("cpu"), 0.0))
                 item["mem_mb"] = max(
                     float(item["mem_mb"]),
-                    float(row.get("mem_mb") or 0.0),
+                    safe_float(row.get("mem_mb"), 0.0),
                 )
                 item["samples"] += 1
             return sorted(values.values(), key=lambda item: item[key], reverse=True)[
@@ -1480,7 +1548,7 @@ class DailyReportBuilder:
         else:
             empty_reason = "暂无进程采样数据"
         note = (
-            "按进程名聚合昨日采样峰值；同一程序的多进程会合并显示。"
+            f"按进程名聚合{day_label}采样峰值；同一程序的多进程会合并显示。"
             if span == 1
             else f"按进程名聚合近 {span} 天采样峰值；同一程序的多进程会合并显示。"
         )
@@ -1499,7 +1567,11 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
 
     def _token_section(
-        self, day: date, history_days: int, span: int = 1
+        self,
+        day: date,
+        history_days: int,
+        span: int = 1,
+        day_label: str = "昨日",
     ) -> dict[str, Any]:
         chart_days = [day - timedelta(days=i) for i in range(history_days - 1, -1, -1)]
         window_days = [day - timedelta(days=i) for i in range(span - 1, -1, -1)]

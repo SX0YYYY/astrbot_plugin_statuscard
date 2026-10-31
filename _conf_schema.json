@@ -277,7 +277,7 @@
         "condition": {
           "avatar_source": "upload"
         },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。；GIF/WebP 动图只显示第一帧。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张；GIF/WebP 动图只显示第一帧。"
       },
       "avatar_text": {
         "description": "状态图显示的 Bot 名称",
@@ -320,7 +320,7 @@
         "condition": {
           "background_source": "upload"
         },
-        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张。；GIF/WebP 动图只取第一帧作为静态背景。"
+        "hint": "支持 png/jpg/webp/gif，单张不超过 10 MB；取列表第一张；GIF/WebP 动图只取第一帧作为静态背景。"
       }
     }
   },

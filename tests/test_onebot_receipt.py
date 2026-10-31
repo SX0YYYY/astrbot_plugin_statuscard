@@ -41,9 +41,17 @@ def test_extract_receipt_accepts_unwrapped_aiocqhttp_data() -> None:
 
 
 def test_extract_receipt_handles_empty_data() -> None:
+    """Without a message_id an empty dict proves nothing (v2.20.8).
+
+    It is treated as "uncertain": never repeated, but not a clean delivery
+    either -- otherwise the alert is put into its cooldown and the fault
+    stays silent for good.
+    """
+
     receipt = extract_receipt({})
-    assert receipt.ok is True
+    assert receipt.ok is False
     assert receipt.attempted is True
+    assert receipt.error
 
 
 def test_extract_receipt_failure_keeps_reason() -> None:

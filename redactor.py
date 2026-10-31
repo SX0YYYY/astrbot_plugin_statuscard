@@ -234,6 +234,23 @@ class Redactor:
             return value
         return "已隐藏（错误详情含主机或地址信息）"
 
+    def mask_address_tokens(self, text: Any) -> str:
+        """Replace address-shaped tokens inside a longer text.
+
+        ``mask_addresses`` replaces the *whole* text; a forwarded third-party
+        message ("10.0.0.8 无法连接") should keep its readable part and only
+        lose the address (v2.20.8).
+        """
+
+        value = str(text or "")
+        if not value or not self.hostname:
+            return value
+        masked = _ADDRESS_RE.sub("（已隐藏地址）", value)
+        own = self._own_hostname
+        if own and len(own) >= 3:
+            masked = re.sub(re.escape(own), HIDDEN, masked, flags=re.IGNORECASE)
+        return masked
+
     def mask_name(self, name: Any) -> str:
         """Hide a monitor/website *name* that is itself an address or URL.
 

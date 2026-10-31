@@ -60,6 +60,34 @@ class ReportStore:
             logger.warning("日报数据库仍不可用: %s", exc)
             return False
 
+    def probe(self) -> bool:
+        """Cheap liveness check run before a report is built.
+
+        ``available`` only reflects the last successful initialisation. A
+        database that became unwritable at runtime (deleted file, read-only
+        mount, full disk) kept the flag True, every query returned [], and the
+        scheduled report was sent full of "--" while the day was recorded as
+        delivered -- the real data could never be sent afterwards (v2.20.8).
+        """
+
+        if not self.available:
+            return False
+        con: sqlite3.Connection | None = None
+        try:
+            with self._lock:
+                con = self._connect()
+                con.execute("SELECT 1").fetchone()
+            return True
+        except Exception:
+            logger.exception("日报数据库探针失败")
+            # Let the next ensure_ready() try a real re-initialisation instead
+            # of trusting a flag that no longer matches the file.
+            self.available = False
+            return False
+        finally:
+            if con is not None:
+                con.close()
+
     def _init_db_with_recovery(self) -> None:
         """Create the schema; rebuild the file when it is truly corrupt.
 

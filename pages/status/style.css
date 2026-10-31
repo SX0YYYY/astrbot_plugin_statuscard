@@ -756,7 +756,8 @@ main.is-refreshing::after {
   color: var(--bad);
 }
 
-.badge.recovery {
+.badge.recovery,
+.badge.recovered {
   background: var(--good-soft);
   color: var(--good);
 }

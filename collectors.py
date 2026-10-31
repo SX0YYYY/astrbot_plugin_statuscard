@@ -111,7 +111,9 @@ def format_duration(seconds: float | None) -> str:
         return "--"
     try:
         seconds = max(0, int(seconds))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # int(float("inf")) raises OverflowError; a corrupted duration from
+        # report.db must not break the card/report render.
         return "--"
     days, rem = divmod(seconds, 86400)
     hours, rem = divmod(rem, 3600)
@@ -251,7 +253,15 @@ def cpu_percent() -> float:
 
 
 def cpu_freq() -> CpuFreq:
-    freq = psutil.cpu_freq()
+    try:
+        freq = psutil.cpu_freq()
+    except Exception:
+        # psutil raises NotImplementedError on kernels without cpufreq and
+        # without a ``cpu MHz`` line in /proc/cpuinfo. Letting it escape took
+        # the whole collect_all() down, so both the T2I card and the local
+        # fallback failed and the user got a one-line text error (v2.20.8).
+        logger.debug("读取 CPU 频率失败", exc_info=True)
+        return CpuFreq(current=None, min=None, max=None)
     return CpuFreq(
         current=getattr(freq, "current", None),
         min=getattr(freq, "min", None),
@@ -267,13 +277,23 @@ class MemStat:
 
 
 def memory_stat() -> MemStat:
-    m = psutil.virtual_memory()
-    return MemStat(total=m.total, used=m.used, percent=m.percent)
+    try:
+        m = psutil.virtual_memory()
+        return MemStat(total=m.total, used=m.used, percent=m.percent)
+    except Exception:
+        # Same reasoning as cpu_freq: an unavailable /proc/meminfo must not
+        # take the whole card down.
+        logger.debug("读取内存信息失败", exc_info=True)
+        return MemStat(total=0, used=0, percent=0.0)
 
 
 def swap_stat() -> MemStat:
-    s = psutil.swap_memory()
-    return MemStat(total=s.total, used=s.used, percent=s.percent)
+    try:
+        s = psutil.swap_memory()
+        return MemStat(total=s.total, used=s.used, percent=s.percent)
+    except Exception:
+        logger.debug("读取 SWAP 信息失败", exc_info=True)
+        return MemStat(total=0, used=0, percent=0.0)
 
 
 def _default_disk_paths() -> list[str]:
@@ -329,8 +349,15 @@ def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
 # whole batch, so the root disk went blind along with it), and queued-but-
 # unstarted jobs are cancelled on the next call so a pool full of stuck
 # workers cannot pile up an ever-growing backlog.
-_DISK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="statuscard-disk")
+_DISK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="statuscard-disk")
 _DISK_WARN_AT = 0.0
+# Paths that just timed out. ``future.cancel()`` cannot stop a worker already
+# blocked inside statvfs, so every sample of a hung NFS/CIFS mount leaked one
+# worker; after four calls the (previously 4-thread) pool was full and every
+# healthy mount timed out too until the process restarted (v2.20.8). A timed
+# out path is skipped for a few minutes instead of being submitted again.
+_DISK_DEAD_UNTIL: dict[str, float] = {}
+_DISK_DEAD_COOLDOWN = 300.0
 
 
 def disk_usage_bounded(
@@ -344,15 +371,29 @@ def disk_usage_bounded(
     # job that no one waits for or cancels, leaking one hung worker per
     # call until the pool was full and every disk read timed out.
     unique_targets = list(dict.fromkeys(targets))
-    futures = {
-        name: _DISK_POOL.submit(_disk_usage_one, name) for name in unique_targets
-    }
-    done, _not_done = wait(futures.values(), timeout=timeout)
     results: dict[str, DiskUsage] = {}
+    futures = {}
+    now = time.time()
+    for name in unique_targets:
+        if _DISK_DEAD_UNTIL.get(name, 0.0) > now:
+            # Recently hung: do not feed another worker to the same mount.
+            results[name] = DiskUsage(
+                name=name,
+                used=None,
+                total=None,
+                percent=None,
+                exception="读取超时",
+            )
+            continue
+        futures[name] = _DISK_POOL.submit(_disk_usage_one, name)
+    done, _not_done = (
+        wait(futures.values(), timeout=timeout) if futures else (set(), set())
+    )
     for name, future in futures.items():
         if future in done and not future.cancelled():
             try:
                 results[name] = future.result()
+                _DISK_DEAD_UNTIL.pop(name, None)
             except Exception as exc:  # pragma: no cover - defensive
                 results[name] = DiskUsage(
                     name=name,
@@ -363,6 +404,7 @@ def disk_usage_bounded(
                 )
         else:
             future.cancel()  # queued jobs die here; running ones keep hanging
+            _DISK_DEAD_UNTIL[name] = time.time() + _DISK_DEAD_COOLDOWN
             results[name] = DiskUsage(
                 name=name,
                 used=None,

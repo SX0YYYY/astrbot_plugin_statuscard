@@ -160,7 +160,7 @@
         "history_gaps": "{count} downtime gap(s) (gray bands): the plugin or AstrBot was down and nothing was sampled.",
         "report_gaps": "{count} downtime gap(s): the plugin or AstrBot was down, so nothing was sampled.",
         "verify_title": "Instant check",
-        "verify_hint_short": "Verify right after saving",
+        "verify_hint_short": "30 s cooldown per kind",
         "verify_hint": "\"Push targets\" really sends a verification message and reports per-target receipts; \"Monitors\" probes once without touching alerting state; \"Webhook\" posts a simulated event to this plugin's listener to exercise the receive → parse → push chain.",
         "verify_targets": "Check push targets",
         "verify_monitors": "Check monitors",
@@ -214,7 +214,9 @@
         "reason_no_website_samples": "No website latency samples yet",
         "reason_no_process_samples": "No process samples yet",
         "reason_no_provider_data": "No provider requests in the selected range",
-        "reason_no_trend_data": "No trend data yet"
+        "reason_no_trend_data": "No trend data yet",
+        "status_recovered": "Recovered",
+        "method_weekly_sections_empty": "Weekly content not configured"
       }
     }
   }

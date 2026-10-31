@@ -34,10 +34,11 @@ from .collectors import (
 )
 from .delivery import DeliveryResult
 from .provider_quality import recent_streak as provider_recent_streak
-from .redactor import HIDDEN, read_rules
+from .redactor import HIDDEN, Redactor, read_rules
 from .state import StateStore
 from .utils import (
     clamp_config,
+    delivery_offline,
     normalize_targets,
     retry_delay,
     truncate_text,
@@ -267,6 +268,42 @@ class AlertEngine:
         self._daily_last_attempt_day = day
         self._save_daily_markers(self._daily_last_sent_day, day)
 
+    def _daily_pending(self) -> dict[str, Any] | None:
+        """The queued "send today's image after the channel returns" record."""
+
+        try:
+            alerts_state = self.state.get("alerts", {}) or {}
+            if not isinstance(alerts_state, dict):
+                return None
+            summary = alerts_state.get("daily_summary")
+            if isinstance(summary, dict):
+                pending = summary.get("pending")
+                if isinstance(pending, dict):
+                    return pending
+        except Exception:
+            logger.debug("读取每日状态图补发标记失败", exc_info=True)
+        return None
+
+    def _set_daily_pending(self, day: str, next_ts: float) -> None:
+        try:
+            with self.state.section("alerts") as alerts:
+                summary = alerts.get("daily_summary")
+                if not isinstance(summary, dict):
+                    summary = {}
+                    alerts["daily_summary"] = summary
+                summary["pending"] = {"day": day, "next": float(next_ts)}
+        except Exception:
+            logger.debug("记录每日状态图补发标记失败", exc_info=True)
+
+    def _clear_daily_pending(self) -> None:
+        try:
+            with self.state.section("alerts") as alerts:
+                summary = alerts.get("daily_summary")
+                if isinstance(summary, dict) and "pending" in summary:
+                    summary.pop("pending", None)
+        except Exception:
+            logger.debug("清除每日状态图补发标记失败", exc_info=True)
+
     def _save_daily_markers(self, sent: str | None, attempted: str) -> None:
         try:
             with self.state.section("alerts") as alerts:
@@ -463,10 +500,18 @@ class AlertEngine:
             )
         return result
 
-    async def _push_alert(self, name: str, reason: str, text: str) -> Any | None:
-        """Send the first alert of an episode, or buffer it in the window."""
+    async def _push_alert(
+        self, name: str, reason: str, text: str, retry: bool = False
+    ) -> Any | None:
+        """Send the first alert of an episode, or buffer it in the window.
 
-        if self._aggregator is None:
+        A retry of the same episode bypasses the aggregator: when the first
+        push was rejected the 30-second retry lands inside the 120-second
+        window, and the summary then delivered "⚠️ 告警汇总 · 1 项异常" with
+        the detailed text thrown away (v2.20.8).
+        """
+
+        if self._aggregator is None or retry:
             return await self._send(text)
         return await self._aggregator.push(
             label=name,
@@ -1000,6 +1045,12 @@ class AlertEngine:
                     and _safe_int(st.get("retry_count")) > 0
                 )
             ):
+                # Remember when the fault started, even if every push fails:
+                # the recovery notice used to report a duration measured from
+                # the last retry (about one minute) instead of the whole
+                # episode (v2.20.8).
+                if not _safe_float(st.get("alert_since")):
+                    st["alert_since"] = now
                 if last_sent and now - last_sent < self.cooldown and not abandoned:
                     # A second episode inside the cooldown used to vanish
                     # completely. Latch it and write one event (with the
@@ -1047,8 +1098,15 @@ class AlertEngine:
                     st["last_attempt"] = now
                     st["send_inflight"] = True
                     self.state.save()
+                    # Only a retry of an already-attempted episode bypasses
+                    # aggregation; the first alert must still open the window
+                    # (v2.20.8).
+                    is_retry = cooldown_retry or _safe_int(st.get("retry_count")) > 0
                     result = await self._push_alert(
-                        name, f"{value_text}（阈值 {threshold:.1f}{unit}）", text
+                        name,
+                        f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                        text,
+                        retry=is_retry,
                     )
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
@@ -1081,7 +1139,7 @@ class AlertEngine:
                     elif delivered:
                         st["alerting"] = True
                         st["alerted"] = True
-                        if not alerting:
+                        if not _safe_float(st.get("alert_since")):
                             st["alert_since"] = now
                         st["count"] = 0
                         st["last_sent"] = now
@@ -1094,7 +1152,7 @@ class AlertEngine:
                             "alert",
                         )
                     else:
-                        if self._transport_offline():
+                        if self._transport_offline() or delivery_offline(result):
                             # The bot is disconnected, so this failure says
                             # nothing about the alert: keep it queued without
                             # spending the three-attempt budget. The old code
@@ -1194,7 +1252,7 @@ class AlertEngine:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        if self._transport_offline():
+                        if self._transport_offline() or delivery_offline(result):
                             # Keep the recovery notice queued across the
                             # outage instead of spending its retry budget:
                             # the user should learn about the fault when the
@@ -1605,10 +1663,19 @@ class AlertEngine:
                     )
                 st["alerting"] = False
                 st["since"] = 0
+                # Whether this episode ever reached the user. Older state has
+                # no marker: keep the old behaviour (assume it did) so a real
+                # outage never loses its recovery notice.
+                notified = bool(st.pop("alerted", True))
                 parts: list[str] = []
                 if queued:
                     parts.append(str(queued))
-                if self.offline_notify and self.recover_notify and not stale:
+                if (
+                    self.offline_notify
+                    and self.recover_notify
+                    and not stale
+                    and (notified or queued)
+                ):
                     text = (
                         "✅ Bot 连接已恢复\n"
                         "──────────────\n"
@@ -1645,7 +1712,7 @@ class AlertEngine:
                         report.notify_offline_recovery()
                 except Exception:
                     logger.debug("安排日报补发失败", exc_info=True)
-                if not stale:
+                if not stale and (notified or queued):
                     # A hundred-group broadcast with a 3s gap can take five
                     # minutes; running it inline stalled every later sample
                     # and delayed the operator's own recovery notice.
@@ -1727,9 +1794,32 @@ class AlertEngine:
             # old ``since`` made the reported outage short by that much.
             st["since"] = max(0.0, now - max(0, self.interval))
             st["count"] = 0
-            if not self.offline_notify:
+            # A new outage starts a new broadcast round. The dedupe set used
+            # to live for the whole process, so only the first outage ever
+            # reached the groups; every later recovery silently skipped all
+            # of them (v2.20.8).
+            self._broadcast_done.clear()
+            last_sent = _safe_float(st.get("last_sent"))
+            in_cooldown = bool(last_sent and now - last_sent < self.cooldown)
+            st["alerted"] = False
+            if not self.offline_notify or in_cooldown:
                 # Keep the incident in the event log; only the push is off.
-                self._record_event("offline", "Bot 连接", "连接离线", "alert")
+                # A flapping link (NapCat reconnecting every few minutes)
+                # used to push a "离线 + 已恢复" pair every round; repeated
+                # outages inside the cooldown are recorded but silent, and
+                # the recovery notice/broadcast is skipped too, so the user
+                # never sees a recovery for an alert they did not receive.
+                self._record_event(
+                    "offline",
+                    "Bot 连接",
+                    "连接离线（通知冷却中）" if in_cooldown else "连接离线",
+                    "alert",
+                )
+                if in_cooldown:
+                    logger.info(
+                        "Bot 连接离线（%d 秒内已通知过，本次只记事件）",
+                        self.cooldown,
+                    )
                 return
             text = (
                 "🔴 Bot 连接离线\n"
@@ -1743,6 +1833,8 @@ class AlertEngine:
             st["pending_alert"] = not delivered
             if delivered:
                 st.pop("pending_alert_text", None)
+                st["alerted"] = True
+                st["last_sent"] = now
                 logger.info("Bot 连接离线告警已发送")
                 self._record_event("offline", "Bot 连接", "连接离线", "alert")
             else:
@@ -1771,6 +1863,11 @@ class AlertEngine:
         watch.pop("recovery_retry_count", None)
         watch.pop("recovery_next_attempt", None)
         watch.pop("send_failed", None)
+        # Same for an alert push that never made it: re-enabling the watch
+        # must not replay the previous episode's text (v2.20.8).
+        watch.pop("pending_alert_text", None)
+        watch.pop("next_attempt", None)
+        watch.pop("alert_retry_count", None)
         if not watch.get("alerting"):
             return
         watch["alerting"] = False
@@ -1845,7 +1942,7 @@ class AlertEngine:
                     "alert",
                 )
                 logger.warning("LLM 服务连续失败 %d 次，补发告警成功", streak)
-            elif self._transport_offline():
+            elif self._transport_offline() or delivery_offline(result):
                 watch["next_attempt"] = now + 900
             else:
                 attempts = _safe_int(watch.get("alert_retry_count")) + 1
@@ -1978,7 +2075,7 @@ class AlertEngine:
                     f"连续 {streak} 次 LLM 调用失败（推送失败）",
                     "failed",
                 )
-                if self._transport_offline():
+                if self._transport_offline() or delivery_offline(result):
                     # Keep the alert queued instead of giving up: the channel
                     # is down, so this failure says nothing about the LLM
                     # outage. ``alerted`` stays False so the recovery notice
@@ -1997,6 +2094,16 @@ class AlertEngine:
 
         if alerting and latest == "completed":
             watch["alerting"] = False
+            # A queued alert from this episode must not survive it: the retry
+            # block would re-send the stale text (with the old failure count)
+            # during the *next* outage and the user got two alerts for one
+            # incident (v2.20.8).
+            for stale_key in (
+                "pending_alert_text",
+                "next_attempt",
+                "alert_retry_count",
+            ):
+                watch.pop(stale_key, None)
             # Only announce a recovery for an episode that actually reached
             # the user; a cooldown-suppressed one is logged but silent.
             notified = bool(watch.pop("alerted", True))
@@ -2096,9 +2203,21 @@ class AlertEngine:
                     await asyncio.sleep(60)
                     continue
                 now = datetime.now(tz)
+                today_text = now.strftime("%Y-%m-%d")
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if target <= now:
-                    today_text = now.strftime("%Y-%m-%d")
+                pending = self._daily_pending()
+                if isinstance(pending, dict) and pending.get("day") == today_text:
+                    # The scheduled send failed because the channel was down.
+                    # Retry after the backoff instead of waiting for tomorrow:
+                    # "attempted today" used to drop the whole day silently
+                    # (v2.20.8).
+                    next_ts = _safe_float(pending.get("next"))
+                    target = (
+                        datetime.fromtimestamp(next_ts, tz)
+                        if next_ts > now.timestamp()
+                        else now
+                    )
+                elif target <= now:
                     if self._daily_catch_up_allowed(today_text):
                         # The window passed while the plugin was down or
                         # reloading; send now instead of silently skipping
@@ -2209,6 +2328,7 @@ class AlertEngine:
                 )
                 if self._delivered(result):
                     self._mark_daily_sent(today)
+                    self._clear_daily_pending()
                     logger.info("每日定时状态图已发送（图片）：%s", targets)
                     return True
         summary = await self.plugin.build_summary_text()
@@ -2219,9 +2339,18 @@ class AlertEngine:
         )
         if self._delivered(result):
             self._mark_daily_sent(today)
+            self._clear_daily_pending()
             logger.info("每日定时状态图已发送（文字）：%s", targets)
             return True
         logger.warning("每日定时状态图发送失败：%s", targets)
+        if delivery_offline(result) or self._transport_offline():
+            # The channel is unreachable, not the content: queue today's
+            # image and retry after the backoff / on reconnect instead of
+            # burning the four attempts inside the outage.
+            self._set_daily_pending(today, time.time() + 900)
+            logger.warning(
+                "每日定时状态图发送失败（Bot 连接不可用），已排队，恢复后补发"
+            )
         return False
 
     # ------------------------------------------------------------------
@@ -2324,7 +2453,9 @@ class AlertEngine:
                 data = json.loads(raw.decode("utf-8"))
             except Exception:
                 data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
-            text = self._format_komari(data)
+            text = self._format_komari(
+                data, Redactor(read_rules(self.config, "display.redact"))
+            )
             result = await self._send(text, source="webhook", kind="service")
             if not self._delivered(result):
                 self._webhook_inflight.discard(body_key)
@@ -2367,11 +2498,14 @@ class AlertEngine:
                 pass
 
     @staticmethod
-    def _format_komari(data: Any) -> str:
+    def _format_komari(data: Any, redactor: Redactor | None = None) -> str:
+        redactor = redactor or Redactor()
         if not isinstance(data, dict):
             return truncate_text(
                 "🔔 Komari 监控通知\n──────────────\n"
-                + json.dumps(data, ensure_ascii=False, indent=2)[:4000],
+                + redactor.mask_address_tokens(
+                    json.dumps(data, ensure_ascii=False, indent=2)[:4000]
+                ),
                 2000,
             )
 
@@ -2392,6 +2526,7 @@ class AlertEngine:
         if title:
             lines.append(f"事件: {title}")
         if message:
+            message = redactor.mask_address_tokens(message)
             cleaned: list[str] = []
             for line in message.splitlines():
                 text = line.strip()
@@ -2407,14 +2542,21 @@ class AlertEngine:
             # Dumping the whole payload would publish whatever Komari sends
             # (node IPs, UUIDs) into the group chat; keep it to known fields.
             known = [
-                f"{label}: {data[key]}"
+                f"{label}: "
+                + str(
+                    redactor.mask_name(data[key])
+                    if key == "node_name"
+                    else redactor.mask_address_tokens(data[key])
+                )
                 for label, key in (
                     ("事件", "event"),
                     ("级别", "level"),
                     ("节点", "node_name"),
                     ("时间", "time"),
                 )
-                if data.get(key)
+                # "事件" was already printed from ``title`` (which falls back
+                # to ``event``), so the same line appeared twice (v2.20.8).
+                if data.get(key) and not (key == "event" and title)
             ]
             lines.extend(known or ["（Komari 未附带可读内容，详情见 Komari 面板）"])
         return truncate_text("\n".join(lines), 2000)

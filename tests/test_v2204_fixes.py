@@ -195,7 +195,8 @@ def test_daily_given_up_stops_the_nightly_loop() -> None:
     reporter._last_sent_day = None
     reporter._last_attempt_day = "2026-10-30"
     reporter._last_attempt_wall_day = "2026-10-30"
-    reporter._daily_given_up_day = "2026-10-31"
+    # v2.20.5+ stores the *report day* in daily_given_up_day.
+    reporter._daily_given_up_day = "2026-10-30"
     assert reporter._daily_catch_up_allowed("2026-10-31") is False
 
 

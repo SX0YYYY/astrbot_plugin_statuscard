@@ -60,6 +60,10 @@ class _Bucket:
     # *before* the summary that contained its own alert -- the user saw
     # "recovered" for an incident they were never told about.
     summary_inflight: bool = False
+    # Generation of the open window. A summary whose send takes longer than
+    # the window must not clear a *new* window opened by alerts that arrived
+    # while it was in flight (v2.20.8).
+    window_seq: int = 0
 
 
 class AlertAggregator:
@@ -136,6 +140,7 @@ class AlertAggregator:
             # a recovery notice for a fault the user never saw.
             if self.window_seconds > 0:
                 bucket.until = time.time() + self.window_seconds
+                bucket.window_seq += 1
                 bucket.send = send
                 bucket.first_inflight = True
                 bucket.first_started = time.time()
@@ -280,6 +285,7 @@ class AlertAggregator:
             # a hung send from holding the buffer forever.
             self._schedule_flush(key, 5.0)
             return
+        window_seq = bucket.window_seq
         pending, bucket.pending = bucket.pending, []
         # Keep ``until`` non-zero while the summary is in flight so a
         # recovery notice for one of the buffered items queues behind the
@@ -310,13 +316,21 @@ class AlertAggregator:
             bucket.summary_inflight = False
             bucket.until = 0.0
             return
-        total = len(pending) + bucket.dropped_count
+        total = len(pending)
+        dropped = bucket.dropped_count
         lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
         for label, reason in pending[: self.max_items]:
             lines.append(f"• {label}: {reason}")
         extra = total - self.max_items
         if extra > 0:
             lines.append(f"… 另有 {extra} 项未列出")
+        if dropped:
+            # These were trimmed off the buffer and withdrawn as "never
+            # delivered"; counting them under "已合并推送" claimed they had
+            # been announced (v2.20.8).
+            lines.append(
+                f"另有 {dropped} 项因缓冲溢出未能送达（仍可在日报事件里查看）。"
+            )
         lines.append(
             f"以上 {total} 项在 {self.window_seconds} 秒聚合窗口内集中出现，"
             "已合并推送；各项均已单独记录，恢复时按正常流程通知。"
@@ -352,10 +366,12 @@ class AlertAggregator:
             logger.exception("告警汇总发送失败（%s）", key)
         finally:
             # The summary is no longer in flight: a recovery notice may now
-            # be scheduled. The window itself stays closed until the next
-            # push opens a new one.
+            # be scheduled. Only close the window this summary belongs to:
+            # alerts that arrived during the send opened a new one, and
+            # clearing it made every later alert skip aggregation (v2.20.8).
             bucket.summary_inflight = False
-            bucket.until = 0.0
+            if bucket.window_seq == window_seq:
+                bucket.until = 0.0
             # Alerts that arrived during the send opened a new window and
             # need a task of their own once this one is no longer "running".
             self._schedule_if_pending(key)

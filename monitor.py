@@ -25,6 +25,7 @@ from .delivery import DeliveryResult
 from .state import StateStore
 from .utils import (
     clamp_config,
+    delivery_offline,
     normalize_targets,
     redact_url,
     retry_delay,
@@ -80,9 +81,7 @@ _CONFIG_ERROR_HINTS = (
     "invalidurl",
     "name or service not known",
     "nodename nor servname provided",
-    "temporary failure in name resolution",
     "no address associated with hostname",
-    "getaddrinfo failed",
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
@@ -568,7 +567,10 @@ class ServiceMonitor:
                 self._suppress_warned.add(dependency)
             return None
         state = self._dependency_state(dependency) or {}
-        if state.get("alerting") or int(state.get("fails") or 0) >= self.fail_threshold:
+        if (
+            state.get("alerting")
+            or safe_int(state.get("fails") or 0) >= self.fail_threshold
+        ):
             return dependency
         return None
 
@@ -626,6 +628,10 @@ class ServiceMonitor:
             alerting = True
             st["alerting"] = True
             st["alerted"] = False
+            # The alert may or may not have arrived; retry it once the channel
+            # allows instead of staying latched-but-silent for the whole
+            # episode (v2.20.8).
+            st["summary_abandoned"] = True
             st["since"] = safe_float(st.get("last_attempt")) or now
             st["fails"] = 0
             # Log an alert row so the episode has a start in the event log;
@@ -771,13 +777,19 @@ class ServiceMonitor:
             # resource-rule ``cooldown_retry`` (the previous version latched
             # the episode and then went permanently silent, so a sustained
             # outage produced neither an alert nor a recovery notice).
+            abandoned = bool(st.pop("summary_abandoned", False))
             cooldown_retry = (
                 alerting
                 and not bool(st.get("alerted"))
                 and safe_int(st.get("retry_count") or 0) == 0
                 and safe_float(st.get("next_attempt") or 0) == 0
-                and safe_float(st.get("last_sent") or 0) > 0
-                and now - safe_float(st.get("last_sent") or 0) >= self.cooldown
+                and (
+                    abandoned
+                    or (
+                        safe_float(st.get("last_sent") or 0) > 0
+                        and now - safe_float(st.get("last_sent") or 0) >= self.cooldown
+                    )
+                )
             )
             will_alert = (not alerting and fails >= self.fail_threshold) or (
                 alerting and cooldown_retry
@@ -787,7 +799,7 @@ class ServiceMonitor:
             st["last_checked"] = now
             if will_alert:
                 next_attempt = safe_float(st.get("next_attempt") or 0)
-                if last_sent and now - last_sent < self.cooldown:
+                if last_sent and now - last_sent < self.cooldown and not abandoned:
                     # Inside the cooldown: latch the episode and record one
                     # event (with the suppression noted) instead of vanishing.
                     # Staying silent here meant an entire outage never reached
@@ -909,7 +921,7 @@ class ServiceMonitor:
                         st.pop("summary_buffered", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
-                        if self._transport_offline():
+                        if self._transport_offline() or delivery_offline(result):
                             # The channel is down, so this failure says
                             # nothing about the monitor item: keep the alert
                             # queued without spending the retry budget
@@ -969,7 +981,7 @@ class ServiceMonitor:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        if self._transport_offline():
+                        if self._transport_offline() or delivery_offline(result):
                             st["recovery_next_attempt"] = now + 900
                         else:
                             retry_count = (
@@ -1484,7 +1496,13 @@ class ServiceMonitor:
                     if not st.pop("summary_buffered", None):
                         continue
                     st["alerted"] = False
-                    st.pop("last_sent", None)
+                    # Keep ``last_sent``: ``cooldown_retry`` needs it as the
+                    # "this episode was announced" reference. A summary that
+                    # never arrived used to clear it, and the latched item then
+                    # had no path back to a push -- no alert during the whole
+                    # outage and no recovery notice either (v2.20.8). The
+                    # marker lets the next tick retry immediately.
+                    st["summary_abandoned"] = True
                     st.pop("awaiting_summary", None)
                     changed = True
         # Abandon can be the last write before a reload (stop() runs after

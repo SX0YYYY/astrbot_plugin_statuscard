@@ -138,7 +138,14 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
         )
     if "status" not in payload and retcode_int is None:
         # ``aiocqhttp`` already unwrapped the envelope: the returned dict is
-        # the ``data`` field, so reaching here means the action succeeded.
+        # the ``data`` field. A data dict for a send always carries
+        # ``message_id``; an empty/garbage dict (``{}`` or a retcode that is
+        # not even a number) used to be taken as a clean delivery, which put
+        # the alert into its cooldown and silenced the fault for good
+        # (v2.20.8). Without that proof the send is "uncertain": never
+        # repeated, but visible.
+        if message_id is None:
+            return OnebotReceipt(ok=False, error="无法识别的回执", attempted=True)
         return OnebotReceipt(ok=True, retcode=0, message_id=message_id, attempted=True)
     # retcode=1 (async accepted) still counts as delivered-ish: the send
     # was accepted by the protocol implementation (v2.20.0).

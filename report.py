@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import psutil
@@ -431,6 +431,15 @@ class ReportCollector:
         friends = bot.get("friends")
         groups = bot.get("groups")
         members = bot.get("members")
+        if friends == 0 and groups == 0 and members == 0:
+            # get_friend_list/get_group_list answering with an empty payload
+            # yields 0 rather than None. Storing that pair locked the day's
+            # snapshot at 0/0/0 (``complete=1`` stopped the retries and the
+            # UPSERT kept the zeros), so the report showed no friends/groups
+            # for a day that actually had them (v2.20.8). Treat all-zero as
+            # "not collected yet" and retry; a bot with genuinely zero of
+            # all three is not a real deployment.
+            friends = groups = members = None
         complete = all(value is not None for value in (friends, groups, members))
         await asyncio.to_thread(
             self.store.record_snapshot,
@@ -656,6 +665,26 @@ class DailyReporter:
                 self._pending_retry = None
         else:
             self._pending_retry = None
+        if self._pending_retry is not None:
+            # A retry queued before a long shutdown must not fire days later:
+            # the state file survived but the report is stale. Mirror the
+            # weekly 6-hour rule and keep at most a two-day-old report day.
+            pending_day, pending_due = self._pending_retry
+            stale = False
+            if pending_day:
+                try:
+                    stale = date.fromisoformat(pending_day) < (
+                        now_in_timezone(self.config).date() - timedelta(days=2)
+                    )
+                except ValueError:
+                    stale = True
+            elif pending_due and pending_due < time.time() - 6 * 3600:
+                stale = True
+            if stale:
+                logger.warning(
+                    "丢弃过期的日报补发排程（报告日 %s）", pending_day or "--"
+                )
+                self._pending_retry = None
         weekly_pending = saved.get("weekly_pending")
         try:
             self._weekly_pending = float(weekly_pending) if weekly_pending else None
@@ -1166,12 +1195,22 @@ class DailyReporter:
                 now = now_in_timezone(self.config)
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 target += timedelta(days=(6 - target.weekday()) % 7)
-                if target <= now:
-                    if self._weekly_catch_up_allowed():
-                        logger.info("周报定时点已过且本周尚未发送，立即补发一次")
-                        target = now
-                    else:
-                        target += timedelta(days=7)
+                # A temporary pause (database/config problem) must delay the
+                # attempt, not push the target to next week: the old code
+                # advanced it by seven days and the whole week was lost even
+                # after the database healed (v2.20.8).
+                pause_until = float(getattr(self, "_weekly_pause_until", 0.0) or 0.0)
+                if time.time() < pause_until:
+                    await asyncio.sleep(min(60.0, max(1.0, pause_until - time.time())))
+                    continue
+                if self._weekly_catch_up_allowed():
+                    # Covers Sunday nights *and* a Monday-morning restart: the
+                    # slot is in the past but still inside the retry window,
+                    # so send now instead of waiting for next Sunday.
+                    logger.info("周报定时点已过且本期尚未发送，立即补发一次")
+                    target = now
+                elif target <= now:
+                    target += timedelta(days=7)
                 if last_logged != target:
                     self._weekly_next_run_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
@@ -1272,9 +1311,9 @@ class DailyReporter:
             self._weekly_pause_until = time.time() + 600
             self._clear_retry()
             return
-        if not self.store.available and not self.store.ensure_ready():
+        if not self.store.ensure_ready() or not self.store.probe():
             logger.error("日报数据库不可用，跳过本次周报发送")
-            await self._notify_store_unavailable(self._targets("weekly"))
+            await self._notify_store_unavailable(self._targets("weekly"), weekly=True)
             # A missing/unreadable database is not going to heal within the
             # second the loop otherwise waits before re-entering this function:
             # without a pause the loop spun at 1Hz from 21:30 to midnight,
@@ -1417,8 +1456,12 @@ class DailyReporter:
             if not self._schedule_weekly_retry(transport_offline=offline):
                 await self._notify_give_up(targets, day, weekly=True)
 
-    async def _notify_store_unavailable(self, targets: list[str]) -> None:
+    async def _notify_store_unavailable(
+        self, targets: list[str], weekly: bool = False
+    ) -> None:
         """Tell the operator at most once per day that report.db is unusable."""
+
+        key = "weekly_db_unavailable" if weekly else "report_db_unavailable"
 
         if not targets:
             return
@@ -1434,7 +1477,7 @@ class DailyReporter:
         try:
             await self.plugin.send_text(
                 targets,
-                tr(self.config, "report_db_unavailable", day=today),
+                tr(self.config, key, day=today),
                 source="report_db_unavailable",
             )
         except Exception:
@@ -1630,7 +1673,19 @@ class DailyReporter:
             return False
         if self._daily_given_up_day == report_day:
             return False
-        return self._last_attempt_day != report_day
+        if self._last_attempt_day == report_day:
+            # The attempt marker is written before the slow work. If the
+            # process was restarted mid-send (config reload at 21:00, OOM,
+            # deploy), the marker survives while neither a delivery nor a
+            # retry plan exists -- the day used to be skipped silently.
+            # Allow exactly one catch-up attempt; a failure queues the normal
+            # retry ladder and blocks this branch on the next restart.
+            return bool(
+                self._last_sent_day != report_day
+                and getattr(self, "_pending_retry", None) is None
+                and not getattr(self, "_pending_recovery_day", None)
+            )
+        return True
 
     def _week_key(self, day: str) -> str:
         try:
@@ -1644,14 +1699,22 @@ class DailyReporter:
     def _weekly_catch_up_allowed(self) -> bool:
         """Whether a missed weekly window may be sent right now.
 
-        The weekly report already catches up; it did not, so a reload at
-        21:29 silently skipped the whole week. Two guards keep it safe: a
-        missing marker means a first install or an upgrade, and the catch-up
-        only runs inside the trigger window (Sunday after 21:30 through
-        Monday 06:00) -- a Wednesday restart must not deliver last week's
-        report in the middle of a new week. Requiring the Sunday *weekday*
-        made a process started at 21:31 skip the first weekly report for a
-        whole week, which is worse than an occasional duplicate (v2.20.5).
+        The catch-up window is derived from the configured ``weekly_time``,
+        not hard-coded to 21:30: a slot is "missed but still retryable" for
+        8.5 hours after it starts (21:30 -> next 06:00), which covers a
+        Sunday-night outage and a Monday 00:00-06:00 restart. The old code
+        only evaluated the guard when ``target <= now``; a Monday restart
+        computes target as *next* Sunday, so that branch was unreachable and
+        the whole week was silently skipped (v2.20.8).
+
+        The report day is derived from the slot (Sunday slot -> Saturday),
+        not from "today - 1": on Monday that arithmetic landed on Sunday and
+        the ISO week key pointed at the new week.
+
+        An attempt marker alone must NOT block the catch-up: it is written
+        before the slow work, so a crash/reload mid-send leaves exactly that
+        marker. A genuine first install is also allowed inside the window --
+        one possible duplicate beats silently skipping the first report.
         """
 
         if time.time() < float(getattr(self, "_weekly_pause_until", 0.0) or 0.0):
@@ -1659,25 +1722,34 @@ class DailyReporter:
             # few minutes instead of re-entering the send path every second.
             return False
         now = now_in_timezone(self.config)
-        in_window = now.weekday() == 6 and (
-            now.hour > 21 or (now.hour == 21 and now.minute >= 30)
-        )
-        in_window = in_window or (now.weekday() == 0 and now.hour < 6)
-        if not in_window:
+        slot = self._weekly_slot_before(now)
+        if slot is None:
             return False
-        report_day = (now - timedelta(days=1)).date().isoformat()
+        if now - slot > timedelta(hours=8, minutes=30):
+            return False
+        report_day = (slot - timedelta(days=1)).date().isoformat()
         week_key = self._week_key(report_day)
         if getattr(self, "_weekly_given_up_week", None) == week_key:
             # Already gave up after three failed attempts this week; retrying
             # again would produce the same notice every ~40 minutes.
             return False
-        # An attempt marker alone must NOT block the catch-up: it is written
-        # before the slow work, so a crash/reload mid-send leaves exactly that
-        # marker and the report would otherwise be lost for the whole week
-        # (v2.20.0 semantics, kept in v2.20.5). A genuine first install is
-        # also allowed inside the window -- one possible duplicate beats
-        # silently skipping the first weekly report.
         return self._weekly_last_sent_week != week_key
+
+    def _weekly_slot_before(self, now: datetime) -> datetime | None:
+        """The most recent weekly trigger slot (this Sunday or last Sunday)."""
+
+        text = self._weekly_time_text()
+        try:
+            hour, minute = [int(part) for part in text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+        except (TypeError, ValueError):
+            return None
+        slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        slot += timedelta(days=(6 - slot.weekday()) % 7)
+        if slot > now:
+            slot -= timedelta(days=7)
+        return slot
 
     async def _send_scheduled(self, day: str | None = None) -> None:
         # Two separate markers, because they answer different questions:
@@ -1697,7 +1769,7 @@ class DailyReporter:
             self._record(self._default_report_day(), False, "sections empty")
             self._clear_retry()
             return
-        if not self.store.available and not self.store.ensure_ready():
+        if not self.store.ensure_ready() or not self.store.probe():
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
             logger.error("日报数据库不可用，跳过本次日报发送")
@@ -1833,7 +1905,7 @@ class DailyReporter:
     ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
-        if not self.store.available and not self.store.ensure_ready():
+        if not self.store.ensure_ready() or not self.store.probe():
             # Preview used to build a page of "--" and send it as if it were
             # a real report; the scheduled path already refuses to.
             return False, tr(self.config, "report_db_unavailable_preview")

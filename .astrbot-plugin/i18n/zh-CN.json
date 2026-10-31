@@ -184,7 +184,7 @@
         "verify_confirm_targets": "将向所有配置的推送目标真实发送一条验证消息，继续？",
         "verify_failed": "验证失败",
         "verify_hint": "「推送目标」会真实发送一条验证消息并回报回执；「监测项」只探测一次、不影响告警状态；「Webhook」向本插件监听端口发送模拟事件，走通接收→解析→推送整条链路。",
-        "verify_hint_short": "保存配置后可在这里验证",
+        "verify_hint_short": "每类 30 秒冷却",
         "verify_monitors": "验证监测项",
         "verify_none": "没有可验证的项",
         "verify_state_failed": "失败",
@@ -214,7 +214,9 @@
         "reason_no_website_samples": "暂无网站延迟采样数据",
         "reason_no_process_samples": "暂无进程采样数据",
         "reason_no_provider_data": "暂无数据（所选时间范围内没有 provider 请求）",
-        "reason_no_trend_data": "暂无趋势数据"
+        "reason_no_trend_data": "暂无趋势数据",
+        "status_recovered": "已恢复",
+        "method_weekly_sections_empty": "周报未配置内容"
       }
     }
   }

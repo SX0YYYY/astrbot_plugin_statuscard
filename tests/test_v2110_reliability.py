@@ -315,13 +315,19 @@ def test_report_retry_state_survives_reload(tmp_path: Path) -> None:
     state = StateStore(tmp_path / "state.json")
     config = _FakeConfig({"display": {"timezone": "Asia/Shanghai"}})
     plugin = SimpleNamespace(state=state)
+    from datetime import date, timedelta
+
+    # A pending retry only survives when it is still current: v2.20.8 drops
+    # report days older than two days so a days-long shutdown cannot deliver
+    # a stale report. Use yesterday for this reload test.
+    day = (date.today() - timedelta(days=1)).isoformat()
     reporter = DailyReporter(plugin, store, config)
-    reporter._pending_retry_day = "2026-10-21"
-    reporter._schedule_retry("2026-10-20")
+    reporter._pending_retry_day = day
+    reporter._schedule_retry(day)
 
     reloaded = DailyReporter(plugin, store, config)
     assert reloaded._pending_retry is not None
-    assert reloaded._pending_retry[0] == "2026-10-20"
+    assert reloaded._pending_retry[0] == day
     assert reloaded._pending_retry_count == 1
 
 

@@ -427,7 +427,12 @@ class PageApi:
         ok_count = fail_count = unknown_count = config_error_count = 0
         degraded_count = 0
         for item in monitor_status.get("items", []):
-            state = item.get("state") or {}
+            # A hand-edited state.json can hold a scalar here; ``or {}`` keeps
+            # a non-empty string and the first ``.get`` raised, taking the
+            # whole overview route down (v2.20.8).
+            state = item.get("state")
+            if not isinstance(state, dict):
+                state = {}
             checked = state.get("last_checked")
             alerting = bool(state.get("alerting"))
             config_error = item.get("config_error")
@@ -567,7 +572,10 @@ class PageApi:
                     "error": "验证过于频繁，请 30 秒后再试（避免重复发送消息）",
                 }
             )
-        self._verify_last[kind] = now
+        # The cooldown is charged only once the request will really run: an
+        # early "未配置任何推送目标" answer used to start the 30-second timer,
+        # so the operator fixed the target and was told "验证过于频繁"
+        # (v2.20.8).
         plugin = self.plugin
         if kind == "targets":
             platform_id = str(
@@ -602,6 +610,7 @@ class PageApi:
                         merged.append(one)
             if not merged:
                 return jsonify({"ok": False, "error": "未配置任何推送目标"})
+            self._verify_last[kind] = now
             text = (
                 "🔔 状态卡验证消息：这是从看板触发的推送目标验证，"
                 "收到即说明该目标配置正确。"
@@ -667,6 +676,7 @@ class PageApi:
                         ),
                     }
                 )
+            self._verify_last[kind] = now
 
             # Dozens of monitor targets used to be probed at once on a
             # single click, which spikes the sites being watched and keeps the
@@ -717,6 +727,7 @@ class PageApi:
                         "message": "Webhook 未在监听（可能启动失败，详见日志）",
                     }
                 )
+            self._verify_last[kind] = now
             port = max(1, min(65535, cfg_int(cfg, "port", 9968)))
             path = str(cfg_get(cfg, "path", "/webhook") or "/webhook")
             if not path.startswith("/"):
@@ -1240,6 +1251,10 @@ class PageApi:
         payload = {
             "ok": True,
             "day": view.get("day"),
+            # The page uses this to bound the "next day" arrow; deriving it
+            # from the browser (UTC) hid the arrow for 8 hours every night in
+            # Asia/Shanghai (v2.20.8).
+            "today": now_in_timezone(self.plugin.config).date().isoformat(),
             "sections": view.get("sections"),
             "summary": view.get("summary"),
             "resources": view.get("resources"),

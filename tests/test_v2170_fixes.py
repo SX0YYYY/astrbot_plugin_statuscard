@@ -445,7 +445,7 @@ def test_weekly_guard_uses_weekly_sections() -> None:
     reporter.store = SimpleNamespace(available=False, ensure_ready=lambda: False)
     called: list[int] = []
 
-    async def fake_notify(targets):
+    async def fake_notify(targets, weekly=False):
         called.append(1)
 
     reporter._notify_store_unavailable = fake_notify
@@ -558,28 +558,33 @@ def test_daily_catch_up_needs_previous_marker() -> None:
     reporter._last_attempt_day = "2026-10-26"
     reporter._last_attempt_wall_day = "2026-10-27"
     assert reporter._daily_catch_up_allowed("2026-10-28") is True
-    # Yesterday's report was already attempted: no second copy today.
+    # Yesterday's report was already attempted and a retry is queued: no
+    # second copy today.
     reporter._last_attempt_day = "2026-10-27"
     reporter._last_attempt_wall_day = "2026-10-28"
+    reporter._pending_retry = ("2026-10-27", 0.0)
     assert reporter._daily_catch_up_allowed("2026-10-28") is False
+    # An attempt without any delivery and without a retry plan means the
+    # process died mid-send; v2.20.8 allows exactly one catch-up.
+    reporter._pending_retry = None
+    assert reporter._daily_catch_up_allowed("2026-10-28") is True
 
 
-def test_daily_catch_up_uses_wall_day_not_report_day() -> None:
-    """A cross-midnight retry must not mark *today* as attempted.
+def test_daily_catch_up_uses_report_day_not_wall_day() -> None:
+    """A cross-midnight retry must not mark *the next report day* as tried.
 
-    ``_last_attempt_day`` names the report day (yesterday for the scheduled
-    run), so the catch-up guard has to consult the calendar day of the last
-    attempt instead. Using the report day re-armed the catch-up and made the
-    report loop re-send all night long.
+    ``_last_attempt_day`` names the report day, so an attempt for an older
+    report (queued retry) leaves the new day's report eligible.
     """
 
     reporter = object.__new__(DailyReporter)
     reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
     reporter._last_sent_day = None
     reporter._daily_given_up_day = None
-    # The retry ran after midnight but delivered yesterday's report.
+    # The retry ran after midnight but delivered the previous report day.
     reporter._last_attempt_day = "2026-10-30"
     reporter._last_attempt_wall_day = "2026-10-31"
+    reporter._pending_retry = ("2026-10-30", 0.0)
     assert reporter._daily_catch_up_allowed("2026-10-31") is False
     # A fresh day is still allowed.
     assert reporter._daily_catch_up_allowed("2026-11-01") is True
@@ -593,7 +598,8 @@ def test_daily_given_up_blocks_catch_up() -> None:
     reporter._last_sent_day = None
     reporter._last_attempt_day = "2026-10-30"
     reporter._last_attempt_wall_day = "2026-10-30"
-    reporter._daily_given_up_day = "2026-10-31"
+    # v2.20.5+ stores the *report day* here.
+    reporter._daily_given_up_day = "2026-10-30"
     assert reporter._daily_catch_up_allowed("2026-10-31") is False
 
 

@@ -407,7 +407,10 @@ def test_overflow_dropped_items_withdrawn_and_counted() -> None:
     # The summary counts them: 4 listed-able + 2 dropped = 6 total.
     asyncio.run(agg.flush("default", _async_send(sent)))
     summary = sent[-1]
-    assert "6 项异常" in summary and "另有 4 项未列出" in summary
+    # v2.20.8: the trimmed items are no longer counted as "已合并推送";
+    # they get their own disclosure line instead.
+    assert "4 项异常" in summary and "另有 2 项未列出" in summary
+    assert "2 项因缓冲溢出未能送达" in summary
 
 
 # ----------------------------------------------------------------------
@@ -699,6 +702,9 @@ def test_disk_usage_bounded_dedupes_paths(monkeypatch) -> None:
         return _U2()
 
     monkeypatch.setattr(collectors_module, "_disk_usage_one", fake_one)
+    # v2.20.8 skips a mount that just timed out for a few minutes; a previous
+    # test used the same name, so start this scenario with a clean slate.
+    collectors_module._DISK_DEAD_UNTIL.clear()
     rows = disk_usage_bounded(["ok-mount", "hung-mount", "hung-mount"], timeout=1.0)
     release.set()
     # 3 个调用位、去重后 2 个 job：挂死盘只占 1 个 worker，结果仍保序保长

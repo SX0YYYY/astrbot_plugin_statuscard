@@ -195,7 +195,7 @@ def test_weekly_store_unavailable_sets_pause(tmp_path: Path) -> None:
     reporter._save_delivery_state = lambda: None  # type: ignore[attr-defined]
     sent_notices: list[str] = []
 
-    async def _notify_store_unavailable(targets) -> None:
+    async def _notify_store_unavailable(targets, weekly=False) -> None:
         sent_notices.append("x")
 
     reporter._notify_store_unavailable = _notify_store_unavailable  # type: ignore[attr-defined]

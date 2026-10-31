@@ -16,6 +16,8 @@
     exporting: false,
     reportDay: null,
     reportDayShown: null,
+    // 配置时区的“今天”，由后端 reports payload 提供（reports() 的上限）。
+    reportToday: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -24,6 +26,7 @@
   const STATUS_I18N = {
     alert: "status_alert",
     recovery: "status_recovery",
+    recovered: "status_recovered",
     failed: "status_failed",
     unknown: "status_unknown",
   };
@@ -165,7 +168,9 @@
     if (!Number.isFinite(number)) return "--";
     const units = ["B", "KB", "MB", "GB", "TB"];
     let index = 0;
-    while (Math.abs(number) >= 1024 && index < units.length - 1) {
+    // Round before deciding to carry, mirroring collectors.format_bytes:
+    // otherwise 1023.6 stays in B and toFixed(0) prints "1024 B".
+    while (Math.abs(Math.round(number)) >= 1024 && index < units.length - 1) {
       number /= 1024;
       index += 1;
     }
@@ -222,6 +227,10 @@
         "周报文字（未确认）",
       ],
       "sections empty": ["method_sections_empty", "未配置内容"],
+      "weekly sections empty": [
+        "method_weekly_sections_empty",
+        "周报未配置内容",
+      ],
       "build failed": ["method_build_failed", "聚合失败"],
       "targets empty": ["method_targets_empty", "目标为空"],
       "send failed": ["method_send_failed", "发送失败"],
@@ -840,6 +849,8 @@
   }
 
   async function loadOverview() {
+    // A stale-flag from the reports tab must not colour another tab's toast.
+    state.reportsStale = false;
     const seq = ++state.overviewSeq;
     const data = await apiGet("overview");
     if (seq !== state.overviewSeq) return;
@@ -1173,6 +1184,8 @@
   }
 
   async function loadHistory() {
+    // A stale-flag from the reports tab must not colour another tab's toast.
+    state.reportsStale = false;
     const seq = ++state.historySeq;
     const range = state.historyRange;
     setHistoryLoading(true);
@@ -1330,6 +1343,8 @@
   }
 
   async function loadEvents() {
+    // A stale-flag from the reports tab must not colour another tab's toast.
+    state.reportsStale = false;
     const seq = ++state.eventsSeq;
     const data = await apiGet("events", { days: state.eventDays });
     if (seq !== state.eventsSeq) return;
@@ -1743,13 +1758,19 @@
     if (Number.isNaN(parsed.getTime())) return;
     parsed.setUTCDate(parsed.getUTCDate() + delta);
     const next = parsed.toISOString().slice(0, 10);
-    const now = new Date();
-    const yesterday = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1),
-    )
-      .toISOString()
-      .slice(0, 10);
-    if (next > yesterday) return;
+    // The backend bounds the day by the configured timezone's today. Using
+    // the browser's UTC yesterday silently disabled the "next day" arrow
+    // between 00:00 and 08:00 in Asia/Shanghai (v2.20.8).
+    let limit = state.reportToday;
+    if (!limit) {
+      const now = new Date();
+      limit = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1),
+      )
+        .toISOString()
+        .slice(0, 10);
+    }
+    if (next > limit) return;
     state.reportDay = next;
     loadReports(true).catch((error) => {
       state.reportDay = state.reportDayShown || null;
@@ -1770,6 +1791,7 @@
     // The backend serves the previous payload while another build is in
     // flight; remember it so the refresh toast does not claim "数据已更新".
     state.reportsStale = Boolean(data && data.stale);
+    if (data && data.today) state.reportToday = String(data.today);
     if (data.db_unavailable) {
       toast(
         t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),

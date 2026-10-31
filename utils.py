@@ -33,6 +33,19 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def delivery_offline(result: Any) -> bool:
+    """True when a send failed because the transport itself was unreachable.
+
+    ``DeliveryResult.transport_offline`` is the authoritative signal (the
+    delivery layer knows whether the failure was ApiNotAvailable / no
+    platform / invalid URL). The alert and monitor engines only looked at
+    their own offline latch, so a failure that arrived before the latch was
+    set still burned the retry budget (v2.20.8).
+    """
+
+    return bool(getattr(result, "transport_offline", False))
+
+
 def safe_int(value: Any, default: int = 0) -> int:
     """Convert ``value`` to int, falling back instead of raising."""
 
