@@ -213,6 +213,24 @@ class Redactor:
             return value
         return "已隐藏（错误详情含主机或地址信息）"
 
+    def mask_name(self, name: Any) -> str:
+        """Hide a monitor/website *name* that is itself an address or URL.
+
+        The dashboard/report surfaces strip query tokens via ``redact_url``
+        but kept the host+port, so with the ``hostname`` rule on a target
+        named ``https://internal:8443/health`` still leaked the internal host
+        on the dashboard and in forwarded reports. When the name carries an
+        address-shaped token, replace the whole name -- mirroring the status
+        card's ``apply_card`` behaviour -- instead of leaving the host visible.
+        """
+
+        value = str(name or "")
+        if not value or not self.hostname:
+            return value
+        if not _ADDRESS_RE.search(value):
+            return value
+        return "已隐藏"
+
 
 def _empty_chart() -> dict[str, Any]:
     """An empty network chart with the same shape as a filled one.

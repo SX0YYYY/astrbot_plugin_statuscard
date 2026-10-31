@@ -350,7 +350,10 @@ def test_report_retry_uses_resolved_day(monkeypatch, tmp_path: Path) -> None:
     asyncio.run(reporter._send_scheduled())
     assert calls == [None]
     assert reporter._pending_retry is not None
-    assert reporter._pending_retry[0] is None
+    # The scheduled run resolves "yesterday" for the retry plan too, so a
+    # build failure that crosses midnight does not rebuild *today's* (mostly
+    # empty) report and discard the one that actually failed (v2.20.3).
+    assert reporter._pending_retry[0] == reporter._default_report_day()
 
 
 # ----------------------------------------------------------------------

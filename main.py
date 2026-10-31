@@ -490,7 +490,7 @@ class StatusCardPlugin(Star):
                 self._diag.get("last_render_ms", 0),
                 self._diag.get("last_collect_ms", 0),
             )
-        self._save_diag()
+        await self._save_diag()
         return url
 
     async def build_status_image(self) -> str | None:
@@ -597,7 +597,7 @@ class StatusCardPlugin(Star):
                 "T2I 日报渲染完成：%.1fms",
                 self._diag.get("last_report_render_ms", 0),
             )
-        self._save_diag()
+        await self._save_diag()
         return result
 
     async def _resolve_background(self):
@@ -662,6 +662,9 @@ class StatusCardPlugin(Star):
                 exc.__class__.__name__,
                 exc,
             )
+            # Cache the failure so an undecodable upload does not pay for the
+            # same PIL decode (and re-log the same warning) on every card.
+            self._bg_shrink_cache = (str(path), mtime, None)
             return None
         self._bg_shrink_cache = (str(path), mtime, shrunk)
         return shrunk

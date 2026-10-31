@@ -668,6 +668,15 @@ class ServiceMonitor:
                         "（维护静默期内，未推送）",
                         "recovery",
                     )
+                    # Close the episode here: leaving ``alerting=True`` made
+                    # the first post-window probe take the normal-recovery
+                    # branch and push a stale "已恢复" (with the whole
+                    # maintenance window counted as the outage) plus a second
+                    # recovery event that inflated the daily-report duration.
+                    st["alerting"] = False
+                    st["since"] = 0
+                    st.pop("alerted", None)
+                    st.pop("pending", None)
             else:
                 st["last_error"] = detail
                 st.setdefault("silent_since", now)
@@ -716,7 +725,23 @@ class ServiceMonitor:
                 # it grow made state.json and the dashboard show an ever
                 # increasing "fails" number during a long outage.
                 fails += 1
-            will_alert = not alerting and fails >= self.fail_threshold
+            # A fault latched inside the cooldown was recorded but never
+            # pushed. If it is still failing when the cooldown expires the
+            # operator has never seen it: push the alert now, mirroring the
+            # resource-rule ``cooldown_retry`` (the previous version latched
+            # the episode and then went permanently silent, so a sustained
+            # outage produced neither an alert nor a recovery notice).
+            cooldown_retry = (
+                alerting
+                and not bool(st.get("alerted"))
+                and safe_int(st.get("retry_count") or 0) == 0
+                and safe_float(st.get("next_attempt") or 0) == 0
+                and safe_float(st.get("last_sent") or 0) > 0
+                and now - safe_float(st.get("last_sent") or 0) >= self.cooldown
+            )
+            will_alert = (not alerting and fails >= self.fail_threshold) or (
+                alerting and cooldown_retry
+            )
             st["fails"] = fails
             st["last_error"] = detail
             st["last_checked"] = now

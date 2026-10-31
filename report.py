@@ -1134,6 +1134,13 @@ class DailyReporter:
         if not self.store.available and not self.store.ensure_ready():
             logger.error("日报数据库不可用，跳过本次周报发送")
             await self._notify_store_unavailable(self._targets("weekly"))
+            # A missing/unreadable database is not going to heal within the
+            # second the loop otherwise waits before re-entering this function:
+            # without a pause the loop spun at 1Hz from 21:30 to midnight,
+            # fsync-ing state.json and logging ~18k lines each Sunday. Back off
+            # like the empty-target/sections branches (a fresh attempt still
+            # runs after the pause).
+            self._weekly_pause_until = time.time() + 600
             return
         try:
             view = await asyncio.to_thread(
@@ -1433,7 +1440,12 @@ class DailyReporter:
         return self._weekly_last_sent_week != week_key
 
     async def _send_scheduled(self, day: str | None = None) -> None:
-        self._last_attempt_day = self._today()
+        # Scope the "already attempted today" guard to the report day, not the
+        # wall-clock day. A stale retry that crosses midnight used to stamp
+        # ``_last_attempt_day`` with *today* here, so the catch-up check then
+        # concluded "today already attempted" and the fresh report was skipped
+        # for the whole day while the operator received an outdated one.
+        self._last_attempt_day = day or self._today()
         self._save_delivery_state()
         targets = self._targets()
         if self._sections() is not None and not self._sections():
@@ -1453,7 +1465,11 @@ class DailyReporter:
         except Exception:
             logger.exception("日报数据聚合失败")
             self._record(day or self._default_report_day(), False, "build failed")
-            if not self._schedule_retry(day):
+            # Resolve "yesterday" here: a build failure at the scheduled run
+            # passes ``day=None`` and the retry then rebuilt *today's* (mostly
+            # empty) report after a midnight crossing, discarding the report
+            # that actually failed.
+            if not self._schedule_retry(day or self._default_report_day()):
                 await self._notify_give_up(targets, day or "", weekly=False)
             return
         day = str(view.get("day") or "")

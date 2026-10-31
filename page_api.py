@@ -412,7 +412,9 @@ class PageApi:
                 ok_count += 1
             monitor_items.append(
                 {
-                    "name": item.get("name"),
+                    "name": self._redactor().mask_name(
+                        redact_url(str(item.get("name") or ""))
+                    ),
                     "kind": item.get("kind"),
                     "status": status,
                     "last_checked": checked,
@@ -629,7 +631,9 @@ class PageApi:
                 except Exception as exc:
                     ok, detail = False, f"探测异常: {exc.__class__.__name__}"
                 return {
-                    "name": item.get("name"),
+                    "name": self._redactor().mask_name(
+                        redact_url(str(item.get("name") or ""))
+                    ),
                     "ok": bool(ok),
                     "detail": self._mask_host_text(str(detail or "")),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),

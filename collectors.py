@@ -35,11 +35,13 @@ from .utils import (
     readable_python_version,
     redact_url,
     safe_float,
+    safe_int,
 )
 from .version import resolve_astrbot_version
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _TZ_WARNED: set[str] = set()
+_IMG_WARNED: set[str] = set()
 
 
 def _dt_now() -> datetime:
@@ -80,6 +82,11 @@ def format_bytes(value: float | None, digits: int = 2) -> str:
     try:
         value = float(value)
     except (TypeError, ValueError):
+        return "--"
+    # A NaN/Inf sneaking in from a corrupted state.json (JSON allows both
+    # literals) used to escape the try/except and then either raise on
+    # round() or render as "inf PB", taking down every render tier with it.
+    if math.isnan(value) or math.isinf(value):
         return "--"
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
     idx = 0
@@ -1203,6 +1210,14 @@ async def collect_bot_info(
         cache[name] = (now, value)
 
     client = _get_aiocqhttp_client(context, platform_id, self_id)
+    if client is None and platform_id:
+        # The scheduled status card has no event to carry the real platform
+        # id, so it falls back to alerts.platform_id. When the operator
+        # renamed the platform instance (e.g. "default" -> "qq1") that lookup
+        # misses and the Bot block rendered "--" while a manual card (which
+        # uses the event's id) showed the real numbers. Fall back to any
+        # aiocqhttp instance rather than leaving the block empty.
+        client = _get_aiocqhttp_client(context, None, self_id)
     data: dict[str, Any] = {
         "self_id": "",
         "nick": "",
@@ -1373,8 +1388,11 @@ async def collect_bot_info(
     )
 
     recv_available = bool(recv_state.get("available"))
-    baseline = int(recv_state.get("baseline") or 0)
-    accum = int(recv_state.get("accum") or 0)
+    # safe_int: a hand-edited/corrupted state.json value (e.g. "12.3GB")
+    # used to raise here and take down every render tier (T2I, local card,
+    # then text) with an unhandled ValueError.
+    baseline = safe_int(recv_state.get("baseline") or 0)
+    accum = safe_int(recv_state.get("accum") or 0)
     bot["recv"] = (baseline + accum) if recv_available else None
     bot["recv_scope"] = "message_stats 跟踪群" if recv_available else "暂无接收统计"
     bot["sent"] = await asyncio.to_thread(query_sent_total)
@@ -1402,11 +1420,16 @@ def _warn_if_undecodable_image(data: bytes, label: str, path) -> None:
 
         Image.open(BytesIO(data)).verify()
     except Exception:
-        logger.warning(
-            "上传的%s似乎不是有效图片（%s），渲染时可能不显示；请重新上传",
-            label,
-            path,
-        )
+        # Warn once per path: an undecodable avatar re-warned on every card
+        # even though the file (and the diagnosis) never changed.
+        warn_key = str(path or label)
+        if warn_key not in _IMG_WARNED:
+            _IMG_WARNED.add(warn_key)
+            logger.warning(
+                "上传的%s似乎不是有效图片（%s），渲染时可能不显示；请重新上传",
+                label,
+                path,
+            )
 
 
 def uploaded_file_path(config: Any, key: str, data_dir: Any) -> Path | None:

@@ -211,6 +211,7 @@ class AlertEngine:
         # retries the same payload after a timeout, which used to post the
         # event to the group twice.
         self._webhook_last: tuple[str, float] = ("", 0.0)
+        self._webhook_inflight: set[str] = set()
         self._broadcast_task: asyncio.Task | None = None
         self._client_missing_warned = False
         self._primed = False
@@ -329,7 +330,11 @@ class AlertEngine:
             for key, st in tracked:
                 if not isinstance(st, dict) or not st.get("alerting"):
                     continue
-                last_seen = float(st.get("last_seen") or st.get("alert_since") or 0)
+                # A corrupted/hand-edited state value must not abort startup:
+                # monitor.start() and every later background task would never
+                # run while the plugin still looked loaded. Degrade to "no
+                # timestamp" (skip the stale mark) instead of raising.
+                last_seen = _safe_float(st.get("last_seen") or st.get("alert_since"))
                 if not last_seen and key == "offline":
                     last_seen = _safe_float(st.get("since"))
                 if last_seen and now - last_seen > 86400:
@@ -941,7 +946,21 @@ class AlertEngine:
                 and _safe_float(st.get("last_sent")) > 0
                 and now - _safe_float(st.get("last_sent")) >= self.cooldown
             )
-            if (not alerting and count >= self.sustain) or cooldown_retry:
+            if (
+                (not alerting and count >= self.sustain)
+                or cooldown_retry
+                # A cooldown-retry push that failed left retry_count>0 and the
+                # episode latched; the outer ``cooldown_retry`` then went false
+                # and the queued retry was never consumed, so the alert was
+                # lost and the recovery notice withheld. Honour a pending
+                # retry while the fault persists (same ladder as a fresh
+                # episode, capped by the retry-exhausted branch below).
+                or (
+                    alerting
+                    and not bool(st.get("alerted"))
+                    and _safe_int(st.get("retry_count")) > 0
+                )
+            ):
                 if last_sent and now - last_sent < self.cooldown:
                     # A second episode inside the cooldown used to vanish
                     # completely. Latch it and write one event (with the
@@ -1677,7 +1696,20 @@ class AlertEngine:
             in_cooldown = bool(
                 last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown
             )
-            if in_cooldown:
+            # Push once the cooldown has expired even when the rule is already
+            # latched: a streak that began inside the cooldown left the
+            # operator with no alert at all (mirrors the resource-rule
+            # ``cooldown_retry`` -- the previous version latched and then went
+            # permanently silent, so a sustained LLM outage was invisible and
+            # its recovery notice was also withheld).
+            cooldown_retry = (
+                alerting
+                and not bool(watch.get("alerted"))
+                and _safe_float(watch.get("last_alert_ts")) > 0
+                and now - _safe_float(watch.get("last_alert_ts"))
+                >= self.provider_watch_cooldown
+            )
+            if in_cooldown and not cooldown_retry:
                 # Latch and record without pushing. ``alerted=False`` keeps
                 # the recovery notice from arriving without a matching alert
                 # -- the exact defect v2.18.1 fixed for the resource rules.
@@ -2040,6 +2072,13 @@ class AlertEngine:
             if body_key == last_key and time.time() - last_ts < 5.0:
                 logger.info("Komari Webhook 重复请求（5 秒内相同内容），已忽略")
                 return web.json_response({"status": "ok", "duplicate": True})
+            # Register the body as in-flight before the await so two identical
+            # requests arriving while one send is still running cannot both
+            # pass the dedup check and push the same notice twice (the dedup
+            # window only covered a serial retry). A failed send is removed so
+            # it stays retryable; a successful send keeps the 5-second window.
+            if body_key not in self._webhook_inflight:
+                self._webhook_inflight.add(body_key)
             try:
                 data = json.loads(raw.decode("utf-8"))
             except Exception:
@@ -2047,6 +2086,7 @@ class AlertEngine:
             text = self._format_komari(data)
             result = await self._send(text, source="webhook", kind="service")
             if not self._delivered(result):
+                self._webhook_inflight.discard(body_key)
                 return web.json_response(
                     {"status": "error", "message": "delivery failed"},
                     status=503,
@@ -2054,6 +2094,7 @@ class AlertEngine:
             # Only remember a body that really reached the chat; a failed send
             # must stay retryable.
             self._webhook_last = (body_key, time.time())
+            self._webhook_inflight.discard(body_key)
             return web.json_response({"status": "ok"})
 
         app.router.add_post(path, handle)
