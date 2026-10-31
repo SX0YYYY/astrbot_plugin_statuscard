@@ -234,11 +234,13 @@ def test_weekly_catch_up_requires_a_marker_and_the_trigger_day(
     reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
 
     reporter._weekly_last_sent_week = None
-    # v2.20.0: an attempt marker alone (crash mid-send) now unlocks the
-    # catch-up; with neither marker it stays refused (first install).
+    # v2.20.0: an attempt marker alone (crash mid-send) unlocks the catch-up.
+    # v2.20.5: a genuine first install (no marker at all) is also allowed
+    # inside the trigger window -- one possible duplicate beats losing the
+    # whole first week.
     reporter._weekly_attempt_week = None
     monkeypatch.setattr(report, "now_in_timezone", lambda _cfg: sunday)
-    assert reporter._weekly_catch_up_allowed() is False  # first install
+    assert reporter._weekly_catch_up_allowed() is True  # first install
 
     reporter._weekly_attempt_week = "2026-W44"
     assert reporter._weekly_catch_up_allowed() is True  # attempt only

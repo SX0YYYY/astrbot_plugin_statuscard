@@ -812,7 +812,11 @@ def test_qq_section_notes_skewed_snapshot_capture(tmp_path: Path) -> None:
     )
     builder = _builder(tmp_path, store)
     section = builder._qq_section(day.date(), 7)
-    assert section["recv_note"] == "昨日快照的记录时刻有偏移，接收差值仅供参考。"
+    # v2.20.5: the note now also states how long the snapshot actually
+    # covers, so the reader can judge the error instead of a vague warning.
+    assert section["recv_note"] == (
+        "昨日快照的记录时刻有偏移（实际覆盖 30 小时 0 分），接收差值仅供参考。"
+    )
 
 
 def test_restore_delivery_state_survives_bad_types(tmp_path: Path) -> None:

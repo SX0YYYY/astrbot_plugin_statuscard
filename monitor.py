@@ -256,6 +256,11 @@ class ServiceMonitor:
                     )
 
     def start(self) -> None:
+        if self._running or (self._task is not None and not self._task.done()):
+            # start() is not idempotent: a second call used to create a second
+            # probe loop, so every item was checked (and alerted) twice.
+            logger.debug("服务监测已在运行，忽略重复启动")
+            return
         if not self.enabled:
             logger.info("服务监测未启用（monitors.enabled=false）")
             return
@@ -566,6 +571,22 @@ class ServiceMonitor:
         if state.get("alerting") or int(state.get("fails") or 0) >= self.fail_threshold:
             return dependency
         return None
+
+    def _transport_offline(self) -> bool:
+        """True when the bot connection is currently latched offline.
+
+        A failed send while the channel is down proves nothing about the
+        monitor item, so the retry budget must not be consumed (v2.20.5).
+        """
+
+        try:
+            alerts_state = self.state.get("alerts", {}) or {}
+            if not isinstance(alerts_state, dict):
+                return False
+            offline = alerts_state.get("offline")
+            return bool(isinstance(offline, dict) and offline.get("alerting"))
+        except Exception:
+            return False
 
     async def _check_item(self, item: dict[str, Any]) -> None:
         key = self._item_key(item)
@@ -888,27 +909,34 @@ class ServiceMonitor:
                         st.pop("summary_buffered", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
-                        retry_count = safe_int(st.get("retry_count") or 0) + 1
-                        if retry_count > MAX_ALERT_RETRIES:
-                            # The operator never received this outage. Stop
-                            # retrying the alert, but keep the episode latched
-                            # and let the recovery notice announce it with the
-                            # "此前未能送达" note -- the same semantics as the
-                            # resource rules, so a silent channel produces a
-                            # consistent story instead of silence.
-                            st["pending"] = False
-                            st["alerted"] = True
-                            st["send_exhausted"] = True
-                            st["retry_count"] = 0
-                            st["next_attempt"] = 0
-                            logger.warning(
-                                "监测项 %s 告警连续 %d 次发送失败，已停止重试（恢复时将一并说明）",
-                                name,
-                                MAX_ALERT_RETRIES,
-                            )
+                        if self._transport_offline():
+                            # The channel is down, so this failure says
+                            # nothing about the monitor item: keep the alert
+                            # queued without spending the retry budget
+                            # (v2.20.5).
+                            st["next_attempt"] = now + 900
                         else:
-                            st["retry_count"] = retry_count
-                            st["next_attempt"] = now + retry_delay(retry_count)
+                            retry_count = safe_int(st.get("retry_count") or 0) + 1
+                            if retry_count > MAX_ALERT_RETRIES:
+                                # The operator never received this outage. Stop
+                                # retrying the alert, but keep the episode latched
+                                # and let the recovery notice announce it with the
+                                # "此前未能送达" note -- the same semantics as the
+                                # resource rules, so a silent channel produces a
+                                # consistent story instead of silence.
+                                st["pending"] = False
+                                st["alerted"] = True
+                                st["send_exhausted"] = True
+                                st["retry_count"] = 0
+                                st["next_attempt"] = 0
+                                logger.warning(
+                                    "监测项 %s 告警连续 %d 次发送失败，已停止重试（恢复时将一并说明）",
+                                    name,
+                                    MAX_ALERT_RETRIES,
+                                )
+                            else:
+                                st["retry_count"] = retry_count
+                                st["next_attempt"] = now + retry_delay(retry_count)
         else:
             st.pop("config_error_warned", None)
             st["fails"] = 0
@@ -941,26 +969,33 @@ class ServiceMonitor:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = safe_int(st.get("recovery_retry_count") or 0) + 1
-                        if retry_count > MAX_RECOVERY_RETRIES:
-                            # A permanently unreachable target would otherwise
-                            # retry this notice every ten minutes until the
-                            # process restarts.
-                            for stale_key in (
-                                "pending_recovery",
-                                "recovery_attempt",
-                                "recovery_next_attempt",
-                                "recovery_retry_count",
-                            ):
-                                st.pop(stale_key, None)
-                            logger.warning(
-                                "监测项 %s 恢复通知连续 %d 次发送失败，已停止重试",
-                                name,
-                                MAX_RECOVERY_RETRIES,
-                            )
+                        if self._transport_offline():
+                            st["recovery_next_attempt"] = now + 900
                         else:
-                            st["recovery_retry_count"] = retry_count
-                            st["recovery_next_attempt"] = now + retry_delay(retry_count)
+                            retry_count = (
+                                safe_int(st.get("recovery_retry_count") or 0) + 1
+                            )
+                            if retry_count > MAX_RECOVERY_RETRIES:
+                                # A permanently unreachable target would otherwise
+                                # retry this notice every ten minutes until the
+                                # process restarts.
+                                for stale_key in (
+                                    "pending_recovery",
+                                    "recovery_attempt",
+                                    "recovery_next_attempt",
+                                    "recovery_retry_count",
+                                ):
+                                    st.pop(stale_key, None)
+                                logger.warning(
+                                    "监测项 %s 恢复通知连续 %d 次发送失败，已停止重试",
+                                    name,
+                                    MAX_RECOVERY_RETRIES,
+                                )
+                            else:
+                                st["recovery_retry_count"] = retry_count
+                                st["recovery_next_attempt"] = now + retry_delay(
+                                    retry_count
+                                )
             if alerting:
                 stale = bool(st.pop("stale", False))
                 # Only announce a recovery for an episode that actually
@@ -1182,7 +1217,16 @@ class ServiceMonitor:
             except TimeoutError:
                 return False, f"探测超时（超过 {timeout + 2} 秒）", url
             except Exception as exc:
-                return False, f"{exc.__class__.__name__}: {exc}", url
+                detail = f"{exc.__class__.__name__}: {exc}"
+                if _looks_like_config_error(detail):
+                    # A missing scheme or a misspelled host is a configuration
+                    # mistake, not an outage: the docker/systemd branches
+                    # already classified it, but HTTP/TCP never called the
+                    # helper, so a typo produced repeated "🔴 服务异常" alerts
+                    # (v2.20.5; the v2.20.4 changelog claimed this fix while
+                    # the classification was never wired here).
+                    detail = CONFIG_ERROR_PREFIX + detail
+                return False, detail, url
 
         if kind == "tcp":
             host = str(item.get("host") or "127.0.0.1").strip()
@@ -1201,7 +1245,10 @@ class ServiceMonitor:
                     pass
                 return True, f"TCP {target} 连接成功", target
             except Exception as exc:
-                return False, f"{exc.__class__.__name__}: {exc}", target
+                detail = f"{exc.__class__.__name__}: {exc}"
+                if _looks_like_config_error(detail):
+                    detail = CONFIG_ERROR_PREFIX + detail
+                return False, detail, target
 
         if kind == "docker":
             container = str(item.get("container") or "").strip()

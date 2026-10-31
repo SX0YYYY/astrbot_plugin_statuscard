@@ -68,7 +68,7 @@
             <button type="button" id="verify-monitors" data-i18n="verify_monitors">验证监测项</button>
             <button type="button" id="verify-webhook" data-i18n="verify_webhook">验证 Webhook</button>
           </div>
-          <div id="verify-result"></div>
+          <div id="verify-result" role="status" aria-live="polite"></div>
         </div>
         <div class="card">
           <div class="card-head">
@@ -137,8 +137,12 @@
       <section class="panel" id="panel-reports" role="tabpanel" aria-labelledby="tab-reports">
         <div class="card">
           <div class="card-head">
-            <h2 data-i18n="section_report">昨日日报</h2>
-            <span id="report-day">--</span>
+            <h2 data-i18n="section_report">日报</h2>
+            <span id="report-day-nav">
+              <button type="button" id="report-prev" data-i18n-aria="report_prev" aria-label="前一天">◀</button>
+              <span id="report-day">--</span>
+              <button type="button" id="report-next" data-i18n-aria="report_next" aria-label="后一天">▶</button>
+            </span>
           </div>
           <div class="metric-grid" id="report-summary"></div>
           <div id="report-details"></div>

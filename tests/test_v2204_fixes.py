@@ -212,7 +212,11 @@ def test_schedule_retry_marks_the_day_as_given_up(tmp_path: Path) -> None:
     reporter._today = lambda: "2026-10-31"
     for _ in range(4):
         reporter._schedule_retry("2026-10-30")
-    assert reporter._daily_given_up_day == "2026-10-31"
+    # v2.20.5 keys the give-up marker by the *report* day (30th), not by the
+    # calendar day of the attempt: the old marker made a cross-midnight retry
+    # look like "today was already attempted" and skipped the report due that
+    # evening for a whole day.
+    assert reporter._daily_given_up_day == "2026-10-30"
 
 
 # ---------------------------------------------------------------------------

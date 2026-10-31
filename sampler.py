@@ -54,8 +54,10 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
 
     total = 0
     latest: str | None = None
+    seen = 0
     try:
         for file in base.glob("*.json"):
+            seen += 1
             try:
                 data = json.loads(file.read_text(encoding="utf-8"))
             except Exception as exc:
@@ -75,6 +77,12 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
                 latest = updated
     except Exception as exc:
         logger.debug("读取 message_stats 数据失败: %s", exc)
+        return None, None
+    if seen == 0:
+        # The directory exists but holds no statistics files (the plugin was
+        # removed or its data cleared). Returning 0 wrote a 0 baseline into
+        # the daily snapshot, so the next day's difference counted the whole
+        # history as one day (up to tens of thousands of messages, v2.20.5).
         return None, None
     return total, latest
 

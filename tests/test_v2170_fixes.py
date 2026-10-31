@@ -540,6 +540,13 @@ def test_local_image_skips_onebot_direct(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_daily_catch_up_needs_previous_marker() -> None:
+    """The guard is keyed by the report day (yesterday), not by "today".
+
+    v2.20.5: a cross-midnight retry for an *older* report no longer marks the
+    new day as attempted, and an attempt for exactly yesterday's report does
+    block a second copy.
+    """
+
     reporter = object.__new__(DailyReporter)
     reporter.config = {"display": {"timezone": "Asia/Shanghai"}}
     reporter._last_sent_day = None
@@ -547,10 +554,12 @@ def test_daily_catch_up_needs_previous_marker() -> None:
     reporter._last_attempt_wall_day = None
     reporter._daily_given_up_day = None
     assert reporter._daily_catch_up_allowed("2026-10-28") is False
-    reporter._last_attempt_day = "2026-10-27"
+    # An attempt for an older report (26th) does not cover yesterday's (27th).
+    reporter._last_attempt_day = "2026-10-26"
     reporter._last_attempt_wall_day = "2026-10-27"
     assert reporter._daily_catch_up_allowed("2026-10-28") is True
-    reporter._last_attempt_day = "2026-10-28"
+    # Yesterday's report was already attempted: no second copy today.
+    reporter._last_attempt_day = "2026-10-27"
     reporter._last_attempt_wall_day = "2026-10-28"
     assert reporter._daily_catch_up_allowed("2026-10-28") is False
 

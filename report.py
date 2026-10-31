@@ -220,11 +220,20 @@ class ReportCollector:
             self._last_process = now
         await self._maybe_snapshot()
         if now - self._last_prune >= 86400:
+            try:
+                local_start = (
+                    now_in_timezone(self.config)
+                    .replace(hour=0, minute=0, second=0, microsecond=0)
+                    .timestamp()
+                )
+            except Exception:
+                local_start = None
             await asyncio.to_thread(
                 self.store.prune,
                 self.retention_days,
                 self.event_retention_days,
                 int(now),
+                local_start,
             )
             self._last_prune = now
 
@@ -443,10 +452,15 @@ class ReportCollector:
                 recv_total,
             )
         else:
-            logger.warning(
-                "日报每日快照不完整：%s（OneBot 或 message_stats 暂不可用，稍后重试）",
-                day,
-            )
+            # Once per 30 minutes, not every 5: a four-hour outage produced
+            # ~48 identical warnings that buried everything else (v2.20.5).
+            last = float(getattr(self, "_snapshot_warn_ts", 0.0) or 0.0)
+            if time.time() - last >= 1800:
+                self._snapshot_warn_ts = time.time()
+                logger.warning(
+                    "日报每日快照不完整：%s（OneBot 或 message_stats 暂不可用，稍后重试）",
+                    day,
+                )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -498,6 +512,15 @@ class DailyReporter:
         # every abandon and sent the report all night long (11 attempts and
         # two "stopped retrying" notices per evening).
         self._daily_given_up_day: str | None = None
+        # The latest report day that failed because the transport itself was
+        # down (ApiNotAvailable). Only the newest entry is kept: after a
+        # multi-day outage the plugin retries the most recent report once and
+        # lets the older ones go, so reconnecting never flushes a burst of
+        # reports into the chat (v2.20.5).
+        self._pending_recovery_day: str | None = None
+        self._pending_recovery_since = 0.0
+        self._weekly_pending_recovery_week: str | None = None
+        self._weekly_pending_recovery_since = 0.0
         self._weekly_last_sent_week: str | None = None
         # Week the last weekly send was ATTEMPTED in (set before any slow
         # work): a crash/reload mid-send then leaves a marker the catch-up
@@ -561,6 +584,19 @@ class DailyReporter:
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
         self._daily_given_up_day = saved.get("daily_given_up_day") or None
+        self._pending_recovery_day = saved.get("pending_recovery_day") or None
+        self._weekly_pending_recovery_week = (
+            saved.get("weekly_pending_recovery_week") or None
+        )
+        for attribute, key in (
+            ("_pending_recovery_since", "pending_recovery_since"),
+            ("_weekly_pending_recovery_since", "weekly_pending_recovery_since"),
+        ):
+            raw = saved.get(key)
+            try:
+                setattr(self, attribute, float(raw) if raw else 0.0)
+            except (TypeError, ValueError):
+                setattr(self, attribute, 0.0)
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
         self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
@@ -594,6 +630,21 @@ class DailyReporter:
             self._weekly_pending = float(weekly_pending) if weekly_pending else None
         except (TypeError, ValueError):
             self._weekly_pending = None
+        if (
+            self._weekly_pending is not None
+            and self._weekly_pending < time.time() - 6 * 3600
+        ):
+            # A reload/kill right after a failed weekly send left the retry
+            # timestamp in state.json. Restoring it unconditionally delivered
+            # a week-old report at an arbitrary moment (e.g. Tuesday
+            # afternoon). Only a retry from the trigger window is honoured
+            # (v2.20.5).
+            logger.warning(
+                "丢弃过期的周报补发排程（报告日 %s）",
+                self._weekly_pending_report_day or "--",
+            )
+            self._weekly_pending = None
+            self._weekly_pending_report_day = None
         self._image_retry_attempts = _safe_int(saved.get("image_retry_attempts"))
         self._weekly_image_attempts = _safe_int(saved.get("weekly_image_attempts"))
         for attribute, key in (
@@ -625,6 +676,18 @@ class DailyReporter:
                     "last_attempt_day": self._last_attempt_day,
                     "last_attempt_wall_day": self._last_attempt_wall_day,
                     "daily_given_up_day": self._daily_given_up_day,
+                    "pending_recovery_day": getattr(
+                        self, "_pending_recovery_day", None
+                    ),
+                    "pending_recovery_since": getattr(
+                        self, "_pending_recovery_since", 0.0
+                    ),
+                    "weekly_pending_recovery_week": getattr(
+                        self, "_weekly_pending_recovery_week", None
+                    ),
+                    "weekly_pending_recovery_since": getattr(
+                        self, "_weekly_pending_recovery_since", 0.0
+                    ),
                     "pending_retry": pending,
                     "pending_retry_count": self._pending_retry_count,
                     "pending_retry_day": self._pending_retry_day,
@@ -760,6 +823,9 @@ class DailyReporter:
             logger.error("日报定时任务异常退出: %r", exc, exc_info=exc)
 
     def start(self) -> None:
+        if self._running or (self._task is not None and not self._task.done()):
+            logger.debug("日报定时任务已在运行，忽略重复启动")
+            return
         # Weekly dispatch has its own switch and must not depend on the daily
         # report being enabled: "weekly only" is a supported configuration.
         self._start_weekly()
@@ -884,10 +950,10 @@ class DailyReporter:
                         await asyncio.sleep(60)
                         continue
                     self._pending_retry = None
-                    if (
-                        self._pending_retry_day
-                        and self._pending_retry_day != self._today()
-                    ):
+                    # ``_pending_retry_day`` is the report day now, so compare
+                    # against "yesterday" rather than "today": a retry for an
+                    # older report is exactly the case that must keep running.
+                    if _day and _day != self._default_report_day():
                         # Keep the pinned report day instead of dropping the
                         # retry: the same cross-midnight rule was already
                         # fixed for images, and a text report is still the
@@ -1106,7 +1172,31 @@ class DailyReporter:
     def _default_report_day(self) -> str:
         return (now_in_timezone(self.config) - timedelta(days=1)).date().isoformat()
 
-    def _schedule_weekly_retry(self) -> bool:
+    def _schedule_weekly_retry(self, transport_offline: bool = False) -> bool:
+        # The marker belongs to the report week (Saturday), not to the day the
+        # attempt happens: a Sunday-night retry that crosses midnight runs on
+        # Monday, and keying it by "today" wrote the wrong week.
+        report_day = self._weekly_pending_report_day or self._default_report_day()
+        week_key = self._week_key(report_day)
+        if transport_offline:
+            if (
+                self._weekly_pending_recovery_week
+                and self._weekly_pending_recovery_week != week_key
+            ):
+                logger.warning(
+                    "周报 %s 的补发已被更新的 %s 取代（恢复后只补最近一期）",
+                    self._weekly_pending_recovery_week,
+                    week_key,
+                )
+            self._weekly_pending_recovery_week = week_key
+            if not self._weekly_pending_recovery_since:
+                self._weekly_pending_recovery_since = time.time()
+            self._weekly_pending = time.time() + 900
+            self._save_delivery_state()
+            logger.warning(
+                "周报发送失败（Bot 连接不可用），已排队，恢复后补发最近这一期"
+            )
+            return True
         self._weekly_retry_count += 1
         if self._weekly_retry_count > 3:
             self._weekly_pending = None
@@ -1114,9 +1204,9 @@ class DailyReporter:
             self._weekly_retry_count = 0
             # Remember the week that was abandoned: without it the catch-up
             # check instantly queued another attempt after the give-up notice.
-            self._weekly_given_up_week = self._week_key(self._today())
+            self._weekly_given_up_week = week_key
             self._save_delivery_state()
-            logger.warning("周报连续发送失败 3 次，停止重试")
+            logger.warning("周报重试 3 次后仍失败，停止重试")
             return False
         delay = 600 * self._weekly_retry_count
         self._weekly_pending = time.time() + delay
@@ -1224,6 +1314,8 @@ class DailyReporter:
                     self._weekly_image_attempts = 0
                     self._weekly_image_pending = None
                     self._weekly_image_report_day = None
+                    self._weekly_pending_recovery_week = None
+                    self._weekly_pending_recovery_since = 0.0
                     self._save_delivery_state()
                     logger.info("周报已发送（图片）：%s", targets)
                     return
@@ -1240,6 +1332,8 @@ class DailyReporter:
                     self._weekly_image_attempts = 0
                     self._weekly_image_pending = None
                     self._weekly_image_report_day = None
+                    self._weekly_pending_recovery_week = None
+                    self._weekly_pending_recovery_since = 0.0
                     self._save_delivery_state()
                     return
         result = await self.plugin.send_text(
@@ -1260,6 +1354,8 @@ class DailyReporter:
             self._weekly_image_attempts = 0
             self._weekly_image_pending = None
             self._weekly_image_report_day = None
+            self._weekly_pending_recovery_week = None
+            self._weekly_pending_recovery_since = 0.0
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         elif _uncertain(result):
@@ -1272,11 +1368,16 @@ class DailyReporter:
             self._weekly_image_attempts = 0
             self._weekly_image_pending = None
             self._weekly_image_report_day = None
+            self._weekly_pending_recovery_week = None
+            self._weekly_pending_recovery_since = 0.0
             self._save_delivery_state()
         else:
             self._record(day, False, "weekly send failed")
             logger.warning("周报发送失败：%s", targets)
-            if not self._schedule_weekly_retry():
+            offline = bool(
+                isinstance(result, DeliveryResult) and result.transport_offline
+            )
+            if not self._schedule_weekly_retry(transport_offline=offline):
                 await self._notify_give_up(targets, day, weekly=True)
 
     async def _notify_store_unavailable(self, targets: list[str]) -> None:
@@ -1328,7 +1429,7 @@ class DailyReporter:
         except Exception:
             logger.debug("发送放弃重试提示失败", exc_info=True)
 
-    def _schedule_retry(self, day: str | None) -> bool:
+    def _schedule_retry(self, day: str | None, transport_offline: bool = False) -> bool:
         """Remember a failed delivery and queue the next attempt.
 
         ``day`` is ``None`` for the scheduled run, which resolves "yesterday"
@@ -1336,34 +1437,63 @@ class DailyReporter:
         an empty string and every retry then died in ``date.fromisoformat("")``
         -- the retry budget was spent without ever producing a report.
 
+        ``transport_offline`` means the delivery failed because the bot was
+        disconnected (ApiNotAvailable), not because of the content. Those
+        failures must not consume the retry budget: a four-hour outage used to
+        burn all four attempts in the first hour and silently drop the report
+        for good. Instead the newest report day is kept in
+        ``pending_recovery_day`` and retried once the connection is back. Only
+        the newest day is kept, so reconnecting after several missed days
+        sends one report rather than a burst (v2.20.5).
+
         Returns ``True`` when another attempt was scheduled and ``False``
-        when the retry budget for today is exhausted. The counter is scoped
-        to a single day; without that scope a few unlucky evenings in a row
-        would push the counter past the limit and every later evening would
-        be abandoned after its very first failure.
+        when the retry budget for this report day is exhausted.
         """
 
-        today = self._today()
-        if self._pending_retry_day != today:
-            self._pending_retry_day = today
+        budget_key = day or self._default_report_day()
+        # The budget belongs to the report day, not the calendar day. A retry
+        # chain that crosses midnight is the same attempt series; resetting
+        # the counter at 00:00 gave a report up to seven attempts across two
+        # hours while the log still said "3 次" (v2.20.5).
+        if getattr(self, "_pending_retry_day", None) != budget_key:
+            self._pending_retry_day = budget_key
             self._pending_retry_count = 0
+        if transport_offline:
+            if self._pending_recovery_day and self._pending_recovery_day != budget_key:
+                logger.warning(
+                    "日报 %s 的补发已被更新的 %s 取代（恢复后只补最近一天）",
+                    self._pending_recovery_day,
+                    budget_key,
+                )
+            self._pending_recovery_day = budget_key
+            if not self._pending_recovery_since:
+                self._pending_recovery_since = time.time()
+            # A long outage has no "next retry" that can succeed; poll every
+            # 15 minutes as a fallback in case the reconnect hook is missed.
+            self._pending_retry = (budget_key, time.time() + 900)
+            self._save_delivery_state()
+            logger.warning(
+                "日报 %s 发送失败（Bot 连接不可用），已排队，恢复后补发最近这一份",
+                budget_key,
+            )
+            return True
         self._pending_retry_count += 1
         if self._pending_retry_count > 3:
             self._pending_retry = None
             self._pending_retry_count = 0
-            # Mark the day as given up: the weekly report has the same
+            # Mark the report day as given up: the weekly report has the same
             # marker, and without it the daily loop re-armed the catch-up
             # after every abandon and sent the report all night long.
-            self._daily_given_up_day = today
+            self._daily_given_up_day = budget_key
             self._save_delivery_state()
-            logger.warning("日报 %s 连续发送失败 3 次，停止重试", day or "--")
+            logger.warning("日报 %s 重试 3 次后仍失败，停止重试", budget_key)
             return False
         delay = 600 * self._pending_retry_count
-        self._pending_retry = (day, time.time() + delay)
+        self._pending_retry = (budget_key, time.time() + delay)
         self._save_delivery_state()
         logger.warning(
             "日报 %s 发送失败，%d 分钟后重试（第 %d 次）",
-            day or "--",
+            budget_key,
             delay // 60,
             self._pending_retry_count,
         )
@@ -1374,12 +1504,16 @@ class DailyReporter:
             self._pending_retry is not None
             or bool(self._pending_retry_count)
             or self._pending_retry_day is not None
+            or getattr(self, "_pending_recovery_day", None) is not None
+            or bool(getattr(self, "_pending_recovery_since", 0.0))
             or self._pending_image_retry_report_day is not None
             or self._pending_image_retry_send_day is not None
         )
         self._pending_retry = None
         self._pending_retry_count = 0
         self._pending_retry_day = None
+        self._pending_recovery_day = None
+        self._pending_recovery_since = 0.0
         self._pending_image_retry_report_day = None
         self._pending_image_retry_send_day = None
         if clear_weekly:
@@ -1404,26 +1538,62 @@ class DailyReporter:
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
 
+    def notify_offline_recovery(self) -> bool:
+        """Queue the newest missed report right after the bot reconnects.
+
+        Called by the alert engine when the connection is back. Only the most
+        recent report day/week is retried; anything older is deliberately
+        abandoned so a multi-day outage never flushes a burst of reports into
+        the chat (the user's explicit requirement, v2.20.5).
+        """
+
+        queued = False
+        day = self._pending_recovery_day
+        if day:
+            age = time.time() - float(self._pending_recovery_since or 0.0)
+            if age > 3 * 86400:
+                logger.warning("日报 %s 的补发已超过 3 天，放弃", day)
+                self._pending_recovery_day = None
+                self._pending_recovery_since = 0.0
+                self._pending_retry = None
+            else:
+                self._pending_retry = (day, time.time())
+                queued = True
+        if self._weekly_pending_recovery_week:
+            self._weekly_pending = time.time()
+            queued = True
+        if queued:
+            self._save_delivery_state()
+            logger.info("Bot 连接恢复：已安排补发最近一份未送达的报告")
+        return queued
+
     def _daily_catch_up_allowed(self, today: str) -> bool:
         """Whether a missed daily-report window may be sent on start-up.
 
         A missing marker means this is a first install or an upgrade from a
         version without the marker; sending then would duplicate a report the
         previous process may already have delivered. Once a marker exists,
-        only ``last_attempt_day`` protects against a reload loop.
+        only the *report day* protects against a reload loop. The previous
+        implementation compared a calendar-day marker with "today", so a
+        retry that crossed midnight (for an older report) marked the new day
+        as already attempted and the report due that evening was skipped for
+        the whole day (v2.20.5).
         """
 
         if not self._last_attempt_day:
             return False
-        # Already gave up on today's report: another catch-up would send the
-        # same failing report again (the give-up notice is already out).
-        if self._daily_given_up_day == today:
+        try:
+            # The caller passes today; the report due today is yesterday's.
+            # Deriving it from the argument (instead of the wall clock) keeps
+            # the check deterministic in tests and across timezone edges.
+            report_day = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        except ValueError:
+            report_day = self._default_report_day()
+        if self._last_sent_day == report_day:
             return False
-        # The calendar day of the last attempt (not the report day): a retry
-        # of yesterday's report must not look like "today was attempted",
-        # otherwise the fresh report is skipped for the whole day.
-        wall_day = self._last_attempt_wall_day or self._last_attempt_day
-        return not (self._last_sent_day == today or wall_day == today)
+        if self._daily_given_up_day == report_day:
+            return False
+        return self._last_attempt_day != report_day
 
     def _week_key(self, day: str) -> str:
         try:
@@ -1437,25 +1607,26 @@ class DailyReporter:
     def _weekly_catch_up_allowed(self) -> bool:
         """Whether a missed weekly window may be sent right now.
 
-        The daily report already catches up; the weekly one did not, so a
-        reload at 21:29 silently skipped the whole week. Two guards keep it
-        safe: a missing marker means a first install or an upgrade, and the
-        catch-up only runs on the trigger day itself -- a Monday restart must
-        not deliver last week's report in the middle of a new week.
+        The weekly report already catches up; it did not, so a reload at
+        21:29 silently skipped the whole week. Two guards keep it safe: a
+        missing marker means a first install or an upgrade, and the catch-up
+        only runs inside the trigger window (Sunday after 21:30 through
+        Monday 06:00) -- a Wednesday restart must not deliver last week's
+        report in the middle of a new week. Requiring the Sunday *weekday*
+        made a process started at 21:31 skip the first weekly report for a
+        whole week, which is worse than an occasional duplicate (v2.20.5).
         """
 
         if time.time() < float(getattr(self, "_weekly_pause_until", 0.0) or 0.0):
             # A config problem (empty target/sections) paused the loop for a
             # few minutes instead of re-entering the send path every second.
             return False
-        if not self._weekly_last_sent_week and not self._weekly_attempt_week:
-            # Neither marker means a genuine first install/upgrade: sending
-            # then could duplicate a report the previous process already
-            # delivered. An attempt marker alone (crash mid-send) is enough
-            # to allow the catch-up on the trigger day (v2.20.0).
-            return False
         now = now_in_timezone(self.config)
-        if now.weekday() != 6:
+        in_window = now.weekday() == 6 and (
+            now.hour > 21 or (now.hour == 21 and now.minute >= 30)
+        )
+        in_window = in_window or (now.weekday() == 0 and now.hour < 6)
+        if not in_window:
             return False
         report_day = (now - timedelta(days=1)).date().isoformat()
         week_key = self._week_key(report_day)
@@ -1463,6 +1634,12 @@ class DailyReporter:
             # Already gave up after three failed attempts this week; retrying
             # again would produce the same notice every ~40 minutes.
             return False
+        # An attempt marker alone must NOT block the catch-up: it is written
+        # before the slow work, so a crash/reload mid-send leaves exactly that
+        # marker and the report would otherwise be lost for the whole week
+        # (v2.20.0 semantics, kept in v2.20.5). A genuine first install is
+        # also allowed inside the window -- one possible duplicate beats
+        # silently skipping the first weekly report.
         return self._weekly_last_sent_week != week_key
 
     async def _send_scheduled(self, day: str | None = None) -> None:
@@ -1474,7 +1651,7 @@ class DailyReporter:
         # attempted, which re-armed the catch-up and made the report loop
         # re-send all night (a give-up notice was followed by another report
         # one second later).
-        self._last_attempt_day = day or self._today()
+        self._last_attempt_day = day or self._default_report_day()
         self._last_attempt_wall_day = self._today()
         self._save_delivery_state()
         targets = self._targets()
@@ -1488,6 +1665,11 @@ class DailyReporter:
             # full of "--" and send it as if it were a real report.
             logger.error("日报数据库不可用，跳过本次日报发送")
             self._record(day or self._default_report_day(), False, "db unavailable")
+            # A database outage is usually transient (disk full, permissions,
+            # a half-written WAL): drop the day's report and the user gets
+            # nothing, while the store heals within a minute. Queue the normal
+            # retry ladder instead (v2.20.5).
+            self._schedule_retry(day or self._default_report_day())
             await self._notify_store_unavailable(targets)
             return
         try:
@@ -1603,11 +1785,14 @@ class DailyReporter:
         else:
             self._record(day, False, "send failed")
             logger.warning("日报发送失败：%s", targets)
-            if not self._schedule_retry(day):
+            offline = bool(
+                isinstance(result, DeliveryResult) and result.transport_offline
+            )
+            if not self._schedule_retry(day, transport_offline=offline):
                 await self._notify_give_up(targets, day, weekly=False)
 
     async def preview(
-        self, target_umo: str | None, span_days: int = 1
+        self, target_umo: str | None, span_days: int = 1, day: str | None = None
     ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
@@ -1623,7 +1808,10 @@ class DailyReporter:
                 self._sections() if span == 1 else self._weekly_sections()
             )
             view = await asyncio.to_thread(
-                self._build_view, span_days=span, sections=preview_sections
+                self._build_view,
+                day=day,
+                span_days=span,
+                sections=preview_sections,
             )
         except Exception:
             logger.exception("日报预览数据聚合失败")

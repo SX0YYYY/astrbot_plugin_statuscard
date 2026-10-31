@@ -13,6 +13,7 @@ compared case-insensitively.
 from __future__ import annotations
 
 import re
+import socket
 from typing import Any
 
 from .utils import cfg_get, redact_url
@@ -34,6 +35,12 @@ _ADDRESS_RE = re.compile(
     r"|\b(?=[0-9a-f:]*[a-f])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,}\b",  # IPv6
     re.IGNORECASE,
 )
+
+# A bare host name with at least one dot ("nas.local", "internal.example").
+# The hostname rule used to match only address-shaped tokens, so a machine
+# name like "PC-20260627WVRG" or a dotted internal name passed through in
+# monitor names, error texts and event names (v2.20.5).
+_HOSTNAME_RE = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61})\.)+[A-Za-z]{2,63}\b")
 
 
 def normalize_rules(raw: Any) -> set[str]:
@@ -73,6 +80,20 @@ class Redactor:
 
     def __init__(self, rules: Any = None):
         self.rules = normalize_rules(rules)
+        try:
+            self._own_hostname = socket.gethostname() or ""
+        except Exception:
+            self._own_hostname = ""
+
+    def _contains_host_name(self, value: str) -> bool:
+        """True when the text carries an address or a host name."""
+
+        if _ADDRESS_RE.search(value):
+            return True
+        own = self._own_hostname
+        if own and len(own) >= 3 and own.lower() in value.lower():
+            return True
+        return bool(_HOSTNAME_RE.search(value))
 
     def __bool__(self) -> bool:
         return bool(self.rules)
@@ -209,7 +230,7 @@ class Redactor:
         value = str(text or "")
         if not value or not self.hostname:
             return value
-        if not _ADDRESS_RE.search(value):
+        if not self._contains_host_name(value):
             return value
         return "已隐藏（错误详情含主机或地址信息）"
 
@@ -227,7 +248,7 @@ class Redactor:
         value = str(name or "")
         if not value or not self.hostname:
             return value
-        if not _ADDRESS_RE.search(value):
+        if not self._contains_host_name(value):
             return value
         return "已隐藏"
 

@@ -49,6 +49,36 @@ _LOCAL_SEND_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+# Markers that prove the transport itself is gone rather than the message
+# being wrong. ``ApiNotAvailable`` is raised by aiocqhttp when no reverse-WS
+# client is registered; ``InvalidURL``/``API root url invalid`` mean the
+# configured endpoint is unusable. A delivery that failed this way will fail
+# identically until the connection comes back, so callers must not spend
+# their finite retry budget on it (v2.20.5).
+_OFFLINE_MARKERS: tuple[str, ...] = (
+    "apinotavailable",
+    "invalidurl",
+    "api root url invalid",
+    "未找到匹配平台",
+)
+
+
+def _looks_offline(text: Any) -> bool:
+    """True when an error text describes an unreachable transport."""
+
+    value = str(text or "").lower()
+    return bool(value) and any(marker in value for marker in _OFFLINE_MARKERS)
+
+
+def _is_offline_exc(exc: BaseException) -> bool:
+    """True when a thrown transport error proves the channel is down."""
+
+    name = type(exc).__name__
+    if name in ("ApiNotAvailable", "InvalidURL"):
+        return True
+    return "api root url invalid" in str(exc).lower()
+
+
 @dataclass
 class DeliveryResult:
     """Per-target outcome of one logical delivery.
@@ -67,6 +97,11 @@ class DeliveryResult:
     rejected_targets: list[str] = field(default_factory=list)
     receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     retcodes: dict[str, int | None] = field(default_factory=dict)
+    # The transport itself was unreachable (no reverse-WS client, invalid
+    # URL): every target failed for the same reason and retrying cannot help
+    # until the connection comes back. Callers keep their retry budget for
+    # content errors instead of burning it during an outage (v2.20.5).
+    transport_offline: bool = False
 
     def __bool__(self) -> bool:
         """Truthy when at least one target definitely accepted the message."""
@@ -101,6 +136,7 @@ class DeliveryResult:
             "rejected_targets": list(self.rejected_targets),
             "receipts": dict(self.receipts),
             "retcodes": dict(self.retcodes),
+            "transport_offline": self.transport_offline,
         }
 
 
@@ -156,6 +192,7 @@ class DeliveryService:
             not image or image.lower().startswith(("http://", "https://"))
         )
         result = DeliveryResult()
+        offline_hits = False
         for target in targets:
             receipt = None
             if direct_ok:
@@ -171,6 +208,8 @@ class DeliveryService:
                 if receipt.ok:
                     result.ok_targets.append(target)
                     continue
+                if _looks_offline(receipt.error):
+                    offline_hits = True
                 if receipt.rejected:
                     # OneBot refused the action outright (status=failed), so
                     # nothing reached the chat. Try the framework path: it
@@ -194,7 +233,9 @@ class DeliveryService:
                     result.failed_targets.append(target)
                     result.uncertain_targets.append(target)
                     continue
-            sent, uncertain = await self._send_via_astrbot(target, payload)
+            sent, uncertain, offline = await self._send_via_astrbot(target, payload)
+            if offline:
+                offline_hits = True
             if sent:
                 result.ok_targets.append(target)
                 # The framework path delivered what OneBot rejected; the
@@ -209,18 +250,25 @@ class DeliveryService:
                 if uncertain:
                     result.uncertain_targets.append(target)
         result.ok = bool(result.ok_targets)
+        # Only a total failure counts as "the transport is down": a partial
+        # success means the channel works and the remaining errors are
+        # target-specific (muted bot, wrong group).
+        result.transport_offline = offline_hits and not result.ok
         self.record(kind, targets, result, source=source)
         return result
 
     async def _send_via_astrbot(
         self, target: str, payload: dict[str, Any]
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, bool]:
         """Send through the normal AstrBot path.
 
-        Returns ``(sent, uncertain)``. ``uncertain`` is True when the message
-        may have reached the chat without an acknowledgement (timeout or a
-        non-retryable transport error); the caller must then treat it as
-        delivered and must not repeat it.
+        Returns ``(sent, uncertain, offline)``. ``uncertain`` is True when the
+        message may have reached the chat without an acknowledgement (timeout
+        or a non-retryable transport error); the caller must then treat it as
+        delivered and must not repeat it. ``offline`` is True when the failure
+        proves the transport itself is unreachable (ApiNotAvailable/InvalidURL
+        or no matching platform), so a caller can keep its retry budget for a
+        later attempt instead of spending it during an outage.
 
         A transport error can also mean the message arrived and only the
         acknowledgement was lost, so the send is repeated only when the
@@ -237,16 +285,16 @@ class DeliveryService:
                     timeout=60,
                 )
                 if sent:
-                    return True, False
+                    return True, False, False
                 logger.warning("主动%s未找到匹配平台: %s", label, target)
-                return False, False
+                return False, False, True
             except TimeoutError:
                 logger.warning(
                     "主动发送%s到 %s 超时（60 秒，可能已送达，不再重发以免重复）",
                     label,
                     target,
                 )
-                return False, True
+                return False, True, False
             except Exception as exc:
                 detail = str(exc) or exc.__class__.__name__
                 if isinstance(exc, _LOCAL_SEND_ERRORS):
@@ -261,7 +309,7 @@ class DeliveryService:
                         target,
                         detail,
                     )
-                    return False, False
+                    return False, False, False
                 if is_action_rejected(exc):
                     # OneBot's framework answered ActionFailed: the action
                     # was refused, so the message never reached the chat and a
@@ -272,7 +320,7 @@ class DeliveryService:
                         target,
                         detail,
                     )
-                    return False, False
+                    return False, False, False
                 if not should_retry_send(exc):
                     logger.warning(
                         "主动发送%s到 %s 未确认送达（可能已发出，不重发以免重复）: %s",
@@ -280,7 +328,7 @@ class DeliveryService:
                         target,
                         detail,
                     )
-                    return False, True
+                    return False, True, False
                 if attempt >= 2:
                     logger.warning(
                         "主动发送%s到 %s 失败（已重试 %d 次）: %s",
@@ -289,7 +337,7 @@ class DeliveryService:
                         attempt,
                         detail,
                     )
-                    return False, False
+                    return False, False, _is_offline_exc(exc)
                 logger.warning(
                     "主动发送%s到 %s 失败（第 %d 次），%.0f 秒后重试: %s",
                     label,
@@ -299,7 +347,7 @@ class DeliveryService:
                     detail,
                 )
                 await asyncio.sleep(attempt + 1)
-        return False, False
+        return False, False, False
 
     def _safe_client(self) -> Any:
         try:
@@ -346,10 +394,9 @@ class DeliveryService:
             # its source is "offline_broadcast", which does not start with
             # "broadcast", so it used to overwrite the slot with the result
             # of the last group it posted to.
-            if (
-                not str(source).startswith(("verify", "broadcast", "offline_broadcast"))
-                and source != "test"
-            ):
+            if not str(source).startswith(
+                ("verify", "broadcast", "offline_broadcast")
+            ) and source not in ("test", "report_preview", "weekly_preview"):
                 self.state.set("delivery_real", payload)
             self.state.save()
         except Exception as exc:

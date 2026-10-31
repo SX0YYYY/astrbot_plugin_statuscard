@@ -1063,17 +1063,29 @@ class DailyReportBuilder:
         # late, in which case the delta silently covers extra hours.
         next_day = snapshots.get((day + timedelta(days=1)).isoformat(), {})
         recv_skewed = False
+        recv_gap_text = ""
         try:
             cur_ts = float(yesterday.get("captured_at") or 0)
             next_ts = float(next_day.get("captured_at") or 0)
             if cur_ts and next_ts:
-                gap_hours = abs(next_ts - cur_ts) / 3600.0
-                recv_skewed = not (23.0 <= gap_hours <= 25.0)
+                gap_seconds = abs(next_ts - cur_ts)
+                gap_hours = gap_seconds / 3600.0
+                # ±15 minutes, not ±1 hour: a snapshot taken 55 minutes after
+                # midnight (the bot reconnected at 00:56) moved part of one
+                # day's receive count into the previous day and the old
+                # tolerance kept it silent (v2.20.5).
+                recv_skewed = not (23.75 <= gap_hours <= 24.25)
+                if recv_skewed:
+                    recv_gap_text = (
+                        f"{int(gap_seconds // 3600)} 小时 "
+                        f"{int((gap_seconds % 3600) // 60)} 分"
+                    )
             # Missing captured_at (old rows) means the gap cannot be judged;
             # defaulting to 24h claimed "the snapshot is on time" without
             # evidence.
         except (TypeError, ValueError):
             recv_skewed = False
+            recv_gap_text = ""
 
         available = any(
             value is not None
@@ -1144,11 +1156,16 @@ class DailyReportBuilder:
             "snapshot_note": snapshot_note,
             "recv_note": (
                 "接收趋势需要至少两份每日快照，当前仍在积累。"
-                if yesterday_recv is None
+                if yesterday_recv is None and not next_day
                 else (
-                    "昨日快照的记录时刻有偏移，接收差值仅供参考。"
-                    if recv_skewed
-                    else None
+                    "该日或次日缺少快照，无法计算接收差值。"
+                    if yesterday_recv is None
+                    else (
+                        f"昨日快照的记录时刻有偏移（实际覆盖 {recv_gap_text}），"
+                        "接收差值仅供参考。"
+                        if recv_skewed
+                        else None
+                    )
                 )
             ),
             "charts": {

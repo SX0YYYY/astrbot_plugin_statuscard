@@ -73,6 +73,11 @@ MAX_RECOVERY_RETRIES = 5
 # documented as affecting only the resource rules, and raising it to dampen
 # memory jitter used to delay disconnect alerts by the same factor.
 OFFLINE_ALERT_SAMPLES = 2
+# A half-open WebSocket (NAT timeout, a hung NapCat) makes every get_status
+# call time out without proving the bot is offline. Stay quiet at first so a
+# container restart does not raise a false alarm, but do not stay silent
+# forever: after this many consecutive failures send one notice (v2.20.5).
+UNREACHABLE_ALERT_SAMPLES = 30
 # A raw provider_stats enum ("completed") means nothing to a group member;
 # the alert and recovery texts use these labels instead.
 _PROVIDER_STATUS_TEXT = {
@@ -213,6 +218,10 @@ class AlertEngine:
         self._webhook_last: tuple[str, float] = ("", 0.0)
         self._webhook_inflight: set[str] = set()
         self._broadcast_task: asyncio.Task | None = None
+        # Groups that already received the current recovery broadcast. A
+        # flapping link used to cancel and restart the loop, sending a second
+        # copy to the groups handled in the first pass (v2.20.5).
+        self._broadcast_done: set[str] = set()
         self._client_missing_warned = False
         self._primed = False
         self._disk_warned: set[str] = set()
@@ -346,6 +355,11 @@ class AlertEngine:
                     )
 
     def start(self) -> None:
+        if self._running or (
+            self._monitor_task is not None and not self._monitor_task.done()
+        ):
+            logger.debug("状态卡告警任务已在运行，忽略重复启动")
+            return
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
         daily_on = cfg_bool(self.config, "alerts.daily_summary.enabled", False)
         self._running = alerts_on or daily_on
@@ -496,6 +510,12 @@ class AlertEngine:
                     # False) no recovery notice either. The user never heard
                     # about the incident at all.
                     st["summary_abandoned"] = True
+                    # ``last_sent`` is deliberately kept: it is the only
+                    # signal the cooldown-retry path has for *later* episodes,
+                    # and v2.20.4 relies on it. The abandoned summary itself
+                    # skips the cooldown gate below instead (v2.20.5) -- that
+                    # was the actual 30-minute delay, without breaking the
+                    # retryable state.
                     # The window died with the abandon; leaving this set
                     # would delay a future recovery for no reason.
                     st.pop("awaiting_summary", None)
@@ -980,13 +1000,18 @@ class AlertEngine:
                     and _safe_int(st.get("retry_count")) > 0
                 )
             ):
-                if last_sent and now - last_sent < self.cooldown:
+                if last_sent and now - last_sent < self.cooldown and not abandoned:
                     # A second episode inside the cooldown used to vanish
                     # completely. Latch it and write one event (with the
                     # suppression noted); only the duplicate push is skipped.
                     st["alerting"] = True
                     st["alerted"] = False
-                    st["alert_since"] = now
+                    # Keep an existing episode start: a summary abandon resets
+                    # ``last_sent`` and the rule then re-enters here, so
+                    # overwriting ``alert_since`` shrank the reported duration
+                    # to the retry window (v2.20.5).
+                    if not _safe_float(st.get("alert_since")):
+                        st["alert_since"] = now
                     st["count"] = 0
                     self._record_event(
                         "resource",
@@ -1069,43 +1094,53 @@ class AlertEngine:
                             "alert",
                         )
                     else:
-                        retry_count = _safe_int(st.get("retry_count")) + 1
-                        st["retry_count"] = retry_count
-                        if retry_count >= 3:
-                            # Stop retrying: an unreachable target used to be
-                            # retried every ~10 minutes forever, writing one
-                            # "failed" event per attempt. Mark the rule as
-                            # alerting so only the recovery notice tries again.
-                            logger.warning(
-                                "告警 %s 连续发送失败 %d 次，停止重试（恢复时仍会通知）",
-                                name,
-                                retry_count,
-                            )
-                            st["alerting"] = True
-                            st["alerted"] = True
-                            # Keep the episode's original start: resetting it
-                            # here shrank the recovery notice's "告警持续" to
-                            # just the retry window. A stored 0 (set when a
-                            # previous episode recovered) must not survive:
-                            # now - 0 rendered as "20757 天".
-                            st["alert_since"] = (
-                                _safe_float(st.get("alert_since")) or now
-                            )
-                            st["count"] = 0
-                            st["retry_count"] = 0
-                            st["next_attempt"] = 0
-                        else:
-                            st["next_attempt"] = now + retry_delay(retry_count)
+                        if self._transport_offline():
+                            # The bot is disconnected, so this failure says
+                            # nothing about the alert: keep it queued without
+                            # spending the three-attempt budget. The old code
+                            # gave up during a long outage, and the recovery
+                            # notice was the first the user ever heard of the
+                            # fault (v2.20.5).
+                            st["next_attempt"] = now + 900
                             st["count"] = self.sustain
-                            if retry_count == 1:
-                                # One failed event per interruption, not one
-                                # per retry.
-                                self._record_event(
-                                    "resource",
+                        else:
+                            retry_count = _safe_int(st.get("retry_count")) + 1
+                            st["retry_count"] = retry_count
+                            if retry_count >= 3:
+                                # Stop retrying: an unreachable target used to be
+                                # retried every ~10 minutes forever, writing one
+                                # "failed" event per attempt. Mark the rule as
+                                # alerting so only the recovery notice tries again.
+                                logger.warning(
+                                    "告警 %s 连续发送失败 %d 次，停止重试（恢复时仍会通知）",
                                     name,
-                                    f"{value_text}（阈值 {threshold:.1f}{unit}）",
-                                    "failed",
+                                    retry_count,
                                 )
+                                st["alerting"] = True
+                                st["alerted"] = True
+                                # Keep the episode's original start: resetting it
+                                # here shrank the recovery notice's "告警持续" to
+                                # just the retry window. A stored 0 (set when a
+                                # previous episode recovered) must not survive:
+                                # now - 0 rendered as "20757 天".
+                                st["alert_since"] = (
+                                    _safe_float(st.get("alert_since")) or now
+                                )
+                                st["count"] = 0
+                                st["retry_count"] = 0
+                                st["next_attempt"] = 0
+                            else:
+                                st["next_attempt"] = now + retry_delay(retry_count)
+                                st["count"] = self.sustain
+                                if retry_count == 1:
+                                    # One failed event per interruption, not one
+                                    # per retry.
+                                    self._record_event(
+                                        "resource",
+                                        name,
+                                        f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                                        "failed",
+                                    )
                     # Persist alerting/alerted/last_sent in the same write that
                     # clears send_inflight: saving before those fields were set
                     # left a reload window where the disk said "not alerting",
@@ -1159,20 +1194,32 @@ class AlertEngine:
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
                     else:
-                        retry_count = _safe_int(st.get("recovery_retry_count")) + 1
-                        if retry_count > MAX_RECOVERY_RETRIES:
-                            logger.warning(
-                                "%s 的恢复通知连续 %d 次未送达，放弃补发",
-                                name,
-                                retry_count - 1,
+                        if self._transport_offline():
+                            # Keep the recovery notice queued across the
+                            # outage instead of spending its retry budget:
+                            # the user should learn about the fault when the
+                            # channel is back (v2.20.5).
+                            st["recovery_retry_count"] = _safe_int(
+                                st.get("recovery_retry_count")
                             )
-                            st.pop("pending_recovery", None)
-                            st.pop("recovery_attempt", None)
-                            st.pop("recovery_next_attempt", None)
-                            st.pop("recovery_retry_count", None)
+                            st["recovery_next_attempt"] = now + 900
                         else:
-                            st["recovery_retry_count"] = retry_count
-                            st["recovery_next_attempt"] = now + retry_delay(retry_count)
+                            retry_count = _safe_int(st.get("recovery_retry_count")) + 1
+                            if retry_count > MAX_RECOVERY_RETRIES:
+                                logger.warning(
+                                    "%s 的恢复通知连续 %d 次未送达，放弃补发",
+                                    name,
+                                    retry_count - 1,
+                                )
+                                st.pop("pending_recovery", None)
+                                st.pop("recovery_attempt", None)
+                                st.pop("recovery_next_attempt", None)
+                                st.pop("recovery_retry_count", None)
+                            else:
+                                st["recovery_retry_count"] = retry_count
+                                st["recovery_next_attempt"] = now + retry_delay(
+                                    retry_count
+                                )
             if alerting:
                 stale = bool(st.pop("stale", False))
                 # Only announce the recovery for an episode that was actually
@@ -1265,6 +1312,12 @@ class AlertEngine:
             # sent, and the audit did not point out the contradiction.
             logger.info("掉线广播已跳过：掉线/恢复通知开关处于关闭状态")
             return
+        if not self.recover_notify:
+            # The broadcast is just another delivery channel for the same
+            # recovery notice: when "恢复时发送通知" is off, posting it to
+            # every group contradicts the setting (v2.20.5).
+            logger.info("掉线广播已跳过：恢复通知开关处于关闭状态")
+            return
         self_id = str(cfg_get(self.config, "alerts.self_id", "") or "").strip()
         client = _get_aiocqhttp_client(
             self.plugin.context, self.platform_id, self_id or None
@@ -1318,12 +1371,18 @@ class AlertEngine:
         template = str(cfg.get("template") or BROADCAST_TEMPLATE_DEFAULT)
         offline_text = _fmt_ts(offline_ts, self.config)
         recover_text = _now_text(self.config)
-        sent = failed = considered = 0
+        sent = failed = uncertain = considered = 0
+        consecutive_failures = 0
         for group in groups:
             group_id = (
                 str(group.get("group_id") or "") if isinstance(group, dict) else ""
             )
             if not group_id or group_id in exclude or group_id in notify_groups:
+                continue
+            if group_id in self._broadcast_done:
+                # A flapping connection restarted the broadcast from the
+                # first group after a cancel(), so groups that already saw
+                # the notice got a second copy (v2.20.5).
                 continue
             considered += 1
             if considered > max_groups:
@@ -1352,19 +1411,61 @@ class AlertEngine:
                 )
             except Exception:
                 failed += 1
+                consecutive_failures += 1
                 logger.debug("掉线广播群 %s 发送异常", group_id, exc_info=True)
+                if consecutive_failures >= 5:
+                    logger.warning(
+                        "掉线广播：连续 %d 个群发送失败，疑似限流/风控，已中止本轮",
+                        consecutive_failures,
+                    )
+                    break
                 continue
             if self._delivered(result):
                 sent += 1
+                consecutive_failures = 0
+                if len(self._broadcast_done) > 5000:
+                    # Bound the in-memory set; it only needs to cover the
+                    # current outage window.
+                    self._broadcast_done.clear()
+                self._broadcast_done.add(group_id)
             else:
                 failed += 1
+                if isinstance(result, DeliveryResult) and result.uncertain_targets:
+                    uncertain += 1
+                consecutive_failures += 1
+                if consecutive_failures >= 5:
+                    logger.warning(
+                        "掉线广播：连续 %d 个群发送失败，疑似限流/风控，已中止本轮",
+                        consecutive_failures,
+                    )
+                    break
         logger.info(
-            "掉线恢复广播完成：成功 %d / 失败 %d（扫描 %d 个群，排除 %d 个）",
+            "掉线恢复广播完成：成功 %d / 未确认 %d / 失败 %d（扫描 %d 个群，排除 %d 个）",
             sent,
+            uncertain,
             failed,
             len(groups),
             max(0, len(groups) - considered),
         )
+
+    def _transport_offline(self) -> bool:
+        """True when the bot connection is currently latched offline.
+
+        Used by every retry ladder: a failed send while the channel is down
+        proves nothing about the alert, so the finite retry budget must not
+        be consumed. Without this, a long outage burned all retries and the
+        recovery notice was the only message the user ever received
+        (v2.20.5).
+        """
+
+        try:
+            alerts_state = self.state.get("alerts", {}) or {}
+            if not isinstance(alerts_state, dict):
+                return False
+            offline = alerts_state.get("offline")
+            return bool(isinstance(offline, dict) and offline.get("alerting"))
+        except Exception:
+            return False
 
     async def _check_offline(self) -> None:
         # Without a self_id filter a multi-bot instance could probe another
@@ -1413,7 +1514,17 @@ class AlertEngine:
             logger.debug("OneBot get_status 调用失败（%s）: %s", name, exc)
 
         alerts = self.state.setdefault("alerts", {})
-        st = alerts.setdefault("offline", {})
+        if not isinstance(alerts, dict):
+            # A hand-edited state.json can hold a scalar/list here; the
+            # section helper replaces it with a dict, keeping the sample loop
+            # alive (every other section had this guard, this one and
+            # provider_watch were missing it).
+            with self.state.section("alerts") as alerts_live:
+                alerts = alerts_live
+        st = alerts.get("offline")
+        if not isinstance(st, dict):
+            st = {}
+            alerts["offline"] = st
         now = time.time()
         count = _safe_int(st.get("count"))
         unreachable = _safe_int(st.get("unreachable"))
@@ -1483,6 +1594,15 @@ class AlertEngine:
                 # -- without any context -- contradicts that. Drop it (the
                 # event log has the full story), same as the recovery notice.
                 queued = queued_raw if (self.offline_notify and not stale) else None
+                if queued:
+                    # The queued text was written while offline and ends with
+                    # "若本条未能送达，将在连接恢复后补发。" Sending that
+                    # sentence *as* the补发 message read like a contradiction,
+                    # so rewrite it in the delivered copy (v2.20.5).
+                    queued = str(queued).replace(
+                        "若本条未能送达，将在连接恢复后补发。",
+                        "（本条为补发：离线期间无法送达）",
+                    )
                 st["alerting"] = False
                 st["since"] = 0
                 parts: list[str] = []
@@ -1501,6 +1621,12 @@ class AlertEngine:
                         text += "\n（离线期间有一条告警未能送达，现已恢复）"
                     parts.append(text)
                 st["pending_alert"] = False
+                # Persist the closed episode *before* the slow send/broadcast:
+                # a reload or crash during the 20-60 s delivery used to leave
+                # "alerting=True" on disk, so the next start replayed the whole
+                # recovery (a second notice, a second 17-group broadcast and a
+                # second event) with a wrong duration (v2.20.5).
+                self.state.save()
                 # The event log does not depend on the notification pref.
                 self._record_event(
                     "offline",
@@ -1508,6 +1634,17 @@ class AlertEngine:
                     f"离线时长 {format_duration(duration)}",
                     "recovery",
                 )
+                # Reports that failed only because the bot was offline are
+                # queued instead of being given up; retry the newest one now
+                # that the channel is back (v2.20.5).
+                try:
+                    report = getattr(self.plugin, "daily_report", None)
+                    if report is not None and hasattr(
+                        report, "notify_offline_recovery"
+                    ):
+                        report.notify_offline_recovery()
+                except Exception:
+                    logger.debug("安排日报补发失败", exc_info=True)
                 if not stale:
                     # A hundred-group broadcast with a 3s gap can take five
                     # minutes; running it inline stalled every later sample
@@ -1549,7 +1686,7 @@ class AlertEngine:
             # counter is left untouched instead of reset, so alternating
             # timeouts cannot keep the alert from ever firing (v2.20.2).
             st["unreachable"] = unreachable + 1
-            if unreachable + 1 >= OFFLINE_ALERT_SAMPLES * 3 and not st.get(
+            if unreachable + 1 >= UNREACHABLE_ALERT_SAMPLES and not st.get(
                 "unreachable_warned"
             ):
                 st["unreachable_warned"] = True
@@ -1557,6 +1694,23 @@ class AlertEngine:
                     "OneBot 状态查询连续 %d 次失败，暂时无法确认 Bot 在线状态",
                     unreachable + 1,
                 )
+                if self.offline_notify:
+                    # Silence was the old behaviour: a half-open connection
+                    # blocked every alert for hours while the log showed a
+                    # single warning (v2.20.5).
+                    minutes = max(1, round((unreachable + 1) * self.interval / 60))
+                    text = (
+                        "⚠️ 无法确认 Bot 在线状态\n"
+                        "──────────────\n"
+                        f"主机: {self._hostname()}\n"
+                        f"连续 {unreachable + 1} 次状态查询失败（约 {minutes} 分钟）\n"
+                        f"时间: {_now_text(self.config)}\n"
+                        "连接可能已断开但未正常关闭，请检查 NapCat / QQ 登录状态。"
+                    )
+                    try:
+                        await self._send(text, kind="offline")
+                    except Exception:
+                        logger.debug("无法确认在线状态的通知发送失败", exc_info=True)
             return
 
         st["unreachable"] = 0
@@ -1568,7 +1722,10 @@ class AlertEngine:
             st["count"] = count
         if not st.get("alerting") and count >= OFFLINE_ALERT_SAMPLES:
             st["alerting"] = True
-            st["since"] = now
+            # Backdate by one sampling interval: the first offline sample can
+            # be up to ``interval`` seconds after the real disconnect, and the
+            # old ``since`` made the reported outage short by that much.
+            st["since"] = max(0.0, now - max(0, self.interval))
             st["count"] = 0
             if not self.offline_notify:
                 # Keep the incident in the event log; only the push is off.
@@ -1664,6 +1821,46 @@ class AlertEngine:
         watch = alerts_state.setdefault("provider_watch", {})
         alerting = bool(watch.get("alerting"))
         last_alert_ts = _safe_float(watch.get("last_alert_ts"))
+
+        # An alert push that failed while the channel was down is retried here
+        # instead of waiting for the recovery notice (v2.20.5).
+        queued_alert = str(watch.get("pending_alert_text") or "")
+        if (
+            queued_alert
+            and alerting
+            and streak >= self.provider_watch_threshold
+            and now >= _safe_float(watch.get("next_attempt"))
+        ):
+            result = await self._send(queued_alert, source="provider", kind="provider")
+            if self._delivered(result):
+                watch.pop("pending_alert_text", None)
+                watch.pop("next_attempt", None)
+                watch.pop("alert_retry_count", None)
+                watch["alerted"] = True
+                watch["send_failed"] = False
+                self._record_event(
+                    "provider",
+                    "LLM 服务",
+                    f"连续 {streak} 次 LLM 调用失败",
+                    "alert",
+                )
+                logger.warning("LLM 服务连续失败 %d 次，补发告警成功", streak)
+            elif self._transport_offline():
+                watch["next_attempt"] = now + 900
+            else:
+                attempts = _safe_int(watch.get("alert_retry_count")) + 1
+                watch["alert_retry_count"] = attempts
+                if attempts >= 3:
+                    watch.pop("pending_alert_text", None)
+                    watch.pop("next_attempt", None)
+                    watch["alerted"] = True
+                    watch["send_failed"] = True
+                    logger.warning(
+                        "LLM 服务告警连续发送失败 3 次，停止重试（恢复时说明）"
+                    )
+                else:
+                    watch["next_attempt"] = now + retry_delay(attempts)
+            self.state.save()
 
         # Retries for a recovery notice whose send failed earlier.
         pending_text = str(watch.get("pending_recovery") or "")
@@ -1781,7 +1978,21 @@ class AlertEngine:
                     f"连续 {streak} 次 LLM 调用失败（推送失败）",
                     "failed",
                 )
-                logger.warning("LLM 服务告警发送失败，恢复时将一并通知")
+                if self._transport_offline():
+                    # Keep the alert queued instead of giving up: the channel
+                    # is down, so this failure says nothing about the LLM
+                    # outage. ``alerted`` stays False so the recovery notice
+                    # keeps the "此前未能送达" note and the retry below can
+                    # deliver the alert itself (v2.20.5).
+                    watch["alerted"] = False
+                    watch["pending_alert_text"] = text
+                    watch["next_attempt"] = now + 900
+                    self.state.save()
+                    logger.warning(
+                        "LLM 服务告警发送失败（Bot 连接不可用），已排队，恢复后补发"
+                    )
+                else:
+                    logger.warning("LLM 服务告警发送失败，恢复时将一并通知")
             return
 
         if alerting and latest == "completed":

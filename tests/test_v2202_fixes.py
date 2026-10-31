@@ -33,13 +33,15 @@ def test_framework_action_failed_is_definitely_not_sent() -> None:
 
     service = DeliveryService(None, _StateStub(), lambda: None, lambda payload: payload)
     service.context = _Context()
-    sent, uncertain = asyncio.run(
+    sent, uncertain, offline = asyncio.run(
         service._send_via_astrbot("default:GroupMessage:1", {})
     )
     assert sent is False
     # ActionFailed means the action was refused: nothing reached the chat, so
-    # this must not be treated as "maybe delivered" (v2.20.2).
+    # this must not be treated as "maybe delivered" (v2.20.2). It is also not
+    # a transport outage -- the channel answered.
     assert uncertain is False
+    assert offline is False
 
 
 def test_framework_timeout_stays_uncertain() -> None:
@@ -57,13 +59,15 @@ def test_framework_timeout_stays_uncertain() -> None:
 
     asyncio.wait_for = short_wait  # type: ignore[assignment]
     try:
-        sent, uncertain = asyncio.run(
+        sent, uncertain, offline = asyncio.run(
             service._send_via_astrbot("default:GroupMessage:1", {})
         )
     finally:
         asyncio.wait_for = original  # type: ignore[assignment]
     assert sent is False
     assert uncertain is True
+    # A timeout may have delivered the message, so it is not an outage.
+    assert offline is False
 
 
 # ---------------------------------------------------------------------------

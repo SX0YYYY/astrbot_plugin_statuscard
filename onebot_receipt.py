@@ -72,7 +72,13 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
     """
 
     if payload is None:
-        return OnebotReceipt(ok=True, retcode=0, attempted=True)
+        # A successful adapter may return None, but so may one that silently
+        # dropped the request. ``ok=True`` here turned an unverified send into
+        # a clean delivery and put the alert into its cooldown, which meant a
+        # permanent silence for that fault. Count it as "uncertain": the
+        # message may have arrived, so it is never repeated, but the failure
+        # stays visible (v2.20.5).
+        return OnebotReceipt(ok=False, error="empty response", attempted=True)
     if not isinstance(payload, dict):
         return OnebotReceipt(
             ok=False, error=f"unexpected response: {payload!r}", attempted=True
@@ -207,9 +213,11 @@ def is_action_rejected(exc: BaseException) -> bool:
     """
 
     name = type(exc).__name__
-    if "ActionFailed" in name:
-        return True
-    return "action failed" in str(exc).lower()
+    # Do not fall back to a free-text "action failed" substring: any transport
+    # error whose message happens to contain those words was then classified
+    # as "definitely not sent" and re-sent, which risks a duplicate message
+    # the module otherwise never allows. Exception type only (v2.20.5).
+    return "ActionFailed" in name
 
 
 def should_retry_send(exc: BaseException) -> bool:

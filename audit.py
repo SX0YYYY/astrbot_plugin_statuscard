@@ -308,6 +308,19 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "掉线检测不会运行，广播也不会触发。请先打开告警总开关。",
             )
         )
+    if cfg_bool(config, "alerts.provider_watch.enabled", False) and not cfg_bool(
+        config, "alerts.enabled", False
+    ):
+        # The provider check runs inside the alert sampling loop, so enabling
+        # only "LLM 服务告警" silently does nothing (v2.20.5).
+        issues.append(
+            AuditIssue(
+                "warning",
+                "provider_watch_requires_alerts",
+                "「LLM 服务告警」已开启，但「启用资源与掉线告警」未开启："
+                "LLM 质量检查不会运行，告警也不会触发。请先打开告警总开关。",
+            )
+        )
     # A hand-edited schedule like "9:00" (or "25:00") only logs a warning and
     # the task never fires, while the diagnostics still show the raw value.
     schedule_defaults = {
@@ -470,12 +483,30 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     # The per-module target lists are legacy: they still work (and win over
     # the shared default), but they are hidden behind "show advanced" now.
     # Surface them so a user who forgot about them knows why that module
-    # ignores the default target.
+    # ignores the default target. A notification-center rule for the same
+    # kind takes over (the legacy list is then ignored), so do not warn in
+    # that case (v2.20.5).
+    covered_kinds: set[str] = set()
+    raw_rules = cfg_get(config, "notify.rules", None)
+    if isinstance(raw_rules, list):
+        for rule in raw_rules:
+            if not isinstance(rule, dict) or not cfg_bool(rule, "enabled", True):
+                continue
+            if not str(cfg_get(rule, "target", "") or "").strip():
+                continue
+            for kind in cfg_get(rule, "kinds", []) or []:
+                covered_kinds.add(str(kind).strip().lower())
     legacy_scopes = []
-    for key, label in (
-        ("monitors.targets", "服务监测"),
-        ("daily_report.targets", "日报/周报"),
+    for key, label, kinds in (
+        ("monitors.targets", "服务监测", {"service"}),
+        (
+            "daily_report.targets",
+            "日报/周报",
+            {"daily", "weekly", "daily_image"},
+        ),
     ):
+        if covered_kinds & kinds:
+            continue
         raw = cfg_get(config, key, []) or []
         if isinstance(raw, str):
             raw = [raw]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
@@ -29,6 +30,7 @@ from .collectors import (
     effective_media_source,
     fetch_avatar_bytes,
     notify_rules_active,
+    now_in_timezone,
     resolve_targets,
     uploaded_file_path,
 )
@@ -122,6 +124,7 @@ class StatusCardPlugin(Star):
         # Path.exists() on user-configured mount points, which blocks the
         # event loop on an unreachable NFS host (v2.20.0).
         self._audit_issues: list[AuditIssue] = []
+        self._audit_failed = False
         self._check_config_permissions()
 
     def audit_issues(self) -> list[AuditIssue]:
@@ -256,16 +259,28 @@ class StatusCardPlugin(Star):
         self.state.save()
 
     async def initialize(self):
+        self._audit_failed = False
         try:
-            self._audit_issues = await asyncio.to_thread(
-                run_audit, self.config, monitor=self.monitor
+            # Bound the audit: ``display.disk_paths`` pointing at an
+            # unreachable NFS/CIFS mount blocks ``Path.exists()`` in the
+            # worker thread, and the old code awaited it forever -- the
+            # plugin looked loaded while every background task stayed off
+            # (same symptom as the v2.20.3 state-shape crash). v2.20.5.
+            self._audit_issues = await asyncio.wait_for(
+                asyncio.to_thread(run_audit, self.config, monitor=self.monitor),
+                timeout=15,
             )
+        except TimeoutError:
+            logger.warning("配置体检超过 15 秒，已跳过（不影响插件启动）")
+            self._audit_issues = []
+            self._audit_failed = True
         except Exception:
             # A hand-edited config (for example a scalar notify.rules) used to
             # raise here and abort initialization: every background task stayed
             # off while the plugin still looked loaded.
             logger.exception("配置体检失败，已跳过（不影响插件启动）")
             self._audit_issues = []
+            self._audit_failed = True
         # Isolate each component start, mirroring terminate(): one component
         # raising used to abort initialize(), which made AstrBot unload the
         # plugin without calling terminate() -- the already-started sampling
@@ -290,6 +305,11 @@ class StatusCardPlugin(Star):
                     logger.info("配置体检[%s] %s", issue.level, issue.message)
                 else:
                     logger.warning("配置体检[%s] %s", issue.level, issue.message)
+        elif self._audit_failed:
+            # "No issues" and "the audit could not run" are different: the
+            # old code printed "未发现问题" after swallowing an exception or a
+            # timeout, which is the most misleading state there is (v2.20.5).
+            logger.warning("配置体检未完成（执行失败或超时），本次未检查配置")
         else:
             logger.info("配置体检：未发现问题")
         logger.info(
@@ -568,7 +588,9 @@ class StatusCardPlugin(Star):
                     "daily_report.theme 值 %r 不是 light/dark，已回退 light", theme_raw
                 )
             theme = "light"
-        html = build_report_html(view, render_width=logical_width, theme=theme)
+        html = await asyncio.to_thread(
+            build_report_html, view, render_width=logical_width, theme=theme
+        )
         timeout = max(
             30,
             min(600, cfg_int(self.config, "daily_report.render_timeout", 180)),
@@ -1120,13 +1142,30 @@ class StatusCardPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("预览日报")
     async def cmd_preview_report(self, event: AstrMessageEvent):
-        """Build and send yesterday's daily report to the current chat."""
+        """Build and send yesterday's daily report to the current chat.
+
+        Accepts an optional ``YYYY-MM-DD`` to re-send an older report (for
+        example one that was never delivered while the bot was offline).
+        """
         event.should_call_llm(False)
         event.stop_event()
         # Rendering takes seconds; acknowledge immediately like 查看状态 does.
         yield event.plain_result(tr(self.config, "report_generating"))
+        day_arg = None
+        for token in str(getattr(event, "message_str", "") or "").split():
+            try:
+                parsed = date.fromisoformat(token)
+            except ValueError:
+                continue
+            try:
+                today = now_in_timezone(self.config).date()
+            except Exception:
+                today = date.today()
+            if parsed <= today:
+                day_arg = parsed.isoformat()
+                break
         _ok, detail = await self.daily_report.preview(
-            getattr(event, "unified_msg_origin", None)
+            getattr(event, "unified_msg_origin", None), day=day_arg
         )
         yield event.plain_result(detail)
 

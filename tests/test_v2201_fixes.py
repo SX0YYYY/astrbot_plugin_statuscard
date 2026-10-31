@@ -78,7 +78,7 @@ def _service(monkeypatch, fallback):
 
 def test_delivery_rejected_falls_back_to_framework(monkeypatch) -> None:
     async def fallback():
-        return True, False
+        return True, False, False
 
     service = _service(monkeypatch, fallback)
     result = asyncio.run(service.send(["default:GroupMessage:1"], {"text": "x"}))
@@ -86,11 +86,12 @@ def test_delivery_rejected_falls_back_to_framework(monkeypatch) -> None:
     assert result.ok_targets == ["default:GroupMessage:1"]
     assert result.failed_targets == []
     assert result.rejected_targets == []
+    assert result.transport_offline is False
 
 
 def test_delivery_rejected_and_fallback_failed_is_retryable(monkeypatch) -> None:
     async def fallback():
-        return False, False
+        return False, False, False
 
     service = _service(monkeypatch, fallback)
     result = asyncio.run(service.send(["default:GroupMessage:1"], {"text": "x"}))
@@ -385,15 +386,21 @@ def test_all_interface_fallback_skips_month_accounting(
     tmp_path: Path, monkeypatch
 ) -> None:
     import time as time_module
+    from datetime import datetime
     from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
 
     from astrbot_plugin_statuscard import sampler as sampler_module
     from astrbot_plugin_statuscard.sampler import Sampler
     from astrbot_plugin_statuscard.state import StateStore
 
+    # Use the *current* month: a hardcoded "2026-10" made this test fail on
+    # the first day of the next month, because the sampler correctly rolls the
+    # monthly counters over (v2.20.5, CI must stay green across month edges).
+    current_month = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
     store = StateStore(tmp_path / "state.json")
     store.data["net"] = {
-        "month": "2026-10",
+        "month": current_month,
         "month_up": 100,
         "month_down": 200,
         "last_ts": time_module.time() - 60,

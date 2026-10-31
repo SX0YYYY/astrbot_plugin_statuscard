@@ -678,6 +678,7 @@ class ReportStore:
         resource_days: int = 30,
         event_days: int = 90,
         now: int | None = None,
+        local_day_start: float | None = None,
     ) -> None:
         now = int(now if now is not None else time.time())
         # Align the cutoff to a local-day boundary. Cutting at "now minus N
@@ -685,7 +686,17 @@ class ReportStore:
         # whenever the cleanup ran late in the evening, so the "30-day"
         # chart silently started with a partial day that drifted by up to 24
         # hours depending on the cleanup time.
-        day_start = now - (now % 86400)
+        if local_day_start is not None:
+            try:
+                day_start = int(local_day_start)
+            except (TypeError, ValueError):
+                day_start = now - (now % 86400)
+        else:
+            # ``now % 86400`` is the UTC day boundary, which is 08:00 in
+            # Asia/Shanghai: the oldest kept day had only 16 hours of samples
+            # and the chart showed a fake dip. Callers pass the
+            # display-timezone midnight when they have it (v2.20.5).
+            day_start = now - (now % 86400)
         resource_cutoff = day_start - max(1, resource_days) * 86400
         event_cutoff = day_start - max(1, event_days) * 86400
         self._write(

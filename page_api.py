@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import re
 import socket
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
@@ -45,6 +46,7 @@ from .utils import (
     mask_umo,
     normalize_targets,
     redact_url,
+    safe_float,
     safe_int,
 )
 from .version import __version__, resolve_astrbot_version
@@ -156,6 +158,10 @@ class PageApi:
         self._reports_cache: tuple[float, dict[str, Any], tuple] | None = None
         self._reports_cache_seconds = 60.0
         self._reports_build_inflight = False
+        # Per-kind verify cooldown: the dashboard buttons used to be able to
+        # send a real message every click, so a stuck retry loop in the page
+        # could spam the chat (v2.20.5).
+        self._verify_last: dict[str, float] = {}
         # Strong references for the fire-and-forget recovery tasks: asyncio
         # may garbage-collect an unreferenced task mid-flight.
         self._recovery_tasks: set[asyncio.Task] = set()
@@ -257,11 +263,11 @@ class PageApi:
         if redacted:
             return {"redacted": True}
         return {
-            "up_rate": round(float(net.get("up_rate") or 0.0), 1),
-            "down_rate": round(float(net.get("down_rate") or 0.0), 1),
+            "up_rate": round(safe_float(net.get("up_rate")), 1),
+            "down_rate": round(safe_float(net.get("down_rate")), 1),
             "month_up_text": format_bytes(net.get("month_up")),
             "month_down_text": format_bytes(net.get("month_down")),
-            "month": net.get("month") or "",
+            "month": str(net.get("month") or ""),
         }
 
     def _platform(self) -> str:
@@ -402,6 +408,11 @@ class PageApi:
         mem = memory_stat()
         swap = swap_stat()
         net = plugin.state.get("net", {}) or {}
+        if not isinstance(net, dict):
+            # A hand-edited state.json used to turn the whole overview into a
+            # 500 ("'str' object has no attribute 'get'"); the collected
+            # layers already treat a broken shape as empty (v2.20.5).
+            net = {}
         redact = self._redact()
         network_view = self._network_view("network" in redact, net)
         load1: float | None = None
@@ -546,6 +557,17 @@ class PageApi:
         """
 
         kind = str(await _request_value("kind", "monitors")).lower()
+        if kind not in ("targets", "monitors", "webhook"):
+            return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+        now = time.time()
+        if now - self._verify_last.get(kind, 0.0) < 30:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "验证过于频繁，请 30 秒后再试（避免重复发送消息）",
+                }
+            )
+        self._verify_last[kind] = now
         plugin = self.plugin
         if kind == "targets":
             platform_id = str(
@@ -881,7 +903,20 @@ class PageApi:
         key = str(_query_value("range", "24h")).lower()
         # Echo the range that was actually used, never an unvalidated input.
         if key not in RANGE_SECONDS:
-            key = "24h"
+            # An unsupported but meaningful value ("90d") used to fall back to
+            # the *shortest* window; map it to the closest supported one so a
+            # hand-written link shows roughly what it asked for (v2.20.5).
+            match = re.match(r"^(\d+)\s*([hd])$", key)
+            if match:
+                seconds = int(match.group(1)) * (
+                    86400 if match.group(2) == "d" else 3600
+                )
+                key = min(
+                    RANGE_SECONDS,
+                    key=lambda item: abs(RANGE_SECONDS[item] - seconds),
+                )
+            else:
+                key = "24h"
         gate = self._db_unavailable_payload()
         if gate:
             return jsonify(
@@ -948,12 +983,16 @@ class PageApi:
                 network_note_kind = "db"
             else:
                 net = self.plugin.state.get("net", {}) or {}
+                if not isinstance(net, dict):
+                    net = {}
                 history = net.get("history") or []
+                if not isinstance(history, list):
+                    history = []
                 net_points = [
                     {
-                        "ts": int(item[0]),
-                        "up": float(item[1]),
-                        "down": float(item[2]),
+                        "ts": safe_int(item[0]),
+                        "up": safe_float(item[1]),
+                        "down": safe_float(item[2]),
                     }
                     for item in history[-60:]
                     if isinstance(item, (list, tuple)) and len(item) >= 3
@@ -1097,6 +1136,20 @@ class PageApi:
             return jsonify({**gate, "day": None})
         now_ts = time.time()
         fresh = str(_query_value("fresh", "0")) == "1"
+        # ``day`` lets the dashboard look at an older report (for example one
+        # that was never delivered because the bot was offline). Invalid or
+        # future dates fall back to the default "latest available" report.
+        raw_day = str(_query_value("day", "") or "").strip()
+        day_arg: str | None = None
+        if raw_day:
+            try:
+                parsed_day = date.fromisoformat(raw_day)
+            except ValueError:
+                parsed_day = None
+            if parsed_day is not None:
+                today = now_in_timezone(plugin.config).date()
+                if parsed_day <= today:
+                    day_arg = parsed_day.isoformat()
         # The cache key carries the date, the redaction rules and the report
         # content selection: a single slot used to serve yesterday's report
         # right after midnight, an unredacted payload for a minute after
@@ -1114,6 +1167,7 @@ class PageApi:
             tuple(sorted(self._redact())),
             repr(sections_cfg),
             history_days,
+            day_arg or "",
         )
         cached = self._reports_cache
         if (
@@ -1128,12 +1182,17 @@ class PageApi:
             return jsonify(copy.deepcopy(cached[1]))
         if self._reports_build_inflight and cached and cached[2] == cache_key:
             # A concurrent miss is already building the same payload; serve
-            # the stale copy instead of building it twice (v2.20.0).
-            return jsonify(copy.deepcopy(cached[1]))
+            # the stale copy instead of building it twice (v2.20.0). Mark it
+            # so the page says "still refreshing" instead of claiming the
+            # data was just updated (v2.20.5).
+            stale = copy.deepcopy(cached[1])
+            if isinstance(stale, dict):
+                stale["stale"] = True
+            return jsonify(stale)
         self._reports_build_inflight = True
         try:
             return await self._build_reports_payload(
-                now_ts, cache_key, sections_cfg, fresh
+                now_ts, cache_key, sections_cfg, fresh, day_arg
             )
         finally:
             self._reports_build_inflight = False
@@ -1144,6 +1203,7 @@ class PageApi:
         cache_key: tuple,
         sections_cfg: Any,
         fresh: bool,
+        day_arg: str | None = None,
     ):
         view: dict[str, Any] = {}
         try:
@@ -1158,7 +1218,7 @@ class PageApi:
             sections = sections_cfg
             view = await asyncio.to_thread(
                 builder.build,
-                day=None,
+                day=day_arg,
                 history_days=history_days,
                 sections=sections,
                 meta={

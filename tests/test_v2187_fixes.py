@@ -316,21 +316,29 @@ def test_state_backup_survives_second_corruption(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_schedule_retry_keeps_none_day(tmp_path: Path) -> None:
+def test_schedule_retry_resolves_none_day(tmp_path: Path) -> None:
+    """A scheduled failure queues yesterday's report day, not a literal None.
+
+    v2.20.5 resolves ``None`` when the retry is queued: a retry restored after
+    a midnight crossing used to rebuild a *new* "yesterday", so the retry
+    budget was spent on a different report than the one that failed.
+    """
+
     store = ReportStore(tmp_path / "report.db")
     state = StateStore(tmp_path / "state.json")
     plugin = _Plugin()
     plugin.state = state
     reporter = DailyReporter(plugin, store, {"daily_report": {"enabled": True}})
 
+    expected = reporter._default_report_day()
     assert reporter._schedule_retry(None) is True
     assert reporter._pending_retry is not None
-    assert reporter._pending_retry[0] is None
+    assert reporter._pending_retry[0] == expected
 
     restored = DailyReporter(plugin, store, {"daily_report": {"enabled": True}})
     restored._restore_delivery_state()
     assert restored._pending_retry is not None
-    assert restored._pending_retry[0] is None
+    assert restored._pending_retry[0] == expected
 
 
 def test_report_retry_uses_resolved_day(monkeypatch, tmp_path: Path) -> None:

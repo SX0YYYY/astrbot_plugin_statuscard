@@ -14,6 +14,8 @@
     overviewSeq: 0,
     reportsSeq: 0,
     exporting: false,
+    reportDay: null,
+    reportDayShown: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1149,8 +1151,9 @@
       text = text.replace(/\r\n|\r|\n/g, " ");
       // Excel/WPS executes a cell starting with =,+,-,@ as a formula, and
       // event details can carry text returned by probed services. The
-      // leading pipe covers the legacy DDE vector (v2.20.0).
-      if (/^[=+\-@\t|]/.test(text)) text = "'" + text;
+      // leading pipe covers the legacy DDE vector (v2.20.0). Leading spaces
+      // and full-width variants bypassed the check (v2.20.5).
+      if (/^[\s\u3000]*[=+\-@\t|＝＋－＠]/.test(text)) text = "'" + text;
       return /[",]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     };
     const lines = [headers.join(",")];
@@ -1193,7 +1196,7 @@
         : noteKind === "db"
           ? t(
               "network_note_db",
-              "网络折线来自日报采样，与资源趋势同一时间窗口。",
+              "网络折线来自日报采样（按所选范围自动抽样），与资源趋势同一时间窗口。",
             )
           : noteKind === "state"
             ? // The backend note already carries the full sentence; joining a
@@ -1205,7 +1208,21 @@
     }
     const points = data.points || [];
     $("history-range-note").textContent = historyRangeNote(points, range);
-    const labels = points.map((point) => labelForTs(point.ts, range));
+    // A 24h window that crosses midnight must put the date on the axis
+    // labels; the old call omitted the flag and the axis read
+    // "10:00 16:00 22:00 04:00 10:00" (v2.20.5).
+    const dayKey = (ts) => {
+      const parsed = safeDate(ts);
+      return parsed
+        ? parsed.toLocaleDateString(currentLocale(), { timeZone: tzName() })
+        : "";
+    };
+    const firstTs = points.length ? points[0].ts : 0;
+    const lastTs = points.length ? points[points.length - 1].ts : 0;
+    const crossesDay = Boolean(firstTs && lastTs && dayKey(firstTs) !== dayKey(lastTs));
+    const labels = points.map((point) =>
+      labelForTs(point.ts, range, crossesDay && range === "24h"),
+    );
     const series = [
       {
         name: "CPU",
@@ -1717,10 +1734,42 @@
     return blocks.join("");
   }
 
+  function shiftReportDay(delta) {
+    const current = state.reportDay || state.reportDayShown;
+    if (!current) return;
+    const parts = String(current).split("-").map(Number);
+    if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value))) return;
+    const parsed = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    if (Number.isNaN(parsed.getTime())) return;
+    parsed.setUTCDate(parsed.getUTCDate() + delta);
+    const next = parsed.toISOString().slice(0, 10);
+    const now = new Date();
+    const yesterday = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1),
+    )
+      .toISOString()
+      .slice(0, 10);
+    if (next > yesterday) return;
+    state.reportDay = next;
+    loadReports(true).catch((error) => {
+      state.reportDay = state.reportDayShown || null;
+      toast(error.message || t("error_load", "加载失败"));
+    });
+  }
+
   async function loadReports(force) {
     const seq = ++state.reportsSeq;
-    const data = await apiGet("reports", force ? { fresh: 1 } : undefined);
+    const params = {};
+    if (force) params.fresh = 1;
+    if (state.reportDay) params.day = state.reportDay;
+    const data = await apiGet(
+      "reports",
+      Object.keys(params).length ? params : undefined,
+    );
     if (seq !== state.reportsSeq) return;
+    // The backend serves the previous payload while another build is in
+    // flight; remember it so the refresh toast does not claim "数据已更新".
+    state.reportsStale = Boolean(data && data.stale);
     if (data.db_unavailable) {
       toast(
         t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
@@ -1738,6 +1787,7 @@
     $("report-day").textContent = data.day
       ? t("report_data_day", "数据日 {day}", { day: data.day })
       : t("report_no_data", "暂无数据");
+    state.reportDayShown = data.day || null;
     // An empty selection used to render as a page of "未开启" values with no
     // explanation of why nothing was built.
     const sectionsEmpty =
@@ -2116,7 +2166,12 @@
         }
       }
       setRefreshState(button, "done");
-      toast(t("refresh_done", "数据已更新"));
+      toast(
+        state.reportsStale
+          ? t("refresh_stale", "已有一次刷新正在进行，当前显示的是上次数据")
+          : t("refresh_done", "数据已更新"),
+      );
+      state.reportsStale = false;
     } catch (error) {
       setRefreshState(button, "failed");
       showPanelError(state.tab, error);
@@ -2174,6 +2229,14 @@
       });
     });
     $("refresh").addEventListener("click", refreshCurrent);
+    // Older reports: a report that was never delivered (bot offline at 21:00)
+    // used to be invisible in the dashboard -- only the newest day existed.
+    // The backend accepts ?day= and the arrows walk backwards from it.
+    ["report-prev", "report-next"].forEach((id, index) => {
+      const button = $(id);
+      if (!button) return;
+      button.addEventListener("click", () => shiftReportDay(index === 0 ? -1 : 1));
+    });
     [
       ["verify-targets", "targets"],
       ["verify-monitors", "monitors"],
