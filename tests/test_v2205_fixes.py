@@ -158,3 +158,38 @@ def test_http_probe_config_typo_is_classified() -> None:
 def test_delivery_result_state_carries_transport_flag() -> None:
     result = DeliveryResult(ok=False, transport_offline=True)
     assert result.as_state()["transport_offline"] is True
+
+
+def test_legacy_given_up_marker_is_migrated(tmp_path: Path) -> None:
+    """An upgrade must not skip the evening's report because of an old marker.
+
+    Before v2.20.5 ``daily_given_up_day`` held the calendar day of the
+    attempt, while the new code compares against the report day. With the
+    live state (given_up=10-31, report day=10-31) the catch-up refused and
+    the 21:00 run was pushed to the next day.
+    """
+
+    from types import SimpleNamespace
+
+    from astrbot_plugin_statuscard.state import StateStore
+
+    state = StateStore(tmp_path / "state.json")
+    state.set(
+        "report_delivery",
+        {
+            "last_sent_day": "2026-10-29",
+            "last_attempt_day": "2026-10-30",
+            "daily_given_up_day": "2026-10-31",
+            "pending_retry_day": "2026-10-31",
+        },
+    )
+    state.save()
+    reporter = DailyReporter(
+        SimpleNamespace(state=state),
+        ReportStore(tmp_path / "report.db"),
+        {"display": {"timezone": "Asia/Shanghai"}},
+    )
+    assert reporter._daily_given_up_day == "2026-10-30"
+    assert reporter._pending_retry_day is None
+    # The old attempt marker names the report day already; it stays.
+    assert reporter._last_attempt_day == "2026-10-30"

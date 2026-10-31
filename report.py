@@ -588,6 +588,31 @@ class DailyReporter:
         self._weekly_pending_recovery_week = (
             saved.get("weekly_pending_recovery_week") or None
         )
+        if _safe_int(saved.get("schema")) < 2:
+            # v2.20.5 migration: the day-scoped markers switched from "the
+            # calendar day of the attempt" to "the report day". An old marker
+            # can equal the report day that is due today, and the catch-up then
+            # skipped the whole evening's report. The old code always wrote
+            # ``daily_given_up_day`` with the calendar day, so shift it back
+            # one; ``last_attempt_day`` may already be a report day (retries
+            # wrote it that way), so only "today" is converted.
+            if self._daily_given_up_day:
+                try:
+                    self._daily_given_up_day = (
+                        date.fromisoformat(self._daily_given_up_day) - timedelta(days=1)
+                    ).isoformat()
+                except ValueError:
+                    self._daily_given_up_day = None
+            today_text = self._today()
+            if self._last_attempt_day == today_text:
+                try:
+                    self._last_attempt_day = (
+                        date.fromisoformat(today_text) - timedelta(days=1)
+                    ).isoformat()
+                except ValueError:
+                    pass
+            # The retry counter key was a calendar day; a fresh budget is the
+            # safe interpretation (handled where the field is assigned below).
         for attribute, key in (
             ("_pending_recovery_since", "pending_recovery_since"),
             ("_weekly_pending_recovery_since", "weekly_pending_recovery_since"),
@@ -601,7 +626,11 @@ class DailyReporter:
         self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
-        self._pending_retry_day = saved.get("pending_retry_day") or None
+        self._pending_retry_day = (
+            None
+            if _safe_int(saved.get("schema")) < 2
+            else (saved.get("pending_retry_day") or None)
+        )
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
         self._weekly_pending_report_day = saved.get("weekly_pending_report_day") or None
         self._pending_image_retry_report_day = (
@@ -675,6 +704,7 @@ class DailyReporter:
                     "last_sent_day": self._last_sent_day,
                     "last_attempt_day": self._last_attempt_day,
                     "last_attempt_wall_day": self._last_attempt_wall_day,
+                    "schema": 2,
                     "daily_given_up_day": self._daily_given_up_day,
                     "pending_recovery_day": getattr(
                         self, "_pending_recovery_day", None
