@@ -641,6 +641,12 @@ async def _probe_websites(sites: list[WebsiteTarget]) -> list[ConnTest]:
             # Return as soon as the headers are in. The body used to be read
             # up to 256 KB and then thrown away (nothing consumes ``reason``),
             # which inflated the reported "delay" with the transfer time.
+            #
+            # The per-request timeout REPLACES the client's default, so it
+            # must never be ``None``: httpx would then erase the bounded
+            # client timeout (connect/read/write/pool all become unbounded)
+            # and the probe could hang forever. ``site.timeout`` is clamped
+            # to 1-15 s in ``_normalize_website_targets``.
             async with cli.stream("GET", site.url, timeout=site.timeout) as resp:
                 return resp.status_code, resp.reason_phrase or "OK"
 
@@ -663,7 +669,15 @@ async def _probe_websites(sites: list[WebsiteTarget]) -> list[ConnTest]:
                 error=f"{exc.__class__.__name__}: {exc}",
             )
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as cli:
+    # The client-level timeout is the pool-wide default for anything that
+    # forgets to pass one. It used to be ``None`` (no timeout at any phase),
+    # which left the outer ``asyncio.wait_for`` as the only line of defence:
+    # a request that ever went out without a per-request timeout could hang
+    # the whole probe. The service monitor already used a bounded default
+    # for the same reason (v2.20.12, marketplace review feedback).
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=httpx.Timeout(30.0)
+    ) as cli:
         return await asyncio.gather(*(probe(site, cli) for site in sites))
 
 
@@ -1739,8 +1753,16 @@ async def fetch_avatar_bytes(
         return cached
 
     async def _download() -> bytes:
+        # The timeout is spelled out per phase so it is obvious that the
+        # read phase is counted PER CHUNK: a server that sends the headers
+        # and then drips the body keeps the read alive far beyond 5
+        # seconds. The outer wait_for below is the real bound for the whole
+        # download (v2.20.13).
         async with (
-            httpx.AsyncClient(follow_redirects=True, timeout=5) as cli,
+            httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0),
+            ) as cli,
             cli.stream("GET", url) as resp,
         ):
             resp.raise_for_status()

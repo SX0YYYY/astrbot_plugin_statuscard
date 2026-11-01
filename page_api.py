@@ -748,13 +748,25 @@ class PageApi:
             token = str(cfg_get(cfg, "token", "") or "")
             headers = {"Authorization": f"Bearer {token}"} if token else {}
             try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.post(
-                        f"http://{host}:{port}{path}",
-                        json={"message": "🔔 Komari Webhook 链路验证（看板模拟事件）"},
-                        headers=headers,
-                    )
-                status = resp.status_code
+                # httpx's read timeout is counted PER CHUNK, not for the
+                # whole response: a server that sends the headers and then
+                # drips the body one byte at a time keeps the read alive
+                # forever, and ``client.post`` reads the entire body. The
+                # client timeout therefore does not bound the request --
+                # only an outer wait_for does (the same reasoning as the
+                # avatar download in collectors.py).
+                async def _post() -> int:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        resp = await client.post(
+                            f"http://{host}:{port}{path}",
+                            json={
+                                "message": "🔔 Komari Webhook 链路验证（看板模拟事件）"
+                            },
+                            headers=headers,
+                        )
+                        return resp.status_code
+
+                status = await asyncio.wait_for(_post(), timeout=15)
             except Exception as exc:
                 return jsonify(
                     {

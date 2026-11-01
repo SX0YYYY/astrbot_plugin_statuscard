@@ -995,3 +995,91 @@ def test_an_invalid_send_time_never_targets_an_undue_report(
         )
         due = reporter._latest_due_report_day()
         assert due < "2026-10-31", (broken, due)
+
+
+def test_the_website_probe_client_has_a_bounded_timeout() -> None:
+    """The pool-wide default must not be ``None``.
+
+    ``httpx`` reads ``timeout=None`` as "no timeout at any phase". The
+    per-request timeout did cover the request, but the outer
+    ``asyncio.wait_for`` was then the only thing standing between a
+    forgotten timeout and a probe that never returns. The marketplace
+    review pointed at exactly this line; the service monitor already used
+    a bounded default for the same reason.
+    """
+
+    import httpx
+    from astrbot_plugin_statuscard import collectors as collectors_module
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeSite:
+        name = "x"
+        url = "http://example.invalid/"
+        timeout = 3.0
+
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient  # type: ignore[misc]
+    try:
+        asyncio.run(collectors_module._probe_websites([FakeSite()]))
+    finally:
+        httpx.AsyncClient = original  # type: ignore[misc]
+
+    timeout = captured.get("timeout")
+    assert timeout is not None, "the client-level timeout must not be None"
+    assert isinstance(timeout, httpx.Timeout), timeout
+    assert timeout.connect is not None and timeout.read is not None, timeout
+    assert timeout.pool is not None, timeout
+    # The concrete bound is locked, not just "some bound": a 9999 s or a
+    # 0.001 s default would both pass an "is not None" assertion.
+    for phase in (timeout.connect, timeout.read, timeout.write, timeout.pool):
+        assert 0 < float(phase) <= 60, phase
+
+
+def test_the_website_timeout_is_always_bounded() -> None:
+    """``site.timeout`` may never become ``None`` or non-positive.
+
+    httpx replaces the client timeout with the per-request one, so a
+    ``None`` here would erase the bounded client default and the probe
+    could hang forever.
+    """
+
+    from astrbot_plugin_statuscard import collectors as collectors_module
+
+    raw = [
+        {"name": "a", "url": "http://a.invalid/", "timeout_seconds": 0},
+        {"name": "b", "url": "http://b.invalid/", "timeout_seconds": -5},
+        {"name": "c", "url": "http://c.invalid/", "timeout_seconds": 9999},
+        {"name": "d", "url": "http://d.invalid/", "timeout_seconds": "abc"},
+        {"name": "e", "url": "http://e.invalid/", "timeout_seconds": None},
+    ]
+    targets = collectors_module._normalize_website_targets(raw)
+    assert targets, "the targets were dropped"
+    for target in targets:
+        assert target.timeout is not None, target
+        assert 1.0 <= float(target.timeout) <= 15.0, target
+
+
+def test_the_webhook_verification_has_an_outer_bound() -> None:
+    """The webhook check must not rely on the client timeout alone.
+
+    httpx counts the read timeout per chunk, so a server that sends the
+    headers and then drips the body keeps the request alive forever. Only
+    an outer ``wait_for`` bounds the whole call.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "page_api.py").read_text(encoding="utf-8")
+    assert "asyncio.wait_for(_post(), timeout=15)" in source, (
+        "the webhook verification has no outer timeout"
+    )
