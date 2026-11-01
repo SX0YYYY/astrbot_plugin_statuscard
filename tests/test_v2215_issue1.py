@@ -49,15 +49,44 @@ def _framework_root() -> Path | None:
 
 
 # --------------------------------------------------------------------------
-# 1. The source-level guard: no command handler may stop the event.
+# 1. The source-level guard: no command handler may stop the event BEFORE
+#    its first yield.
 # --------------------------------------------------------------------------
 
 
-def test_no_command_handler_stops_the_event() -> None:
-    """No command handler may call ``event.stop_event()``.
+def _stop_event_calls(node: ast.AsyncFunctionDef) -> list[ast.Call]:
+    """Every ``event.stop_event()`` call inside a command handler."""
 
-    ``stop_event()`` makes the framework skip the result chain, so the
-    command's reply never leaves the plugin.
+    out: list[ast.Call] = []
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if not isinstance(func, ast.Attribute) or func.attr != "stop_event":
+            continue
+        if isinstance(func.value, ast.Name) and func.value.id == "event":
+            out.append(call)
+    return out
+
+
+def _first_yield_line(node: ast.AsyncFunctionDef) -> int | None:
+    """The line of the handler's first yield, if any."""
+
+    lines = [
+        n.lineno for n in ast.walk(node) if isinstance(n, (ast.Yield, ast.YieldFrom))
+    ]
+    return min(lines) if lines else None
+
+
+def test_no_command_handler_stops_the_event_before_its_first_yield() -> None:
+    """No command handler may stop the event before producing a result.
+
+    ``stop_event()`` makes the framework skip the result chain, so a result
+    produced after it never leaves the plugin (issue #1).
+
+    A call AFTER every yield is a different thing and is allowed: the
+    results are already collected there, and stopping the event at that
+    point is what keeps the reply out of the LLM branch (v2.5.1).
     """
 
     source = MAIN_PY.read_text(encoding="utf-8")
@@ -66,21 +95,47 @@ def test_no_command_handler_stops_the_event() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef):
             continue
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call):
-                continue
-            func = call.func
-            if not isinstance(func, ast.Attribute):
-                continue
-            if func.attr != "stop_event":
-                continue
-            # ``event.stop_event()`` -- the receiver must be named "event".
-            if isinstance(func.value, ast.Name) and func.value.id == "event":
-                offenders.append(f"{node.name} (line {call.lineno})")
+        if not node.name.startswith("cmd_"):
+            continue
+        first_yield = _first_yield_line(node)
+        for call in _stop_event_calls(node):
+            if first_yield is not None and call.lineno > first_yield:
+                continue  # after the results: allowed (the LLM guard)
+            offenders.append(f"{node.name} (line {call.lineno})")
     assert not offenders, (
-        "these handlers call event.stop_event(), which stops the framework "
-        f"from sending their result: {offenders}"
+        "these handlers call event.stop_event() before their first yield, "
+        "which stops the framework from sending their result: "
+        f"{offenders}"
     )
+
+
+def test_the_trailing_stop_event_llm_guard_is_kept() -> None:
+    """The preview commands keep their trailing ``stop_event()``.
+
+    v2.5.1 ("修复预览日报进入 LLM") added it deliberately: the framework
+    enters the LLM branch whenever ``should_call_llm(False)`` is set, and
+    decides inside it with ``event.get_result() and not event.is_stopped()``.
+    Dropping the trailing call would let the preview reply reach the model
+    again -- the very problem that commit fixed.
+    """
+
+    source = MAIN_PY.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    guards: dict[str, bool] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        if node.name not in ("cmd_preview_report", "cmd_preview_weekly"):
+            continue
+        first_yield = _first_yield_line(node)
+        calls = _stop_event_calls(node)
+        guards[node.name] = bool(
+            calls
+            and first_yield is not None
+            and all(call.lineno > first_yield for call in calls)
+        )
+    assert guards.get("cmd_preview_report") is True, guards
+    assert guards.get("cmd_preview_weekly") is True, guards
 
 
 def test_the_commands_still_block_the_llm() -> None:
@@ -207,6 +262,38 @@ def _framework_sends(event) -> bool:
     return not event.is_stopped()
 
 
+def _llm_branch_entered(event) -> bool:
+    """The framework's LLM condition.
+
+    astrbot/core/pipeline/process_stage/stage.py:
+
+        if (
+            not event._has_send_oper
+            and event.is_at_or_wake_command
+            and not event.call_llm
+        ):
+            if (
+                event.get_result() and not event.is_stopped()
+            ) or not event.get_result():
+                async for _ in self.agent_sub_stage.process(event):
+
+    ``should_call_llm(False)`` only gets the pipeline INTO this branch; the
+    decision inside it is ``not event.is_stopped()``. That is why the
+    trailing ``stop_event()`` in the preview commands exists.
+    """
+
+    # The nested form mirrors the framework's own code; merging it into one
+    # condition would hide which check does the work.
+    if (  # noqa: SIM102
+        not getattr(event, "_has_send_oper", False)
+        and getattr(event, "is_at_or_wake_command", True)
+        and not event.call_llm
+    ):
+        if (event.get_result() and not event.is_stopped()) or not event.get_result():
+            return True
+    return False
+
+
 def test_the_framework_source_stops_sending_when_the_event_is_stopped() -> None:
     """Guard the assumption this test rests on.
 
@@ -239,8 +326,15 @@ def test_the_framework_source_stops_sending_when_the_event_is_stopped() -> None:
         "cmd_preview_weekly",
     ],
 )
-def test_command_handlers_do_not_stop_the_event(command: str) -> None:
-    """The handler must not stop the event, and must keep the LLM out."""
+def test_command_handlers_do_not_stop_the_event_before_the_first_yield(
+    command: str,
+) -> None:
+    """No handler may stop the event before it produced its result.
+
+    A stop AFTER every yield is allowed (and required for the two preview
+    commands): by then the results are collected, and it is what keeps the
+    reply out of the LLM branch.
+    """
 
     handler = getattr(main_mod.StatusCardPlugin, command)
     source = Path(inspect.getsourcefile(handler) or "").read_text(encoding="utf-8")
@@ -252,24 +346,28 @@ def test_command_handlers_do_not_stop_the_event(command: str) -> None:
             break
     assert target is not None, f"{command} not found"
 
-    stopped = False
+    first_yield = _first_yield_line(target)
+    early_stop = False
     llm_blocked = False
     for call in ast.walk(target):
         if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
             continue
-        if (
+        if (  # noqa: SIM102
             call.func.attr == "stop_event"
             and isinstance(call.func.value, ast.Name)
             and call.func.value.id == "event"
         ):
-            stopped = True
+            if first_yield is None or call.lineno <= first_yield:
+                early_stop = True
         if (
             call.func.attr == "should_call_llm"
             and isinstance(call.func.value, ast.Name)
             and call.func.value.id == "event"
         ):
             llm_blocked = True
-    assert not stopped, f"{command} stops the event -> its reply is never sent"
+    assert not early_stop, (
+        f"{command} stops the event before its first yield -> its reply is never sent"
+    )
     assert llm_blocked, f"{command} no longer blocks the default LLM"
 
 
@@ -307,6 +405,56 @@ def test_the_real_framework_semantics_send_the_result() -> None:
     event2.stop_event()
     assert _framework_sends(event2) is False, (
         "stop_event() must prevent the send -- that is the bug"
+    )
+
+
+def test_the_trailing_guard_keeps_the_reply_out_of_the_llm_branch() -> None:
+    """The trailing ``stop_event()`` is what keeps the LLM out.
+
+    ``should_call_llm(False)`` only gets the pipeline INTO the LLM branch;
+    the decision inside it is ``event.get_result() and not
+    event.is_stopped()``. Without the trailing call, a command reply would
+    reach the model again -- exactly what v2.5.1 ("修复预览日报进入 LLM")
+    fixed.
+    """
+
+    extracted = _extract_framework_methods()
+    if extracted is None:
+        pytest.skip("the AstrBot sources are not in the workspace")
+
+    namespace: dict[str, object] = {"MessageEventResult": _Result}
+    exec(  # noqa: S102
+        "class _Event:\n" + textwrap.indent(extracted, "    "),
+        namespace,
+    )
+    real_event = namespace["_Event"]
+
+    class RealEvent(real_event):  # type: ignore[misc,valid-type]
+        def __init__(self):
+            self._result = None
+            self._force_stopped = False
+            self.call_llm = True
+            self._has_send_oper = False
+            self.is_at_or_wake_command = True
+
+        def should_call_llm(self, call_llm):
+            self.call_llm = call_llm
+
+    # Without the trailing guard the reply would reach the LLM.
+    without = RealEvent()
+    without.should_call_llm(False)
+    without.set_result(_Result())
+    assert _llm_branch_entered(without) is True, (
+        "without the trailing stop_event() the reply reaches the LLM branch"
+    )
+
+    # With it, the branch is skipped.
+    with_guard = RealEvent()
+    with_guard.should_call_llm(False)
+    with_guard.set_result(_Result())
+    with_guard.stop_event()
+    assert _llm_branch_entered(with_guard) is False, (
+        "the trailing stop_event() must keep the reply out of the LLM branch"
     )
 
 
