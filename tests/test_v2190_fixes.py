@@ -97,6 +97,10 @@ def test_on_abandon_persists_withdrawal(tmp_path: Path) -> None:
             "alerted": True,
             "last_sent": time.time(),
             "label": "CPU",
+            # The rule was BUFFERED into the summary: the abandon callback
+            # only withdraws rules that were really buffered, so a rule whose
+            # alert went out on its own keeps its "notified" state (v2.20.14).
+            "summary_buffered": True,
         }
     }
     state.save()
@@ -329,6 +333,9 @@ def test_abandon_clears_last_sent(tmp_path: Path) -> None:
             "label": "CPU",
             "alert_since": time.time() - 60,
             "count": 0,
+            # Buffered into the summary: only buffered rules are withdrawn
+            # by the abandon callback (v2.20.14).
+            "summary_buffered": True,
         }
     }
 

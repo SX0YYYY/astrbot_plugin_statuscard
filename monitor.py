@@ -950,8 +950,24 @@ class ServiceMonitor:
                     delivered = (not buffered) and self._delivered(result)
                     st.pop("send_inflight", None)
                     st["alerting"] = True
+                    # The episode counts as announced even when the push
+                    # failed: the recovery notice carries the "（异常告警此前
+                    # 未能送达）" note, so the user still learns that the
+                    # service was down. Suppressing the notice instead left
+                    # the user with NO message at all when the first push
+                    # failed and the service recovered before the retry
+                    # budget ran out (v2.20.14).
                     st["alerted"] = True
-                    st["since"] = now
+                    # Keep the episode's ORIGINAL start. Overwriting it with
+                    # the push moment moved the start forward whenever the
+                    # alert was not sent right away (a cooldown retry, a
+                    # failed first attempt): the recovery notice then showed
+                    # "故障开始 = 恢复时刻" and an interruption duration of
+                    # 00:00:00 for an outage that had been running for
+                    # half an hour (v2.20.14). The resource rules keep
+                    # ``alert_since`` for the same reason.
+                    if not safe_float(st.get("since") or 0):
+                        st["since"] = now
                     st["last_attempt"] = now
                     st["fails"] = 0
                     st["pending"] = not delivered and not buffered
@@ -1068,6 +1084,21 @@ class ServiceMonitor:
                 pending_text = None
             if pending_text:
                 next_recovery = safe_float(st.get("recovery_next_attempt") or 0)
+                if st.get("recovery_awaits_summary") and self._aggregator is not None:
+                    # The recovery may only be posted once the summary that
+                    # carries its alert reached the chat. The notice was
+                    # scheduled for "window end + 3s", but the summary is
+                    # only *sent* after the window closes and may still be in
+                    # flight or waiting for its retry backoff -- so the
+                    # notice could overtake it and announce a recovery for an
+                    # outage the user was never told about (v2.20.14).
+                    if self._aggregator.summary_pending("service"):
+                        next_recovery = now + 15.0
+                        st["recovery_next_attempt"] = next_recovery
+                    else:
+                        # The summary is gone: delivered or abandoned. Either
+                        # way the recovery may go out now.
+                        st.pop("recovery_awaits_summary", None)
                 if now >= next_recovery:
                     result = await self._send(str(pending_text))
                     if self._delivered(result):

@@ -36,6 +36,59 @@ _ADDRESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The IPv6 branch above only matched the full eight-group form. The compact
+# notation ("2001:db8::1", "fe80::1%eth0", "::1") is what people actually
+# write, and it slipped through the hostname rule: the dashboard and the
+# daily report showed the complete internal address (v2.20.14).
+#
+# The candidate pattern is deliberately loose -- it also catches "12:34:56"
+# and "a:b" -- and ``_is_ipv6_literal`` decides what is really an address.
+_IPV6_CANDIDATE_RE = re.compile(
+    r"(?<![0-9A-Za-z:.])"
+    r"[0-9A-Fa-f]*:[0-9A-Fa-f:]*(?::[0-9A-Fa-f:]*)*[0-9A-Fa-f]*"
+    r"(?:%[0-9A-Za-z._~-]+)?"
+    r"(?![0-9A-Za-z:])"
+)
+
+
+def _is_ipv6_literal(token: str) -> bool:
+    """True when ``token`` really is an IPv6 literal.
+
+    Rules:
+      * at least two colons;
+      * the compact form ("::") may appear at most once and leaves room for
+        at most seven non-empty groups;
+      * the full form needs exactly eight groups of one to four hex digits.
+    """
+
+    body = str(token or "").split("%", 1)[0]
+    if body.count(":") < 2:
+        return False
+    if not re.fullmatch(r"[0-9A-Fa-f:]+", body):
+        return False
+    if "::" in body:
+        if body.count("::") > 1:
+            return False
+        groups = [part for part in body.replace("::", ":").split(":") if part]
+        if not groups or len(groups) > 7:
+            return False
+        return all(1 <= len(part) <= 4 for part in groups)
+    groups = body.split(":")
+    if len(groups) != 8:
+        return False
+    return all(1 <= len(part) <= 4 for part in groups)
+
+
+def _mask_ipv6(text: str) -> str:
+    """Replace every IPv6 literal in ``text`` with a placeholder."""
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return "（已隐藏地址）" if _is_ipv6_literal(token) else token
+
+    return _IPV6_CANDIDATE_RE.sub(_replace, text)
+
+
 # A bare host name with at least one dot ("nas.local", "internal.example").
 # The hostname rule used to match only address-shaped tokens, so a machine
 # name like "PC-20260627WVRG" or a dotted internal name passed through in
@@ -89,6 +142,12 @@ class Redactor:
         """True when the text carries an address or a host name."""
 
         if _ADDRESS_RE.search(value):
+            return True
+        # The compact IPv6 notation is not covered by _ADDRESS_RE (v2.20.14).
+        if any(
+            _is_ipv6_literal(match.group(0))
+            for match in _IPV6_CANDIDATE_RE.finditer(value)
+        ):
             return True
         own = self._own_hostname
         if own and len(own) >= 3 and own.lower() in value.lower():
@@ -246,6 +305,9 @@ class Redactor:
         if not value or not self.hostname:
             return value
         masked = _ADDRESS_RE.sub("（已隐藏地址）", value)
+        # The compact IPv6 notation needs its own pass: the regex above only
+        # knows the full eight-group form (v2.20.14).
+        masked = _mask_ipv6(masked)
         own = self._own_hostname
         if own and len(own) >= 3:
             masked = re.sub(re.escape(own), HIDDEN, masked, flags=re.IGNORECASE)

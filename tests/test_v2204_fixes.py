@@ -71,6 +71,11 @@ def test_abandon_keeps_rule_retryable(tmp_path: Path) -> None:
                 "label": "CPU 使用率",
                 "alert_since": now - 60,
                 "count": 0,
+                # The rule was buffered into the summary: the abandon
+                # callback only withdraws rules that were really buffered,
+                # so a rule whose alert went out on its own keeps its
+                # "notified" state (v2.20.14).
+                "summary_buffered": True,
             }
         },
     )

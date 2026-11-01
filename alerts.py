@@ -661,6 +661,15 @@ class AlertEngine:
                     continue
                 if not st.get("alerting"):
                     continue
+                # Only withdraw rules that were actually BUFFERED. A
+                # same-named rule whose alert went out on its own keeps its
+                # "notified" state: the abandon callback matches by name, so
+                # without this gate the rule that delivered its own alert
+                # was marked "not notified" too, and its next fault pushed a
+                # duplicate alert (v2.20.14, same fix as the service
+                # monitors).
+                if not st.pop("summary_buffered", None):
+                    continue
                 st["alerted"] = False
                 # Keep the episode retryable. Clearing ``last_sent``
                 # removed the only signal the cooldown-retry path uses,
@@ -1273,6 +1282,14 @@ class AlertEngine:
                         # The alert itself is still waiting for the summary:
                         # a recovery inside the window must queue behind it.
                         st["awaiting_summary"] = True
+                        # Identifies THIS rule as the buffered one: two rules
+                        # may share a name (the same disk path twice, a
+                        # renamed monitor), and the abandon callback matches
+                        # by name -- without the marker it also withdrew the
+                        # rule whose alert was delivered on its own, which
+                        # made the next fault of that rule alert a second
+                        # time (v2.20.14, same fix as the service monitors).
+                        st["summary_buffered"] = True
                         self._record_event(
                             "resource",
                             name,
@@ -1288,6 +1305,11 @@ class AlertEngine:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        # The alert went out on its own; the buffered marker
+                        # (if a previous episode ever buffered) must go or a
+                        # later same-name abandon would withdraw this rule's
+                        # "notified" state.
+                        st.pop("summary_buffered", None)
                         self._record_event(
                             "resource",
                             name,
@@ -1391,6 +1413,27 @@ class AlertEngine:
                 pending_text = None
             if pending_text:
                 next_recovery = _safe_float(st.get("recovery_next_attempt"))
+                if st.get("recovery_awaits_summary") and self._aggregator is not None:
+                    # The recovery was queued because its alert sat in a
+                    # summary that has still not reached the chat. Posting
+                    # the recovery now tells the user about a recovery for an
+                    # outage they were never told about -- and the summary may
+                    # still fail and be abandoned, in which case the recovery
+                    # has to be withdrawn entirely.
+                    #
+                    # The notice was scheduled for "window end + 3s", but the
+                    # summary is only *sent* after the window closes and it
+                    # may still be in flight or waiting for its retry
+                    # backoff, so the notice could overtake it (v2.20.14).
+                    if self._aggregator.summary_pending("resource"):
+                        next_recovery = now + 15.0
+                        st["recovery_next_attempt"] = next_recovery
+                    else:
+                        # The summary is gone: delivered (the marker is
+                        # cleared by the send path) or abandoned (the abandon
+                        # callback drops the recovery). Either way the
+                        # recovery may go out now.
+                        st.pop("recovery_awaits_summary", None)
                 if now >= next_recovery:
                     result = await self._send(str(pending_text))
                     if self._delivered(result):
@@ -2247,7 +2290,14 @@ class AlertEngine:
             delivered = self._delivered(result)
             watch["alerting"] = True
             # A failed push still owes the user an explanation, which the
-            # recovery notice carries; only cooldown suppression is silent.
+            # recovery notice carries ("此前未能送达"); only cooldown
+            # suppression is silent.
+            #
+            # The provider watch has no retry ladder of its own, so this is
+            # the "retries exhausted" state of the resource rules: the
+            # recovery notice is the last signal the user gets. The offline
+            # branch below is the one that keeps ``alerted`` False, because
+            # there the alert is queued and delivered later (v2.20.14).
             watch["alerted"] = True
             watch["send_failed"] = not delivered
             watch["last_alert_ts"] = now

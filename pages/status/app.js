@@ -35,6 +35,15 @@
     unresolved: "status_unresolved",
   };
 
+  // The backend sends a stable code for the Chinese duration words so the
+  // English page does not print them verbatim: "进行中", "跨窗口关闭" and
+  // the "（窗口前开始）" suffix (v2.20.14).
+  const DURATION_I18N = {
+    ongoing: "report_ongoing",
+    cross_window: "report_cross_window",
+    started_before_window: "report_started_before_window",
+  };
+
   // Backend empty_reason strings are Chinese. Translate the known ones so the
   // English page does not show Chinese sentences inside an otherwise English
   // report; unknown strings pass through unchanged.
@@ -61,6 +70,15 @@
     website_none: "reason_website_none",
     process_since: "reason_process_since",
     process_none: "reason_process_none",
+    // The LLM quality section used to fall back to the Chinese sentence,
+    // because the backend sent the reason without a code. The English page
+    // then showed "未找到 AstrBot 数据库（data_v4.db）" inside an otherwise
+    // English report -- and that is exactly the state a user hits when the
+    // LLM section cannot be built (v2.20.14).
+    reason_no_provider_db: "reason_no_provider_db",
+    reason_provider_query_failed: "reason_provider_query_failed",
+    reason_no_llm_calls: "reason_no_llm_calls",
+    reason_llm_data_broken: "reason_llm_data_broken",
   };
 
   function emptyReasonText(section) {
@@ -944,6 +962,49 @@
       ),
     ].join("");
 
+    // Every configured mount, not just the worst one. The metric above shows
+    // the fullest disk; with several mounts the others were invisible, and
+    // a mount that cannot be read (a pulled network share) disappeared
+    // completely instead of showing "--" like the status card does
+    // (v2.20.14).
+    const diskDetail = $("disk-detail");
+    const diskDetailCard = $("disk-detail-card");
+    const disks = Array.isArray(disk.disks) ? disk.disks : [];
+    if (diskDetail && diskDetailCard) {
+      if (disks.length > 1) {
+        diskDetailCard.hidden = false;
+        diskDetail.innerHTML = disks
+          .map(function (item) {
+            const path = item.path || "--";
+            const percent =
+              item.percent === null || item.percent === undefined
+                ? null
+                : Number(item.percent);
+            const value =
+              percent === null || !Number.isFinite(percent)
+                ? "--"
+                : percent.toFixed(1) + "%";
+            const sub = t("metric_used_total", "{used} / {total}", {
+              used: item.used_text || "--",
+              total: item.total_text || "--",
+            });
+            return (
+              '<div class="network-item"><span>' +
+              esc(path) +
+              "</span><span>" +
+              esc(value) +
+              " · " +
+              esc(sub) +
+              "</span></div>"
+            );
+          })
+          .join("");
+      } else {
+        diskDetailCard.hidden = true;
+        diskDetail.innerHTML = "";
+      }
+    }
+
     const network = data.network || {};
     // Keep the translated heading and append the month: the month alone used
     // to replace "本月流量" entirely (and stayed Chinese-only "2026-10" in the
@@ -1565,8 +1626,9 @@
                 ) +
                 "</td><td>" +
                 esc(
-                  item.duration_code === "ongoing"
-                    ? t("report_ongoing", "进行中")
+                  item.duration_code
+                    ? t(DURATION_I18N[item.duration_code] || item.duration_code,
+                        item.duration || "--")
                     : item.duration || "--",
                 ) +
                 "</td></tr>",
@@ -1918,7 +1980,9 @@
     const tokenValue =
       summary.token_enabled === false
         ? notEnabled
-        : summary.token_total_text || t("report_no_data", "暂无数据");
+        : summary.token_total_code === "no_data"
+          ? t("report_no_data", "暂无数据")
+          : summary.token_total_text || t("report_no_data", "暂无数据");
     const sentValue =
       summary.qq_enabled === false
         ? notEnabled
@@ -2093,9 +2157,16 @@
     const box = $("verify-result");
     if (!box) return;
     if (!data || data.ok !== true) {
+      // The backend sends a stable error_code so the English page can
+      // translate the message; without it the Chinese sentence was shown
+      // verbatim (v2.20.14).
+      const errorText =
+        (data && data.error_code && t(data.error_code, "")) ||
+        (data && data.error) ||
+        t("verify_failed", "验证失败");
       box.innerHTML =
         '<div class="error-state"><p>' +
-        esc((data && data.error) || t("verify_failed", "验证失败")) +
+        esc(errorText) +
         "</p></div>";
       return;
     }

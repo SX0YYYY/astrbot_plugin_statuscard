@@ -1304,7 +1304,17 @@ class DailyReporter:
                     continue
                 self._weekly_image_attempts = 0
                 self._weekly_image_pending = None
-                await self._send_weekly_scheduled()
+                # The report day comes from the slot, not from the calendar:
+                # the weekly report covers the seven days that END on the
+                # Saturday before the slot. Deriving it from "yesterday" gave
+                # the catch-up run (Monday 00:30) a window one day later than
+                # the Sunday 21:30 send -- the same week key, a different
+                # window (v2.20.14).
+                catchup_day = None
+                slot = self._weekly_slot_before(now)
+                if slot is not None:
+                    catchup_day = (slot - timedelta(days=1)).date().isoformat()
+                await self._send_weekly_scheduled(catchup_day)
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -1404,6 +1414,18 @@ class DailyReporter:
             self._weekly_pending_recovery_week = week_key
             if not self._weekly_pending_recovery_since:
                 self._weekly_pending_recovery_since = time.time()
+            # Pin the report day to the slot, like the database-outage branch
+            # below. Without it the queued report was built from the calendar
+            # day at the time of the retry, so a report that waited across
+            # midnight covered a different window than the one the slot
+            # announced (v2.20.14).
+            slot = self._weekly_slot_before(now_in_timezone(self.config))
+            if slot is not None:
+                self._weekly_pending_report_day = (
+                    (slot - timedelta(days=1)).date().isoformat()
+                )
+            elif getattr(self, "_weekly_pending_report_day", None) is None:
+                self._weekly_pending_report_day = report_day
             self._weekly_pending = time.time() + 900
             self._save_delivery_state()
             logger.warning(
@@ -1477,7 +1499,15 @@ class DailyReporter:
             self._weekly_pause_until = time.time() + 600
             self._clear_retry()
             return
-        if not self.store.ensure_ready() or not self.store.probe():
+        if not self.store.probe() or not self.store.ensure_ready():
+            # ``probe()`` MUST run before ``ensure_ready()`` (v2.20.14):
+            # probe() touches a real table and fails on a database whose file
+            # was deleted -- the empty file sqlite silently recreates has no
+            # tables yet. ensure_ready() rebuilds the schema in that empty
+            # file and flips ``available`` back to True, so a later attempt
+            # saw a "healthy" but empty database, built an all-"--" report,
+            # sent it and recorded the day as delivered: the real data of
+            # that day could never be sent afterwards.
             logger.error("日报数据库不可用，跳过本次周报发送")
             await self._notify_store_unavailable(self._targets("weekly"), weekly=True)
             # A missing/unreadable database is not going to heal within the
@@ -1970,9 +2000,19 @@ class DailyReporter:
             self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
-        if not self.store.ensure_ready() or not self.store.probe():
+        if not self.store.probe() or not self.store.ensure_ready():
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
+            #
+            # ``probe()`` MUST run before ``ensure_ready()`` (v2.20.14):
+            # probe() touches a real table and fails on a database whose file
+            # was deleted -- the empty file sqlite silently recreates has no
+            # tables yet. ensure_ready() rebuilds the schema in that empty
+            # file and flips ``available`` back to True, so the queued retry
+            # 15 minutes later saw a "healthy" but empty database, built an
+            # all-"--" report, sent it to the user and recorded the day as
+            # delivered: the real data of that day could never be sent
+            # afterwards.
             logger.error("日报数据库不可用，跳过本次日报发送")
             self._record(day or self._default_report_day(), False, "db unavailable")
             # A database outage is usually transient (disk full, permissions,
@@ -2110,9 +2150,11 @@ class DailyReporter:
     ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
-        if not self.store.ensure_ready() or not self.store.probe():
+        if not self.store.probe() or not self.store.ensure_ready():
             # Preview used to build a page of "--" and send it as if it were
             # a real report; the scheduled path already refuses to.
+            # The order matters (v2.20.14): probe() must detect the missing
+            # schema before ensure_ready() rebuilds an empty database.
             return False, tr(self.config, "report_db_unavailable_preview")
         span = max(1, min(30, int(span_days or 1)))
         prefix = "report" if span == 1 else "weekly"

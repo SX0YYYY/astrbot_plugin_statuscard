@@ -102,6 +102,26 @@ class AlertAggregator:
             return max(3.0, bucket.until - time.time())
         return max(0.0, bucket.until - time.time())
 
+    def summary_pending(self, kind: str) -> bool:
+        """True while a summary of ``kind`` has not reached the chat yet.
+
+        A recovery notice for an item that is still covered by an undelivered
+        summary must wait for that summary: posting it first tells the user
+        about a recovery for an outage they were never told about. The
+        summary may still be buffered, in flight, or waiting for its retry
+        backoff -- in all of those cases the notice has to keep waiting
+        (v2.20.14).
+        """
+
+        bucket = self._buckets.get(str(kind))
+        if bucket is None:
+            return False
+        if bucket.pending or bucket.summary_inflight or bucket.first_inflight:
+            return True
+        # A failed summary waits for its backoff before it is retried; the
+        # window stays open until then, so the notice must wait too.
+        return bucket.retry_at > time.time()
+
     def _bucket(self, kind: str) -> _Bucket:
         return self._buckets.setdefault(str(kind), _Bucket())
 

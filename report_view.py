@@ -61,6 +61,27 @@ VALID_SECTIONS = (
 )
 DEFAULT_SECTIONS = ("resource", "anomaly", "qq", "token")
 
+# The Chinese duration words the report produces, mapped to a stable code the
+# dashboard can translate. The English page showed "进行中" and the
+# "（窗口前开始）" suffix verbatim (v2.20.14).
+_DURATION_CODES = {
+    "进行中": "ongoing",
+    "跨窗口关闭": "cross_window",
+}
+
+
+def _duration_code(duration_text: str) -> str | None:
+    """The stable code for a rendered duration, or None for a plain one.
+
+    The suffix "（窗口前开始）" means the outage started before the report
+    window; it is appended to a normal duration, so it is checked first.
+    """
+
+    text = str(duration_text or "")
+    if "（窗口前开始）" in text:
+        return "started_before_window"
+    return _DURATION_CODES.get(text)
+
 
 def _fmt_num(value: Any) -> str:
     if value is None:
@@ -461,6 +482,14 @@ class DailyReportBuilder:
             ),
             "token_total_text": (
                 token.get("total_text", "暂无数据") if "token" in sections else "未开启"
+            ),
+            # The text above is Chinese and the daily-report image prints it
+            # verbatim, so it stays. The code lets the English dashboard
+            # show its own wording instead of the Chinese fallback (v2.20.14).
+            "token_total_code": (
+                "no_data"
+                if "token" in sections and token.get("total_text") == "暂无数据"
+                else ""
             ),
             "token_enabled": "token" in sections,
             "provider_calls_text": (
@@ -915,6 +944,58 @@ class DailyReportBuilder:
                         episode_of[member] = (start, stamp)
                 # The recovery row itself describes that episode.
                 recovery_episode[(key, stamp)] = (start, stamp)
+                # The FIRST row of the episode may carry a resolved_ts of its
+                # own that does not match this recovery. That means the row
+                # was closed earlier -- it is an orphan whose recovery event
+                # was lost -- and the outage that really happened is the one
+                # this recovery closes. The orphan must not take the episode
+                # start with it, otherwise the real outage inherits the
+                # orphan's start time and a 90-second outage is reported as
+                # "07:01:30 已恢复" (v2.20.14).
+                #
+                # The rows of ONE interruption all carry the same resolved_ts
+                # (``close_all`` writes one value onto every open row), so
+                # they are never separated here.
+                first_row = next(
+                    (
+                        item
+                        for item in events
+                        if str(item.get("status") or "") in {"alert", "failed"}
+                        and (
+                            str(item.get("kind") or ""),
+                            str(item.get("name") or ""),
+                            str(item.get("target") or ""),
+                        )
+                        == key
+                        and safe_int(item.get("ts") or 0) == start
+                    ),
+                    None,
+                )
+                if first_row is not None:
+                    own = first_row.get("resolved_ts")
+                    own_ts = safe_int(own) if own is not None else None
+                    if own_ts is not None and own_ts != stamp:
+                        # The orphan closes at its own moment; the episode
+                        # starts at the first row that is still open.
+                        orphan_end = own_ts
+                        later = [
+                            safe_int(item.get("ts") or 0)
+                            for item in events
+                            if str(item.get("status") or "") in {"alert", "failed"}
+                            and (
+                                str(item.get("kind") or ""),
+                                str(item.get("name") or ""),
+                                str(item.get("target") or ""),
+                            )
+                            == key
+                            and safe_int(item.get("ts") or 0) > start
+                            and safe_int(item.get("ts") or 0) <= stamp
+                        ]
+                        if later:
+                            real_start = min(later)
+                            episode_of[(key, start)] = (start, orphan_end)
+                            episode_of[(key, real_start)] = (real_start, stamp)
+                            recovery_episode[(key, stamp)] = (real_start, stamp)
 
         # Keys whose episode started inside the window and is still open; the
         # unresolved count below reads this set.
@@ -979,6 +1060,11 @@ class DailyReportBuilder:
                     previous["status"] = "已恢复"
                     previous["status_key"] = "recovered"
                     previous["duration"] = duration_text
+                    # The row is no longer "ongoing": it has a duration now.
+                    # Leaving the marker behind made the English dashboard
+                    # show "Ongoing" for an outage that had already
+                    # recovered (v2.20.14).
+                    previous["duration_code"] = _duration_code(duration_text)
                     continue
             elif status in {"alert", "failed"}:
                 episode = episode_of.get((key, started_i))
@@ -1049,8 +1135,11 @@ class DailyReportBuilder:
                     )[:80],
                     "duration": duration_text,
                     # Structured marker so the English dashboard can translate
-                    # "进行中" instead of mixing a Chinese word into the table.
-                    "duration_code": "ongoing" if duration_text == "进行中" else None,
+                    # the Chinese duration words instead of mixing them into
+                    # the table: "进行中" (ongoing), "跨窗口关闭"
+                    # (cross_window) and the "（窗口前开始）" suffix
+                    # (started_before_window).
+                    "duration_code": _duration_code(duration_text),
                 }
             )
             if status in {"alert", "failed"}:
@@ -1745,6 +1834,7 @@ class DailyReportBuilder:
             return {
                 "available": False,
                 "empty_reason": "暂无数据（所选时间范围内没有 provider 请求）",
+                "empty_reason_code": "reason_no_provider_data",
                 "total": 0,
                 "total_text": "暂无数据",
                 "calls": 0,
@@ -1870,6 +1960,7 @@ class DailyReportBuilder:
             return {
                 "available": False,
                 "empty_reason": "未找到 AstrBot 数据库（data_v4.db）",
+                "empty_reason_code": "reason_no_provider_db",
                 "stats": {},
                 "top_models": [],
                 "top_conversations": [],
@@ -1887,6 +1978,7 @@ class DailyReportBuilder:
             return {
                 "available": False,
                 "empty_reason": "provider_stats 查询失败",
+                "empty_reason_code": "reason_provider_query_failed",
                 "stats": {},
                 "top_models": [],
                 "top_conversations": [],
@@ -1900,6 +1992,7 @@ class DailyReportBuilder:
             return {
                 "available": False,
                 "empty_reason": "暂无数据（所选时间范围内没有 LLM 调用记录）",
+                "empty_reason_code": "reason_no_llm_calls",
                 "stats": {},
                 "top_models": [],
                 "top_conversations": [],
@@ -1917,6 +2010,7 @@ class DailyReportBuilder:
             return {
                 "available": False,
                 "empty_reason": "LLM 服务质量数据异常",
+                "empty_reason_code": "reason_llm_data_broken",
                 "stats": {},
                 "top_models": [],
                 "top_conversations": [],

@@ -354,6 +354,54 @@ class ReportStore:
                     except Exception:
                         logger.exception("日报数据库重建失败")
 
+    def _write_batch(self, statements: list[tuple[str, tuple[Any, ...]]]) -> bool:
+        """Run several statements in ONE transaction.
+
+        A multi-table cleanup (the retention prune) used to run as separate
+        writes, so a failure in the middle left the tables on different
+        retention horizons: the resource samples were gone while the events
+        were still there, and the daily report then showed "no resource
+        data" next to a full event list (v2.20.14).
+        """
+
+        if not self.available or not statements:
+            return False
+        con: sqlite3.Connection | None = None
+        rebuild = False
+        corrupt = False
+        with self._lock:
+            try:
+                con = self._connect()
+                for sql, params in statements:
+                    con.execute(sql, params)
+                con.commit()
+                self._write_failures = 0
+                return True
+            except Exception as exc:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
+                logger.exception("日报数据库批量写入失败")
+                self._write_failures += 1
+                corrupt = self._is_corruption(exc)
+                rebuild = corrupt or self._write_failures >= 3
+                return False
+            finally:
+                if con is not None:
+                    con.close()
+                if rebuild:
+                    try:
+                        if corrupt:
+                            self._init_db_with_recovery()
+                        else:
+                            self._init_db()
+                        self._write_failures = 0
+                        logger.warning("日报数据库已重建（批量写入），后续写入将重试")
+                    except Exception:
+                        logger.exception("日报数据库重建失败")
+
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         if not self.available:
             return []
@@ -733,25 +781,19 @@ class ReportStore:
             day_start = now - (now % 86400)
         resource_cutoff = day_start - max(1, resource_days) * 86400
         event_cutoff = day_start - max(1, event_days) * 86400
-        self._write(
-            "DELETE FROM resource_samples WHERE ts < ?",
-            (resource_cutoff,),
-        )
-        self._write(
-            "DELETE FROM website_samples WHERE ts < ?",
-            (resource_cutoff,),
-        )
-        self._write(
-            "DELETE FROM process_samples WHERE ts < ?",
-            (resource_cutoff,),
-        )
-        self._write(
-            "DELETE FROM events WHERE ts < ?",
-            (event_cutoff,),
-        )
-        self._write(
-            "DELETE FROM report_runs WHERE ts < ?",
-            (event_cutoff,),
+        # One transaction for every table. Five separate writes meant a
+        # failure in the middle left the tables on different retention
+        # horizons: the resource samples were already gone while the events
+        # were still there, and the daily report then showed "no resource
+        # data" next to a full event list (v2.20.14).
+        self._write_batch(
+            [
+                ("DELETE FROM resource_samples WHERE ts < ?", (resource_cutoff,)),
+                ("DELETE FROM website_samples WHERE ts < ?", (resource_cutoff,)),
+                ("DELETE FROM process_samples WHERE ts < ?", (resource_cutoff,)),
+                ("DELETE FROM events WHERE ts < ?", (event_cutoff,)),
+                ("DELETE FROM report_runs WHERE ts < ?", (event_cutoff,)),
+            ]
         )
 
     # ------------------------------------------------------------------

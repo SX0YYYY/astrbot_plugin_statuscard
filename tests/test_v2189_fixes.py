@@ -150,7 +150,15 @@ def test_abandoned_summary_marks_rule_not_alerted(tmp_path: Path) -> None:
     engine, state, _config = _engine(tmp_path, plugin)
     with state.section("alerts") as alerts:
         alerts["rules"] = {
-            "cpu": {"alerting": True, "alerted": True, "label": "CPU 使用率"}
+            "cpu": {
+                "alerting": True,
+                "alerted": True,
+                "label": "CPU 使用率",
+                # The rule was buffered into the summary: the abandon
+                # callback only withdraws rules that were really buffered
+                # (v2.20.14).
+                "summary_buffered": True,
+            }
         }
     engine._on_summary_abandoned([("CPU 使用率", "95%")])
     assert state.get("alerts", {})["rules"]["cpu"]["alerted"] is False

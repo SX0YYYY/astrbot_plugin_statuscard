@@ -226,7 +226,16 @@
         "reason_process_none": "暂无进程采样数据",
         "status_recovered": "已恢复",
         "status_unresolved": "未恢复",
-        "method_weekly_sections_empty": "周报未配置内容"
+        "method_weekly_sections_empty": "周报未配置内容",
+        "report_cross_window": "跨窗口关闭",
+        "report_started_before_window": "窗口前开始",
+        "reason_no_provider_db": "未找到 AstrBot 数据库（data_v4.db）",
+        "reason_provider_query_failed": "provider_stats 查询失败",
+        "reason_no_llm_calls": "暂无数据（所选时间范围内没有 LLM 调用记录）",
+        "reason_llm_data_broken": "LLM 服务质量数据异常",
+        "verify_too_frequent": "验证过于频繁，请 30 秒后再试（避免重复发送消息）",
+        "verify_no_targets": "未配置任何推送目标",
+        "section_disk_detail": "磁盘明细"
       }
     }
   }

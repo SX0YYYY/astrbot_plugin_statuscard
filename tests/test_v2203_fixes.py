@@ -180,6 +180,12 @@ class _UnavailableStore:
     def ensure_ready(self) -> bool:
         return False
 
+    def probe(self) -> bool:
+        # The send path probes the database BEFORE it re-initialises it
+        # (v2.20.14): a deleted database file has to be detected before
+        # ensure_ready() rebuilds an empty schema over it.
+        return False
+
 
 def test_weekly_store_unavailable_sets_pause(tmp_path: Path) -> None:
     reporter = DailyReporter.__new__(DailyReporter)

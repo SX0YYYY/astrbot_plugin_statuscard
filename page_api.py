@@ -575,6 +575,10 @@ class PageApi:
                 {
                     "ok": False,
                     "error": "验证过于频繁，请 30 秒后再试（避免重复发送消息）",
+                    # The dashboard renders ``error`` verbatim, so the English
+                    # page showed the Chinese sentence. The code lets the
+                    # frontend pick the translation (v2.20.14).
+                    "error_code": "verify_too_frequent",
                 }
             )
         # The cooldown is charged only once the request will really run: an
@@ -614,7 +618,13 @@ class PageApi:
                     if one not in merged:
                         merged.append(one)
             if not merged:
-                return jsonify({"ok": False, "error": "未配置任何推送目标"})
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": "未配置任何推送目标",
+                        "error_code": "verify_no_targets",
+                    }
+                )
             self._verify_last[kind] = now
             text = (
                 "🔔 状态卡验证消息：这是从看板触发的推送目标验证，"
@@ -1115,12 +1125,18 @@ class PageApi:
             tzinfo=tz,
         )
         # One range query instead of one connection per day.
+        #
+        # One row more than the counter limit: that extra row is what tells
+        # "exactly 2000 events" apart from "more than 2000" (v2.20.14).
         events = await asyncio.to_thread(
             self.plugin.report_store.list_events_range,
             int(start_dt.timestamp()),
             int(time.time()) + 60,
-            limit=2000,
+            limit=2001,
         )
+        counts_truncated = len(events) > 2000
+        if counts_truncated:
+            events = events[:2000]
         items: list[dict[str, Any]] = [
             {
                 "id": event.get("id"),
@@ -1161,7 +1177,12 @@ class PageApi:
                 # The counters are computed from the same capped query, so the
                 # frontend can say "statistics cover the latest 2000 rows"
                 # instead of showing a silently low total.
-                "counts_truncated": len(events) >= 2000,
+                #
+                # ">= 2000" claimed a truncation even when the range held
+                # exactly 2000 events and nothing was cut off (v2.20.14): the
+                # query asks for one row more than the limit, so a full page
+                # means there really was more.
+                "counts_truncated": counts_truncated,
                 "days": days,
                 "items": items[:page_size],
                 "counts": counts,

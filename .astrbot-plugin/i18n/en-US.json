@@ -226,7 +226,16 @@
         "reason_process_none": "No process samples yet",
         "status_recovered": "Recovered",
         "status_unresolved": "Unresolved",
-        "method_weekly_sections_empty": "Weekly content not configured"
+        "method_weekly_sections_empty": "Weekly content not configured",
+        "report_cross_window": "Closed outside the window",
+        "report_started_before_window": "Started before the window",
+        "reason_no_provider_db": "AstrBot database (data_v4.db) not found",
+        "reason_provider_query_failed": "Failed to query the LLM call records",
+        "reason_no_llm_calls": "No LLM call records in the selected range",
+        "reason_llm_data_broken": "The LLM service quality data is malformed",
+        "verify_too_frequent": "Too many attempts. Please try again in 30 seconds.",
+        "verify_no_targets": "No push target is configured",
+        "section_disk_detail": "Disk detail"
       }
     }
   }

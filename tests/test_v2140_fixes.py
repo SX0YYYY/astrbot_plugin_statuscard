@@ -85,6 +85,9 @@ def test_db_unavailable_skips_the_report(tmp_path: Path) -> None:
     # The store now retries initialisation on demand; pin the failure so this
     # test covers the "still broken" branch rather than the recovery path.
     store.ensure_ready = lambda: False  # type: ignore[method-assign]
+    # The send path probes the database BEFORE it re-initialises it
+    # (v2.20.14), so the broken database has to fail the probe too.
+    store.probe = lambda: False  # type: ignore[method-assign]
     plugin = _ResultPlugin(DeliveryResult(ok=True, ok_targets=[TARGET]))
     reporter = DailyReporter(plugin, store, _report_config())
     reporter._build_view = lambda day=None: _sample_view()

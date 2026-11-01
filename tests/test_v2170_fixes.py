@@ -442,7 +442,13 @@ def test_weekly_resource_trend_includes_report_day() -> None:
 def test_weekly_guard_uses_weekly_sections() -> None:
     reporter = object.__new__(DailyReporter)
     reporter.config = {"daily_report": {"sections": [], "weekly_sections": ["token"]}}
-    reporter.store = SimpleNamespace(available=False, ensure_ready=lambda: False)
+    reporter.store = SimpleNamespace(
+        available=False,
+        ensure_ready=lambda: False,
+        # The send path probes the database BEFORE it re-initialises it
+        # (v2.20.14).
+        probe=lambda: False,
+    )
     called: list[int] = []
 
     async def fake_notify(targets, weekly=False):
