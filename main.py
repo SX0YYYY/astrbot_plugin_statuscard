@@ -346,8 +346,20 @@ class StatusCardPlugin(Star):
     @filter.command("查看状态")
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
+        # Only ``should_call_llm(False)`` here -- never ``stop_event()``.
+        #
+        # ``stop_event()`` sets ``_force_stopped`` on the event, and
+        # ``is_stopped()`` then returns True for the rest of the pipeline.
+        # The result decoration stage checks that flag and RETURNS, so the
+        # command's own results (the placeholder text and the rendered
+        # image) are never sent: the user saw "状态卡正在生成" and then
+        # nothing, with the framework logging "after_message_sent stopped
+        # event propagation" (issue #1, v2.20.0 ~ v2.20.14).
+        #
+        # ``should_call_llm(False)`` is already enough to keep the default
+        # LLM out of the reply: the framework only calls the LLM when
+        # ``not event.call_llm`` is False.
         event.should_call_llm(False)
-        event.stop_event()
         platform_name = ""
         try:
             platform_name = str(event.get_platform_name() or "")
@@ -834,7 +846,9 @@ class StatusCardPlugin(Star):
         """发送一条测试通知到当前会话与实际推送目标，验证投递链路。"""
 
         event.should_call_llm(False)
-        event.stop_event()
+        # No ``stop_event()`` here: it would make the framework skip the
+        # result chain, so this command's reply would never be sent
+        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
         ok = await self.alerts.send_test(event.unified_msg_origin)
         yield event.plain_result(
             tr(self.config, "test_sent") if ok else tr(self.config, "test_failed")
@@ -846,7 +860,9 @@ class StatusCardPlugin(Star):
         """立即探测全部服务监测项，不影响告警状态。"""
 
         event.should_call_llm(False)
-        event.stop_event()
+        # No ``stop_event()`` here: it would make the framework skip the
+        # result chain, so this command's reply would never be sent
+        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
@@ -881,7 +897,9 @@ class StatusCardPlugin(Star):
     async def cmd_diag(self, event: AstrMessageEvent):
         """Return a compact diagnostic summary without rendering an image."""
         event.should_call_llm(False)
-        event.stop_event()
+        # No ``stop_event()`` here: it would make the framework skip the
+        # result chain, so this command's reply would never be sent
+        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
         lines = ["🩺 状态卡诊断", "──────────────"]
         platform = ""
         try:
@@ -1148,7 +1166,9 @@ class StatusCardPlugin(Star):
         example one that was never delivered while the bot was offline).
         """
         event.should_call_llm(False)
-        event.stop_event()
+        # No ``stop_event()`` here: it would make the framework skip the
+        # result chain, so this command's reply would never be sent
+        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
         # Rendering takes seconds; acknowledge immediately like 查看状态 does.
         yield event.plain_result(tr(self.config, "report_generating"))
         day_arg = None
@@ -1174,10 +1194,11 @@ class StatusCardPlugin(Star):
     async def cmd_preview_weekly(self, event: AstrMessageEvent):
         """Build and send the last-7-days weekly report to the current chat."""
         event.should_call_llm(False)
-        event.stop_event()
+        # No ``stop_event()`` here: it would make the framework skip the
+        # result chain, so this command's reply would never be sent
+        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
         yield event.plain_result(tr(self.config, "weekly_generating"))
         _ok, detail = await self.daily_report.preview(
             getattr(event, "unified_msg_origin", None), span_days=7
         )
         yield event.plain_result(detail)
-        event.stop_event()
