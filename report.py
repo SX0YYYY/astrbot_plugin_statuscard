@@ -18,6 +18,7 @@ from .collectors import (
     collect_bot_info,
     connection_test,
     disk_usage_bounded,
+    get_timezone,
     memory_stat,
     now_in_timezone,
     resolve_targets,
@@ -552,6 +553,25 @@ class DailyReporter:
         self._weekly_pending_recovery_week: str | None = None
         self._weekly_pending_recovery_since = 0.0
         self._weekly_last_sent_week: str | None = None
+        # The slot (YYYY-MM-DD HH:MM) of the weekly report that was last
+        # delivered -- a SECOND line of defence, not the fix.
+        #
+        # The double send on 2026-11-01 happened because the loop computed
+        # the report day from a clock snapshot taken before it slept, so
+        # the slot send published 2026-10-24 (ISO week W43) and the next
+        # iteration published 2026-10-31 (W44). Those are two DIFFERENT
+        # slots (10-25 and 11-01), so no de-duplication key derived from
+        # the delivery could have matched: the two reports belonged to
+        # different weeks.
+        #
+        # The actual fix is to take the slot from ``target`` -- the moment
+        # this iteration already decided to fire at (see ``_weekly_loop``),
+        # which makes both attempts name the same report day and lets the
+        # week-key guard do its job. This slot key is kept as an extra
+        # guard: an exhaustive check over self-consistent states showed it
+        # never blocks something the week key would not already block, so
+        # it is redundant rather than load-bearing.
+        self._weekly_last_sent_slot: str | None = None
         # Week the last weekly send was ATTEMPTED in (set before any slow
         # work): a crash/reload mid-send then leaves a marker the catch-up
         # check accepts, exactly like the daily last_attempt_day. Without
@@ -655,6 +675,7 @@ class DailyReporter:
             except (TypeError, ValueError):
                 setattr(self, attribute, 0.0)
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
+        self._weekly_last_sent_slot = saved.get("weekly_last_sent_slot") or None
         self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
@@ -792,6 +813,7 @@ class DailyReporter:
                     "pending_retry_count": self._pending_retry_count,
                     "pending_retry_day": self._pending_retry_day,
                     "weekly_last_sent_week": self._weekly_last_sent_week,
+                    "weekly_last_sent_slot": self._weekly_last_sent_slot,
                     "weekly_attempt_week": self._weekly_attempt_week,
                     "weekly_given_up_week": self._weekly_given_up_week,
                     "weekly_pending": self._weekly_pending,
@@ -1206,7 +1228,9 @@ class DailyReporter:
                         )
                     self._save_delivery_state()
                     try:
-                        await self._send_weekly_scheduled(report_day)
+                        await self._send_weekly_scheduled(
+                            report_day, self._weekly_slot_for_report_day(report_day)
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -1227,7 +1251,9 @@ class DailyReporter:
                             "周报文字重试仍使用原报告日 %s（跨周不改）", report_day
                         )
                     try:
-                        await self._send_weekly_scheduled(report_day)
+                        await self._send_weekly_scheduled(
+                            report_day, self._weekly_slot_for_report_day(report_day)
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -1270,12 +1296,14 @@ class DailyReporter:
                 if time.time() < pause_until:
                     await asyncio.sleep(min(60.0, max(1.0, pause_until - time.time())))
                     continue
+                caught_up = False
                 if self._weekly_catch_up_allowed():
                     # Covers Sunday nights *and* a Monday-morning restart: the
                     # slot is in the past but still inside the retry window,
                     # so send now instead of waiting for next Sunday.
                     logger.info("周报定时点已过且本期尚未发送，立即补发一次")
                     target = now
+                    caught_up = True
                 elif target <= now:
                     target += timedelta(days=7)
                 if last_logged != target:
@@ -1310,11 +1338,48 @@ class DailyReporter:
                 # the catch-up run (Monday 00:30) a window one day later than
                 # the Sunday 21:30 send -- the same week key, a different
                 # window (v2.20.14).
+                #
+                # The slot is ``target`` -- the moment this iteration
+                # already decided to fire at -- and NOT a fresh wall-clock
+                # read. Both earlier attempts to derive it from the clock
+                # failed, in two different ways:
+                #
+                # 1. From the snapshot taken at the top of the iteration:
+                #    the loop sleeps up to 60 seconds to reach the slot, so
+                #    at 21:29:59 the slot is still in the future and
+                #    ``_weekly_slot_before`` rolls back seven days, naming
+                #    LAST week's report day (2026-10-24, W43). The send
+                #    published that older window and recorded W43 as sent;
+                #    the next iteration recomputed the correct day
+                #    (2026-10-31, W44), a different week key, so the
+                #    "already sent" guard could not stop it and a SECOND
+                #    weekly report went out (2026-11-01 21:30).
+                #
+                # 2. From a fresh wall-clock read at the sending moment:
+                #    that only narrowed the window to the microsecond. A
+                #    wall clock stepped backwards during the sleep (NTP
+                #    step, manual clock change) puts the read before the
+                #    slot again and the same double send returns.
+                #
+                # ``target`` is immune to both: it was computed from the
+                # configured time and pushed to the coming Sunday, so it
+                # names the slot this iteration is firing for no matter
+                # what the clock does during the sleep.
+                #
+                # The catch-up branch is the exception: it sets
+                # ``target = now`` (send immediately) because the slot is
+                # in the past but still inside the retry window. There the
+                # slot has to be derived from the clock again.
                 catchup_day = None
-                slot = self._weekly_slot_before(now)
+                if caught_up:
+                    slot = self._weekly_slot_before(now_in_timezone(self.config))
+                else:
+                    slot = target
                 if slot is not None:
                     catchup_day = (slot - timedelta(days=1)).date().isoformat()
-                await self._send_weekly_scheduled(catchup_day)
+                await self._send_weekly_scheduled(
+                    catchup_day, self._weekly_slot_key(slot)
+                )
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -1480,7 +1545,9 @@ class DailyReporter:
         )
         return True
 
-    async def _send_weekly_scheduled(self, day: str | None = None) -> None:
+    async def _send_weekly_scheduled(
+        self, day: str | None = None, slot: str | None = None
+    ) -> None:
         # Mark this week as attempted before any slow work, mirroring the
         # daily report's last_attempt_day (v2.20.0).
         self._weekly_attempt_week = self._week_key(self._today())
@@ -1544,6 +1611,15 @@ class DailyReporter:
         if self._weekly_last_sent_week == week_key:
             logger.info("周报 %s 已发送过，跳过重复发送", week_key)
             return
+        if slot and self._weekly_last_sent_slot == slot:
+            # A redundant second guard: the same slot must not be delivered
+            # twice. The week-key check above is the one that stops the
+            # 2026-11-01 double send, and it works because the loop now
+            # computes the report day at the moment of sending -- both
+            # attempts then name the same report day and therefore the
+            # same week key.
+            logger.info("周报时段 %s 已发送过，跳过重复发送", slot)
+            return
         targets = self._targets("weekly")
         if not targets:
             # Same as the daily report: an empty target list cannot heal, so
@@ -1578,6 +1654,7 @@ class DailyReporter:
                 )
                 if _delivered(result):
                     self._weekly_last_sent_week = week_key
+                    self._weekly_last_sent_slot = slot
                     self._weekly_given_up_week = None
                     self._record(
                         day,
@@ -1602,6 +1679,7 @@ class DailyReporter:
                         "周报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
                     )
                     self._weekly_last_sent_week = week_key
+                    self._weekly_last_sent_slot = slot
                     self._weekly_given_up_week = None
                     self._record(day, True, "weekly-image unconfirmed")
                     self._weekly_pending = None
@@ -1619,6 +1697,7 @@ class DailyReporter:
         )
         if _delivered(result):
             self._weekly_last_sent_week = week_key
+            self._weekly_last_sent_slot = slot
             self._record(
                 day,
                 True,
@@ -1639,6 +1718,7 @@ class DailyReporter:
         elif _uncertain(result):
             logger.warning("周报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._weekly_last_sent_week = week_key
+            self._weekly_last_sent_slot = slot
             self._record(day, True, "weekly-text unconfirmed")
             self._weekly_pending = None
             self._weekly_pending_report_day = None
@@ -1977,6 +2057,46 @@ class DailyReporter:
         if slot > now:
             slot -= timedelta(days=7)
         return slot
+
+    def _weekly_slot_key(self, slot: datetime | None) -> str | None:
+        """A stable string for a weekly slot, used as the de-duplication key."""
+
+        if slot is None:
+            return None
+        return slot.strftime("%Y-%m-%d %H:%M")
+
+    def _weekly_slot_for_report_day(self, report_day: str | None) -> str | None:
+        """The slot that owns a given report day.
+
+        A weekly report day is the Saturday before its slot, so the slot is
+        the next day at the configured weekly time. The retry paths already
+        pin the report day, so they need the slot of THAT day -- deriving it
+        from the current clock would move the key forward every time the
+        retry fires and the slot guard would never match.
+        """
+
+        if not report_day:
+            return None
+        try:
+            day = date.fromisoformat(str(report_day))
+        except ValueError:
+            return None
+        text = self._weekly_time_text()
+        try:
+            hour, minute = [int(part) for part in text.split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("out of range")
+        except (TypeError, ValueError):
+            return None
+        slot = datetime(
+            day.year,
+            day.month,
+            day.day,
+            hour,
+            minute,
+            tzinfo=get_timezone(self.config),
+        ) + timedelta(days=1)
+        return self._weekly_slot_key(slot)
 
     async def _send_scheduled(self, day: str | None = None) -> None:
         # Two separate markers, because they answer different questions:
