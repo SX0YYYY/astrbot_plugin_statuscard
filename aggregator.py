@@ -49,6 +49,12 @@ class _Bucket:
     # then withdraws "alerted" so the user does not receive a recovery notice
     # for an alert that never reached the chat.
     on_abandon: Callable[[list[tuple[str, str]]], None] | None = None
+    # Called with the batch once the summary has actually reached the chat
+    # (delivered, or "may have arrived" and therefore not retried). The rules
+    # use it to clear their "waiting for the summary" markers: leaving them
+    # behind made a later reload treat a delivered summary as lost, withdraw
+    # "alerted" and alert the same outage a second time (v2.20.17).
+    on_delivered: Callable[[list[tuple[str, str]]], None] | None = None
     # The first alert of this window is still being sent. A slow channel can
     # take longer than the window, and the summary must not appear before the
     # alert it summarizes.
@@ -133,6 +139,7 @@ class AlertAggregator:
         send: SendFn,
         kind: str = "default",
         on_abandon: Callable[[list[tuple[str, str]]], None] | None = None,
+        on_delivered: Callable[[list[tuple[str, str]]], None] | None = None,
     ) -> Any | None:
         """Deliver ``text`` now, or buffer it for the window summary.
 
@@ -150,6 +157,8 @@ class AlertAggregator:
         bucket = self._bucket(key)
         if on_abandon is not None:
             bucket.on_abandon = on_abandon
+        if on_delivered is not None:
+            bucket.on_delivered = on_delivered
         if not (self.window_seconds > 0 and time.time() < bucket.until):
             # Claim the window *before* awaiting ``send``. Claiming it after
             # the await meant concurrent alerts (monitor.check_all probes all
@@ -366,6 +375,7 @@ class AlertAggregator:
                 bucket.retries = 0
                 bucket.retry_at = 0.0
                 bucket.dropped_count = 0
+                self._notify_delivered(bucket, pending, key)
                 return
             if getattr(result, "uncertain_targets", None):
                 # Possibly already in the chat: retrying would duplicate it.
@@ -376,6 +386,7 @@ class AlertAggregator:
                 bucket.retries = 0
                 bucket.retry_at = 0.0
                 bucket.dropped_count = 0
+                self._notify_delivered(bucket, pending, key)
                 return
             self._requeue(bucket, pending, key, "发送失败")
         except asyncio.CancelledError:
@@ -399,6 +410,24 @@ class AlertAggregator:
             # Alerts that arrived during the send opened a new window and
             # need a task of their own once this one is no longer "running".
             self._schedule_if_pending(key)
+
+    def _notify_delivered(
+        self, bucket: _Bucket, pending: list[tuple[str, str]], key: str
+    ) -> None:
+        """Tell the owning rules that their summary reached the chat.
+
+        The callback runs after the message is out, so a failure inside it
+        must never put the batch back on the retry queue -- that would post
+        the same summary twice. Log it and move on; the rules' markers are
+        also repaired on the next reload if they were left behind.
+        """
+
+        if bucket.on_delivered is None:
+            return
+        try:
+            bucket.on_delivered(list(pending))
+        except Exception:
+            logger.exception("告警汇总送达回调失败（%s）", key)
 
     def _requeue(
         self,

@@ -34,7 +34,18 @@ class StateStore:
         self.data: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._save_lock = threading.Lock()
+        # Set by ``close()`` during plugin termination. A sampling worker
+        # started with ``to_thread`` may still finish after the plugin was
+        # unloaded; its late ``save()`` used to write the OLD instance's whole
+        # snapshot over the state the NEW instance had just updated,
+        # resurrecting stale delivery markers (v2.20.17).
+        self._closed = False
         self.load()
+
+    def close(self) -> None:
+        """Stop persisting: a terminated instance must not overwrite state."""
+
+        self._closed = True
 
     def load(self) -> None:
         existed = self.path.is_file()
@@ -169,6 +180,11 @@ class StateStore:
         """
 
         try:
+            if self._closed:
+                # The plugin was unloaded. A worker that was already inside
+                # ``to_thread`` finishes afterwards and used to write this
+                # instance's stale snapshot over the new instance's state.
+                return
             with self._save_lock:
                 with self._lock:
                     self.data.setdefault("schema_version", SCHEMA_VERSION)

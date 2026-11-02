@@ -182,7 +182,12 @@ class PageApi:
         """
 
         store = self.plugin.report_store
-        if store.available:
+        # ``available`` is a cached flag: when the database file is deleted
+        # at runtime it stays True until something touches a real table. The
+        # dashboard then showed "no data was ever recorded" instead of the
+        # explicit database error. ``probe()`` is a cheap SELECT MAX(ts) and
+        # also flips the flag when the file is gone (v2.20.17).
+        if store.available and store.probe():
             return None
         if any(not task.done() for task in self._recovery_tasks):
             # A recovery attempt is already running; spawning another per
@@ -246,12 +251,40 @@ class PageApi:
         operator never asked to hide here.
         """
 
-        return Redactor(read_rules(self.plugin.config, "display.page_redact"))
+        rules = read_rules(self.plugin.config, "display.page_redact")
+        # Constructing a Redactor calls socket.gethostname(); the export path
+        # built one per row (twice per row for events) and spent ~100ms of
+        # CPU on 20k rows for no reason. Reuse it while the rule set is
+        # unchanged; a config reload creates a new PageApi anyway.
+        key = tuple(sorted(rules))
+        cached = getattr(self, "_redactor_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        redactor = Redactor(rules)
+        self._redactor_cache = (key, redactor)
+        return redactor
 
     def _redact(self) -> set[str]:
         """The rule names that apply to the Web dashboard."""
 
         return self._redactor().rules
+
+    def _mask_audit(self, issues: list[Any]) -> list[dict[str, Any]]:
+        """Mask host-shaped tokens inside the config-audit messages.
+
+        ``audit.py`` already strips URL credentials and chat ids, but with
+        the hostname rule on the dashboard must not print the host either:
+        the monitor names in ``monitors`` are hidden, while the audit banner
+        next to them showed the same address verbatim (v2.20.17).
+        """
+
+        redactor = self._redactor()
+        masked: list[dict[str, Any]] = []
+        for issue in issues:
+            item = issue.as_dict()
+            item["message"] = redactor.mask_address_tokens(item.get("message") or "")
+            masked.append(item)
+        return masked
 
     def _host(self) -> str:
         return self._redactor().dashboard_host(socket.gethostname())
@@ -461,6 +494,10 @@ class PageApi:
                         redact_url(str(item.get("name") or ""))
                     ),
                     "kind": item.get("kind"),
+                    # The English page needs the stable type key; without it
+                    # the Chinese KIND_LABELS value ("进程") leaked through
+                    # (v2.20.17). Monitor.status() already provides it.
+                    "kind_key": item.get("kind_key"),
                     "status": status,
                     "last_checked": checked,
                     "last_ok": state.get("last_ok"),
@@ -551,7 +588,7 @@ class PageApi:
                     "last_run": daily_status.get("last_run"),
                 },
                 "provider_quality": provider_quality,
-                "audit": [issue.as_dict() for issue in plugin.audit_issues()],
+                "audit": self._mask_audit(plugin.audit_issues()),
             }
         )
 
@@ -1136,7 +1173,11 @@ class PageApi:
         )
         counts_truncated = len(events) > 2000
         if counts_truncated:
-            events = events[:2000]
+            # ``list_events_range`` returns oldest-first (DESC + reverse), so
+            # slicing from the front dropped the NEWEST event. Every other
+            # route uses ``fetched[-limit:]`` for exactly this reason
+            # (v2.20.17).
+            events = events[-2000:]
         items: list[dict[str, Any]] = [
             {
                 "id": event.get("id"),
@@ -1194,6 +1235,24 @@ class PageApi:
     # GET /reports
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _valid_report_day(raw: str, today: date | None = None) -> bool:
+        """Whether ``?day=`` names a report worth building.
+
+        The upper bound was already checked; the lower bound matters because
+        ``date.fromisoformat("0001-01-01")`` is valid, and subtracting the
+        previous window from it overflowed inside the report builder: the
+        whole page became "构建失败" (v2.20.17).
+        """
+
+        try:
+            parsed = date.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            return False
+        if today is None:
+            today = date.today()
+        return today - timedelta(days=365 * 30) <= parsed <= today
+
     async def reports(self):
         plugin = self.plugin
         gate = self._db_unavailable_payload()
@@ -1215,7 +1274,7 @@ class PageApi:
                 parsed_day = None
             if parsed_day is not None:
                 today = now_in_timezone(plugin.config).date()
-                if parsed_day <= today:
+                if self._valid_report_day(parsed_day.isoformat(), today):
                     day_arg = parsed_day.isoformat()
         # The cache key carries the date, the redaction rules and the report
         # content selection: a single slot used to serve yesterday's report
@@ -1312,6 +1371,15 @@ class PageApi:
             # Asia/Shanghai (v2.20.8).
             "today": now_in_timezone(self.plugin.config).date().isoformat(),
             "sections": view.get("sections"),
+            # Whether the CONFIG listed any sections. ``sections`` above is
+            # filtered to valid names, so an all-invalid list looks like an
+            # empty selection and the page told the operator to "pick some"
+            # when the real problem was a typo (v2.20.17).
+            "sections_configured": (
+                len(sections_cfg)
+                if isinstance(sections_cfg, (list, tuple))
+                else (1 if sections_cfg else 0)
+            ),
             "summary": view.get("summary"),
             "resources": view.get("resources"),
             "anomalies": view.get("anomalies"),

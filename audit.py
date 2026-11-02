@@ -24,7 +24,19 @@ from .collectors import (
 )
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
 from .redactor import RULES as REDACT_RULES
-from .utils import normalize_targets
+from .utils import mask_chat_ids, normalize_targets, redact_url
+
+
+def _safe_label(value: Any) -> str:
+    """A monitor name / target that is safe to print in an audit message.
+
+    The name is operator-provided and is frequently a pasted URL (with
+    credentials and query tokens) or a chat id. The audit banner and the
+    ``状态卡诊断`` command printed it verbatim, so an invalid configuration
+    leaked its credentials on the dashboard (v2.20.17).
+    """
+
+    return mask_chat_ids(redact_url(str(value or "")))
 
 
 @dataclass(frozen=True)
@@ -71,7 +83,7 @@ def _monitor_config_errors(config: Any) -> list[str]:
         if kind not in REQUIRED_FIELDS:
             continue
         required = REQUIRED_FIELDS[kind]
-        name = str(item.get("name") or kind)
+        name = _safe_label(item.get("name") or kind)
         if not item.get(required):
             problems.append(
                 f"监测项「{name}」（{KIND_LABELS[kind]}）缺少 {required} 配置"
@@ -170,7 +182,8 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             _monitor_config_errors(config)
             if monitor is None
             else [
-                f"监测项「{item.get('name')}」（{KIND_LABELS.get(str(item.get('__template_key')), '?')}）"
+                f"监测项「{_safe_label(item.get('name'))}」"
+                f"（{KIND_LABELS.get(str(item.get('__template_key')), '?')}）"
                 f"{item.get('config_error')}"
                 for item in monitor.items
                 if item.get("config_error")
@@ -615,9 +628,20 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 )
             )
         else:
-            try:
-                datetime.strptime(silence_until, "%Y-%m-%d %H:%M")
-            except ValueError:
+            # The runtime accepts both "HH:MM" and "HH:MM:SS" (monitor.py
+            # ``_silence_until``). Checking only the first form reported a
+            # configuration that works as "current won't take effect" --
+            # the administrator then "fixed" a value that was already valid
+            # (v2.20.17). Keep the two parsers in sync.
+            parsed_silence = False
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    datetime.strptime(silence_until, fmt)
+                    parsed_silence = True
+                    break
+                except ValueError:
+                    continue
+            if not parsed_silence:
                 issues.append(
                     AuditIssue(
                         "warning",
@@ -661,7 +685,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             AuditIssue(
                 "warning",
                 "target_format_suspect",
-                f"{label}「{text}」格式可疑：群聊可直接填群号，"
+                f"{label}「{_safe_label(text)}」格式可疑：群聊可直接填群号，"
                 "私聊填 default:FriendMessage:QQ号。",
             )
         )

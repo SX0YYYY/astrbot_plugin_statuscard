@@ -166,6 +166,12 @@ class ReportCollector:
         if not cfg_bool(self.config, "daily_report.collect", True):
             logger.info("日报数据收集未启用（daily_report.collect=false）")
             return
+        if self._task is not None and not self._task.done():
+            # A second initialize() (config reload) used to create a second
+            # sampling loop; terminate() only cancels the last one, so the
+            # first kept writing and saving state in the background
+            # (v2.20.17).
+            return
         if not self.store.available:
             # Keep the loop alive: it retries the database every minute, so a
             # full disk or a permission fix no longer requires a plugin reload.
@@ -1150,8 +1156,14 @@ class DailyReporter:
                     await asyncio.sleep(min(60.0, max(1.0, pause_until - time.time())))
                     continue
                 target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                catch_up_day = None
                 if target <= now:
-                    if self._daily_catch_up_allowed(self._today()):
+                    # An empty target list cannot heal on its own: without
+                    # this gate the catch-up branch re-armed after every
+                    # 10-minute pause and rebuilt the whole report 18 times
+                    # before midnight (v2.20.17). Filling the target re-arms
+                    # it immediately because this reads the live config.
+                    if self._targets() and self._daily_catch_up_allowed(self._today()):
                         logger.info(
                             "日报定时点已过且今天尚未尝试，立即补发一次（%s）",
                             self._today(),
@@ -1159,6 +1171,26 @@ class DailyReporter:
                         target = now
                     else:
                         target += timedelta(days=1)
+                else:
+                    # The process can be down through the whole evening and
+                    # come back after midnight. The branch above only covers
+                    # "tonight's slot already passed", so a 00:30 restart used
+                    # to wait for the NEXT evening: the report that was due at
+                    # 21:00 vanished without a trace (v2.20.17). Backfill it
+                    # while its slot is still inside the same 8.5-hour window
+                    # the weekly report uses.
+                    catch_up_day = self._daily_missed_window_day()
+                    if catch_up_day is not None:
+                        # Remember that this process already tried it, even if
+                        # the send fails: the retry/recovery queues own the
+                        # report from here (see _daily_missed_window_day).
+                        self._daily_backfill_day = catch_up_day
+                        self._daily_backfill_inflight = True
+                        logger.info(
+                            "发现 %s 的日报未发送（停机跨过发送时间），立即补发",
+                            catch_up_day,
+                        )
+                        target = now
                 if last_logged != target:
                     self._next_run_text = target.strftime("%Y-%m-%d %H:%M")
                     logger.info(
@@ -1190,7 +1222,10 @@ class DailyReporter:
                 self._image_retry_attempts = 0
                 self._pending_image_retry = None
                 self._save_delivery_state()
-                await self._send_scheduled()
+                try:
+                    await self._send_scheduled(catch_up_day)
+                finally:
+                    self._daily_backfill_inflight = False
                 last_logged = None
             except asyncio.CancelledError:
                 raise
@@ -1297,7 +1332,7 @@ class DailyReporter:
                     await asyncio.sleep(min(60.0, max(1.0, pause_until - time.time())))
                     continue
                 caught_up = False
-                if self._weekly_catch_up_allowed():
+                if self._targets("weekly") and self._weekly_catch_up_allowed():
                     # Covers Sunday nights *and* a Monday-morning restart: the
                     # slot is in the past but still inside the retry window,
                     # so send now instead of waiting for next Sunday.
@@ -1458,13 +1493,21 @@ class DailyReporter:
         transport_offline: bool = False,
         store_unavailable: bool = False,
     ) -> bool:
-        # The marker belongs to the report week (Saturday), not to the day the
-        # attempt happens: a Sunday-night retry that crosses midnight runs on
-        # Monday, and keying it by "today" wrote the wrong week.
-        report_day = (
-            getattr(self, "_weekly_pending_report_day", None)
-            or self._default_report_day()
-        )
+        # Pin the report day to the slot BEFORE computing the week key.
+        #
+        # The content-retry branch used to leave ``_weekly_pending_report_day``
+        # unset and derive the day from the clock at retry time, so a build
+        # failure at Sunday 21:30 followed by a reload at Monday 00:20 built
+        # "yesterday's" week: the window moved one day forward while the ISO
+        # week key stayed the same, so de-duplication could not save it
+        # (v2.20.17).
+        slot = self._weekly_slot_before(now_in_timezone(self.config))
+        report_day = getattr(self, "_weekly_pending_report_day", None)
+        if slot is not None:
+            report_day = (slot - timedelta(days=1)).date().isoformat()
+        if not report_day:
+            report_day = self._default_report_day()
+        self._weekly_pending_report_day = report_day
         week_key = self._week_key(report_day)
         if transport_offline:
             if (
@@ -1479,18 +1522,9 @@ class DailyReporter:
             self._weekly_pending_recovery_week = week_key
             if not self._weekly_pending_recovery_since:
                 self._weekly_pending_recovery_since = time.time()
-            # Pin the report day to the slot, like the database-outage branch
-            # below. Without it the queued report was built from the calendar
-            # day at the time of the retry, so a report that waited across
-            # midnight covered a different window than the one the slot
-            # announced (v2.20.14).
-            slot = self._weekly_slot_before(now_in_timezone(self.config))
-            if slot is not None:
-                self._weekly_pending_report_day = (
-                    (slot - timedelta(days=1)).date().isoformat()
-                )
-            elif getattr(self, "_weekly_pending_report_day", None) is None:
-                self._weekly_pending_report_day = report_day
+            # The report day was pinned to the slot at the top of this
+            # function, so the queued report keeps the window the slot
+            # announced even when the retry crosses midnight.
             self._weekly_pending = time.time() + 900
             self._save_delivery_state()
             logger.warning(
@@ -1503,23 +1537,8 @@ class DailyReporter:
             # here: the only recovery path was the catch-up guard, whose
             # window is 8.5 hours after the slot, so a longer database
             # outage made the whole weekly report disappear silently
-            # (v2.20.12).
-            #
-            # The report day is pinned: a retry that crosses midnight would
-            # otherwise build "yesterday's" week and cover a different
-            # window than the one the slot announced.
-            #
-            # It is the day of the CURRENT slot, not a leftover from the
-            # previous week: the branch runs before the report day is
-            # computed, so keeping an old value would send last week's
-            # window (v2.20.12).
-            slot = self._weekly_slot_before(now_in_timezone(self.config))
-            if slot is not None:
-                self._weekly_pending_report_day = (
-                    (slot - timedelta(days=1)).date().isoformat()
-                )
-            elif getattr(self, "_weekly_pending_report_day", None) is None:
-                self._weekly_pending_report_day = report_day
+            # (v2.20.12). The report day was pinned at the top of this
+            # function (v2.20.17).
             self._weekly_pending = time.time() + 900
             self._save_delivery_state()
             logger.warning("周报发送失败（日报数据库不可用），已排队，数据库恢复后补发")
@@ -1565,6 +1584,16 @@ class DailyReporter:
                 )
             self._weekly_pause_until = time.time() + 600
             self._clear_retry()
+            return
+        targets = self._targets("weekly")
+        if not targets:
+            # Same as the daily report: an empty target list cannot heal, and
+            # building a seven-day window first only made the loop rebuild it
+            # every ten minutes all night (v2.20.17).
+            logger.warning("周报推送目标为空，跳过发送（请先在配置里填写推送目标）")
+            self._weekly_retry_count = 0
+            self._weekly_pause_until = time.time() + 600
+            self._save_delivery_state()
             return
         if not self.store.probe() or not self.store.ensure_ready():
             # ``probe()`` MUST run before ``ensure_ready()`` (v2.20.14):
@@ -1619,15 +1648,6 @@ class DailyReporter:
             # attempts then name the same report day and therefore the
             # same week key.
             logger.info("周报时段 %s 已发送过，跳过重复发送", slot)
-            return
-        targets = self._targets("weekly")
-        if not targets:
-            # Same as the daily report: an empty target list cannot heal, so
-            # the three-retry cycle only burned report_runs rows.
-            logger.warning("周报推送目标为空，跳过发送（请先在配置里填写推送目标）")
-            self._weekly_retry_count = 0
-            self._weekly_pause_until = time.time() + 600
-            self._save_delivery_state()
             return
         day = report_day
         if self._with_image():
@@ -1796,6 +1816,7 @@ class DailyReporter:
         day: str | None,
         transport_offline: bool = False,
         store_unavailable: bool = False,
+        poll_offline: bool = True,
     ) -> bool:
         """Remember a failed delivery and queue the next attempt.
 
@@ -1845,7 +1866,12 @@ class DailyReporter:
                 self._pending_recovery_since = time.time()
             # A long outage has no "next retry" that can succeed; poll every
             # 15 minutes as a fallback in case the reconnect hook is missed.
-            self._pending_retry = (budget_key, time.time() + 900)
+            # The post-midnight backfill passes poll_offline=False: it already
+            # waited once and a 15-minute poll only rebuilt the report 24
+            # times before 06:00 (v2.20.17 audit).
+            self._pending_retry = (
+                (budget_key, time.time() + 900) if poll_offline else None
+            )
             self._save_delivery_state()
             logger.warning(
                 "日报 %s 发送失败（Bot 连接不可用），已排队，恢复后补发最近这一份",
@@ -1872,6 +1898,13 @@ class DailyReporter:
             # marker, and without it the daily loop re-armed the catch-up
             # after every abandon and sent the report all night long.
             self._daily_given_up_day = budget_key
+            # An earlier transport failure could have left the same day in
+            # the offline-recovery queue. Without clearing it, the next
+            # reconnect re-queued a report that was already given up and the
+            # loop sent it anyway -- bypassing the give-up guard (v2.20.17).
+            if getattr(self, "_pending_recovery_day", None) == budget_key:
+                self._pending_recovery_day = None
+                self._pending_recovery_since = 0.0
             self._save_delivery_state()
             logger.warning("日报 %s 重试 3 次后仍失败，停止重试", budget_key)
             return False
@@ -1994,6 +2027,72 @@ class DailyReporter:
             )
         return True
 
+    def _daily_missed_window_day(self) -> str | None:
+        """The report day whose evening slot was missed, still retryable.
+
+        A restart after midnight computes today's slot as "later tonight" and
+        waits, so a process that was down through the evening silently lost
+        that day's report. This returns the newest due report day while its
+        slot is still inside an 8.5-hour catch-up window (the same window the
+        weekly report uses), and ``None`` in every other case.
+        """
+
+        if not self._last_attempt_day:
+            # First install or an upgrade without markers: the previous
+            # process may already have delivered it. Same rule as
+            # ``_daily_catch_up_allowed``.
+            return None
+        if getattr(self, "_pending_retry", None) is not None:
+            return None
+        if getattr(self, "_pending_recovery_day", None):
+            return None
+        if not self._targets():
+            return None
+        sections = getattr(self, "_sections", None)
+        if callable(sections):
+            selected = sections()
+            if selected is not None and not selected:
+                # An empty section list cannot produce a report; without this
+                # the 10-minute pause re-armed the backfill from 00:00 to
+                # 05:30 and wrote ~30 records (v2.20.17 audit).
+                return None
+        report_day = self._latest_due_report_day()
+        if not report_day or report_day == self._last_sent_day:
+            return None
+        if report_day == self._daily_given_up_day:
+            return None
+        if report_day == getattr(self, "_daily_backfill_day", None):
+            # This process already tried this backfill once. A transport
+            # outage keeps the report queued (pending_recovery/pending_retry)
+            # and must not rebuild + re-render it every 15 minutes until the
+            # 8.5-hour window ends (v2.20.17 audit).
+            return None
+        # ``report_day == self._last_attempt_day`` is NOT a blocker by itself:
+        # the marker is written before the slow work, so a restart in the
+        # middle of the send leaves exactly that marker with no delivery and
+        # no retry plan. Exactly one catch-up is allowed then, mirroring
+        # ``_daily_catch_up_allowed``. A queued retry is handled above.
+
+        try:
+            hour, minute = [int(part) for part in self._time_text().split(":", 1)]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+            slot_day = date.fromisoformat(report_day) + timedelta(days=1)
+            slot = datetime(
+                slot_day.year,
+                slot_day.month,
+                slot_day.day,
+                hour,
+                minute,
+                tzinfo=now_in_timezone(self.config).tzinfo,
+            )
+        except (TypeError, ValueError):
+            return None
+        now = now_in_timezone(self.config)
+        if now < slot or now - slot > timedelta(hours=8, minutes=30):
+            return None
+        return report_day
+
     def _week_key(self, day: str) -> str:
         try:
             iso = date.fromisoformat(day).isocalendar()
@@ -2099,6 +2198,12 @@ class DailyReporter:
         return self._weekly_slot_key(slot)
 
     async def _send_scheduled(self, day: str | None = None) -> None:
+        # Whether this send is the post-midnight backfill. A transport outage
+        # during the normal 21:00 slot keeps the historical 15-minute polling
+        # (pending_retry), but doing that at 00:30 rebuilt and re-rendered the
+        # report 24 times in six hours (v2.20.17 audit). The backfill only
+        # leaves the report in the recovery queue instead.
+        backfill = bool(getattr(self, "_daily_backfill_inflight", False))
         # Two separate markers, because they answer different questions:
         # ``_last_attempt_day`` = "which report day was last attempted" and
         # ``_last_attempt_wall_day`` = "on which calendar day was the last
@@ -2117,6 +2222,17 @@ class DailyReporter:
             # older than yesterday) and pause the loop: without the pause the
             # catch-up guard re-armed every second until midnight.
             self._record(day or self._default_report_day(), False, "sections empty")
+            self._daily_pause_until = time.time() + 600
+            self._clear_retry()
+            return
+        if not targets:
+            # An empty target list is a configuration problem that will not
+            # heal on its own; retrying only wrote "targets empty" rows and
+            # the give-up notice went nowhere anyway. Check BEFORE building:
+            # the old position was after the full report build, so every
+            # catch-up attempt rebuilt the whole day for nothing (v2.20.17).
+            logger.warning("日报推送目标为空，跳过发送（请先在配置里填写推送目标）")
+            self._record(day or self._default_report_day(), False, "targets empty")
             self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
@@ -2158,17 +2274,6 @@ class DailyReporter:
                 await self._notify_give_up(targets, day or "", weekly=False)
             return
         day = str(view.get("day") or "")
-        if not targets:
-            # An empty target list is a configuration problem that will not
-            # heal on its own; retrying three times only wrote three
-            # "targets empty" rows and the give-up notice went nowhere
-            # anyway (there is no target to notify). The config audit flags
-            # the empty list at startup; here one record is enough.
-            logger.warning("日报推送目标为空，跳过发送（请先在配置里填写推送目标）")
-            self._record(day, False, "targets empty")
-            self._daily_pause_until = time.time() + 600
-            self._clear_retry()
-            return
         if self._last_sent_day == day:
             logger.info("日报 %s 已发送过，跳过重复发送", day)
             self._clear_retry()
@@ -2262,7 +2367,9 @@ class DailyReporter:
             offline = bool(
                 isinstance(result, DeliveryResult) and result.transport_offline
             )
-            if not self._schedule_retry(day, transport_offline=offline):
+            if not self._schedule_retry(
+                day, transport_offline=offline, poll_offline=not backfill
+            ):
                 await self._notify_give_up(targets, day, weekly=False)
 
     async def preview(

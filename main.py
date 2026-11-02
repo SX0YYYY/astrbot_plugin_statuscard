@@ -39,6 +39,7 @@ from .i18n import tr
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
 from .page_api import PageApi
+from .redactor import Redactor, read_rules
 from .report import DailyReporter, ReportCollector
 from .report_store import ReportStore
 from .sampler import Sampler
@@ -336,6 +337,10 @@ class StatusCardPlugin(Star):
                 await stop()
             except Exception:
                 logger.exception("停止 %s 失败，继续清理其余组件", name)
+        # Last, after every component wrote its final state: a later save from
+        # a worker thread that is still finishing must not overwrite the
+        # state a reloaded instance will read (v2.20.17).
+        self.state.close()
         logger.info("StatusCard plugin terminated")
 
     # ------------------------------------------------------------------
@@ -475,7 +480,11 @@ class StatusCardPlugin(Star):
         # The T2I service supports three fixed scale levels. "ultra" is 1.8x,
         # so a logical width of 650 CSS px produces a 1170 px wide image.
         logical_width = self._logical_render_width()
-        html = build_default_html(
+        # Template rendering + image data-URL encoding is CPU work (130ms with
+        # a real avatar measured): run it in a thread so the event loop keeps
+        # serving commands and the web dashboard during the render (v2.20.17).
+        html = await asyncio.to_thread(
+            build_default_html,
             collected,
             background.data,
             background.mime,
@@ -1002,6 +1011,11 @@ class StatusCardPlugin(Star):
                 )
 
         audit = self.audit_issues()
+        # Audit messages quote operator-provided monitor names / targets.
+        # ``audit.py`` already strips credentials and chat ids; honour the
+        # card's hostname rule here as well, or the diagnostic command prints
+        # the internal host that the card itself hides (v2.20.17).
+        audit_redactor = Redactor(read_rules(self.config, "display.redact"))
         actionable = [item for item in audit if item.level in ("error", "warning")]
         if actionable:
             # Listing only a count left the administrator unable to act from
@@ -1010,14 +1024,18 @@ class StatusCardPlugin(Star):
             lines.append(f"配置体检: {len(actionable)} 项待处理")
             for issue in actionable[:4]:
                 tag = "错误" if issue.level == "error" else "提醒"
-                lines.append(f"  [{tag}] {issue.message}")
+                lines.append(
+                    f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                )
             if len(actionable) > 4:
                 lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
         elif audit:
             lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
             for issue in audit[:4]:
                 tag = "错误" if issue.level == "error" else "提醒"
-                lines.append(f"  [{tag}] {issue.message}")
+                lines.append(
+                    f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                )
         else:
             lines.append("配置体检: 未发现问题")
 
@@ -1185,9 +1203,18 @@ class StatusCardPlugin(Star):
             if parsed <= today:
                 day_arg = parsed.isoformat()
                 break
-        _ok, detail = await self.daily_report.preview(
-            getattr(event, "unified_msg_origin", None), day=day_arg
-        )
+        try:
+            _ok, detail = await self.daily_report.preview(
+                getattr(event, "unified_msg_origin", None), day=day_arg
+            )
+        except Exception:
+            # Without this the generator raised after the acknowledgement and
+            # the user only ever saw "正在生成" (v2.20.17). ``tr`` reads the
+            # command-reply table, which has no ``report_build_failed`` key --
+            # that one only exists in the page i18n JSON and was shown to the
+            # user as a literal key (v2.20.17 audit).
+            logger.exception("预览日报失败")
+            detail = tr(self.config, "report_preview_failed")
         yield event.plain_result(detail)
         # The trailing ``stop_event()`` is deliberate and MUST stay: it is
         # what keeps this reply out of the LLM branch. The framework enters
@@ -1211,9 +1238,13 @@ class StatusCardPlugin(Star):
         # never be sent (issue #1). The trailing call below is a different
         # thing and stays.
         yield event.plain_result(tr(self.config, "weekly_generating"))
-        _ok, detail = await self.daily_report.preview(
-            getattr(event, "unified_msg_origin", None), span_days=7
-        )
+        try:
+            _ok, detail = await self.daily_report.preview(
+                getattr(event, "unified_msg_origin", None), span_days=7
+            )
+        except Exception:
+            logger.exception("预览周报失败")
+            detail = tr(self.config, "weekly_preview_failed")
         yield event.plain_result(detail)
         # See cmd_preview_report: this trailing call is the LLM guard and
         # must stay (v2.5.1).

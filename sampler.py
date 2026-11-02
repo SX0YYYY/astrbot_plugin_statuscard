@@ -244,7 +244,19 @@ class Sampler:
             per_nic = psutil.net_io_counters(pernic=True) or {}
         except Exception:
             per_nic = {}
-        if interface and interface in per_nic:
+        try:
+            nic_stats = psutil.net_if_stats() or {}
+        except Exception:
+            # Cannot tell: keep the previous interface (conservative).
+            nic_stats = {}
+        current_stats = nic_stats.get(interface) if interface else None
+        # A saved interface that still EXISTS but lost its link (cable
+        # unplugged, VPN down, NIC disabled) has frozen counters. Only
+        # checking membership kept it selected forever: rates and the month
+        # totals stayed at zero until the plugin was restarted, while the
+        # card picked another interface (v2.20.17).
+        current_up = current_stats is None or bool(current_stats.isup)
+        if interface and interface in per_nic and current_up:
             counters = per_nic[interface]
         elif per_nic:
             # Pick the busiest *physical, up* interface once and keep it: the
@@ -253,10 +265,6 @@ class Sampler:
             # on a containerised bot. A virtual bridge with the largest
             # counters used to win permanently, so the card and the month
             # totals showed container-internal traffic.
-            try:
-                nic_stats = psutil.net_if_stats() or {}
-            except Exception:
-                nic_stats = {}
             virtual_prefixes = (
                 "docker",
                 "br-",

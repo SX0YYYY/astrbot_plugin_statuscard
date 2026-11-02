@@ -608,7 +608,45 @@ class AlertEngine:
             send=lambda text: self._send(text, kind="resource"),
             kind="resource",
             on_abandon=self._on_summary_abandoned,
+            on_delivered=self._on_summary_delivered,
         )
+
+    def _on_summary_delivered(self, items: list[tuple[str, str]]) -> None:
+        """Clear the "waiting for the summary" markers after it lands.
+
+        A buffered alert is announced exactly when its summary reaches the
+        chat. Keeping ``awaiting_summary``/``summary_buffered`` behind made
+        the reload repair (``_mark_stale_rules``) believe the summary had
+        been lost: it withdrew ``alerted`` and marked the rule abandoned, so
+        a still-failing rule alerted a second time and a recovered one lost
+        its recovery notice (v2.20.17).
+        """
+
+        labels = {label for label, _reason in items if label}
+        if not labels:
+            return
+        changed = False
+        with self.state.section("alerts") as alerts:
+            rules = alerts.get("rules")
+            if not isinstance(rules, dict):
+                return
+            for st in rules.values():
+                if not isinstance(st, dict):
+                    continue
+                if str(st.get("label") or "") not in labels:
+                    continue
+                if not st.get("alerting"):
+                    continue
+                # Only rules whose alert was actually buffered. A same-named
+                # rule that delivered its own alert already cleared this
+                # marker (v2.20.14); touching it here would hide a *real*
+                # abandon of its own later summary.
+                if not st.pop("summary_buffered", None):
+                    continue
+                st.pop("awaiting_summary", None)
+                changed = True
+        if changed:
+            self.state.save()
 
     def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
         """Withdraw "alerted" for rules whose summary never reached the chat.
@@ -1503,6 +1541,14 @@ class AlertEngine:
                     f"持续 {format_duration(duration)}",
                     "recovery",
                 )
+                # Read before clearing: only an alert that was ACTUALLY
+                # buffered may hand its recovery to the summary. An older
+                # version could leave ``awaiting_summary`` behind (a direct
+                # send cleared only this marker), and a stale flag made the
+                # recovery queue behind an unrelated same-name summary; when
+                # that summary was abandoned the queued recovery was deleted
+                # and the user never learned the outage had ended (v2.20.17).
+                buffered = bool(st.pop("summary_buffered", None))
                 # Consume the flag even when no notice is sent (recover_notify
                 # off / stale / suppressed): leaving it behind made the next
                 # unrelated recovery queue behind an already-closed window.
@@ -1523,7 +1569,7 @@ class AlertEngine:
                         if self._aggregator is not None
                         else 0.0
                     )
-                    if awaiting and remaining > 0:
+                    if awaiting and buffered and remaining > 0:
                         # This rule's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat (恢复先于告警到达，看起来像

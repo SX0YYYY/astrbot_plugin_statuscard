@@ -858,6 +858,23 @@ main.is-refreshing::after {
     padding: 14px 12px 30px;
   }
 
+  /* The English labels are longer than the Chinese ones. At 390px the four
+     tabs were clipped mid-word and the three verify buttons pushed the whole
+     page into a horizontal scroll. Let both wrap instead (v2.20.17). */
+  .tabs {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .segmented {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .segmented button {
+    flex: 1 1 auto;
+  }
+
   .brand-text h1 {
     font-size: 18px;
   }

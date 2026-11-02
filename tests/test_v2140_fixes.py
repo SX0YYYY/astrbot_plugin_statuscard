@@ -234,7 +234,7 @@ def test_report_loop_survives_uncaught_send_error(
     reporter._running = True
     calls = {"n": 0}
 
-    async def boom() -> None:
+    async def boom(day=None) -> None:
         calls["n"] += 1
         raise RuntimeError("boom")
 

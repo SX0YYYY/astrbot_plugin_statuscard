@@ -346,7 +346,17 @@ def test_report_retry_uses_resolved_day(monkeypatch, tmp_path: Path) -> None:
     state = StateStore(tmp_path / "state.json")
     plugin = _Plugin()
     plugin.state = state
-    reporter = DailyReporter(plugin, store, {"daily_report": {"enabled": True}})
+    reporter = DailyReporter(
+        plugin,
+        store,
+        {
+            "daily_report": {
+                "enabled": True,
+                # The empty-target check now runs before the build (v2.20.17).
+                "targets": ["123456"],
+            }
+        },
+    )
 
     calls: list[object] = []
 

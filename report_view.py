@@ -78,6 +78,11 @@ def _duration_code(duration_text: str) -> str | None:
     """
 
     text = str(duration_text or "")
+    # "跨窗口关闭（窗口前开始）" carries BOTH meanings; the window-close
+    # reason must win, or the English page says the outage merely started
+    # earlier instead of explaining that its end was never observed.
+    if text.startswith("跨窗口关闭"):
+        return "cross_window"
     if "（窗口前开始）" in text:
         return "started_before_window"
     return _DURATION_CODES.get(text)
@@ -974,6 +979,16 @@ class DailyReportBuilder:
                 if first_row is not None:
                     own = first_row.get("resolved_ts")
                     own_ts = safe_int(own) if own is not None else None
+                    # Only a row closed at a DIFFERENT moment is an orphan.
+                    #
+                    # ``close_all=True`` (the only production caller) stamps
+                    # every still-open row of the rule with the recovery's
+                    # timestamp, including an orphan from an earlier fault.
+                    # Such an orphan therefore carries ``own_ts == stamp`` and
+                    # cannot be distinguished from the first row of one
+                    # interrupted episode. Treating ``own_ts is None`` (the
+                    # pre-v2.12 historical rows) as an orphan split ONE
+                    # failed+alert episode into two rows (v2.20.17 audit).
                     if own_ts is not None and own_ts != stamp:
                         # The orphan closes at its own moment; the episode
                         # starts at the first row that is still open.
@@ -1038,14 +1053,30 @@ class DailyReportBuilder:
                     start = None
                 else:
                     start = episode[0]
+                # A fault that began before the window and recovered inside
+                # it has no in-window alert row, so the counter never counted
+                # it while the table showed it: "异常 0 次" above a 20-minute
+                # outage (v2.20.17). Count it here unless its alert row was
+                # already counted above.
+                if start and start < window_start_ts and (key, start) not in seen_ids:
+                    count += 1
                 # The episode is over: a later alert with the same key is a
                 # new one and must count again.
                 seen_ids = {sid for sid in seen_ids if sid[0] != key}
                 episode_open.discard(key)
                 if start:
-                    duration_text = format_duration(started_i - start)
-                    if start < window_start_ts:
-                        duration_text += "（窗口前开始）"
+                    if started_i - start > (span + 1) * 86400:
+                        # Same guard as the alert branch below. The recovery
+                        # branch used to overwrite the guarded "跨窗口关闭"
+                        # with the raw duration, so a three-day-old orphan
+                        # became "3天01:05:00" (v2.20.17).
+                        duration_text = "跨窗口关闭"
+                        if start < window_start_ts:
+                            duration_text += "（窗口前开始）"
+                    else:
+                        duration_text = format_duration(started_i - start)
+                        if start < window_start_ts:
+                            duration_text += "（窗口前开始）"
                 prior = emitted.get(key)
                 if prior is not None and prior < len(items):
                     previous = items[prior]
@@ -1191,6 +1222,10 @@ class DailyReportBuilder:
                     "status_key": "unresolved",
                     "detail": "开始于此处，未记录恢复时刻（可能已恢复）",
                     "duration": "进行中",
+                    # The normal rows carry a code for the English dashboard;
+                    # this row used to show the raw Chinese text there
+                    # ("进行中" instead of "Ongoing", v2.20.17).
+                    "duration_code": "ongoing",
                 }
             )
         raw_total = len(items)

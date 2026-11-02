@@ -235,7 +235,15 @@
         "reason_llm_data_broken": "The LLM service quality data is malformed",
         "verify_too_frequent": "Too many attempts. Please try again in 30 seconds.",
         "verify_no_targets": "No push target is configured",
-        "section_disk_detail": "Disk detail"
+        "section_disk_detail": "Disk detail",
+        "hidden_value": "Hidden",
+        "error_hidden": "Hidden (the error contains a host or address)",
+        "monitor_kind_http": "HTTP",
+        "monitor_kind_tcp": "TCP",
+        "monitor_kind_docker": "Docker",
+        "monitor_kind_process": "Process",
+        "monitor_kind_systemd": "systemd",
+        "report_sections_invalid": "No valid report sections configured; check the selections on the config page."
       }
     }
   }

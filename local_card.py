@@ -244,8 +244,12 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
     draw.text((PADDING + 24, disk_y + 18), "磁盘", font=_font(24), fill=MUTED)
     disks = view.get("disks") or []
     if disks:
-        first = disks[0]
-        percent = float(first.get("percent") or 0.0)
+        # Show a readable mount when one exists: the first entry used to be
+        # an unreadable NAS path, so the fallback card hid the healthy local
+        # disk behind a 0% empty bar (v2.20.17).
+        first = next((item for item in disks if not item.get("error")), disks[0])
+        failed = bool(first.get("error"))
+        percent = 0.0 if failed else float(first.get("percent") or 0.0)
         bar_left = PADDING + 120
         bar_right = WIDTH - PADDING - 320
         draw.rounded_rectangle(
@@ -271,11 +275,16 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
         # space that is actually free, like ``net_text`` already does.
         label = _clip_text(
             draw,
-            f"{first.get('path', '')}  {first.get('percent_text', '--')}",
+            f"{first.get('path', '')}  "
+            f"{first.get('error') if failed else first.get('percent_text', '--')}",
             label_font,
             max(80, right_edge - bar_right - 12),
         )
-        detail = f"{first.get('used', '--')} / {first.get('total', '--')}"
+        detail = (
+            "--"
+            if failed
+            else f"{first.get('used', '--')} / {first.get('total', '--')}"
+        )
         _, _, label_right, _ = draw.textbbox((0, 0), label, font=label_font)
         _, _, detail_right, _ = draw.textbbox((0, 0), detail, font=detail_font)
         draw.text(

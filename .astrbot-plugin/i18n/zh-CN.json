@@ -235,7 +235,15 @@
         "reason_llm_data_broken": "LLM 服务质量数据异常",
         "verify_too_frequent": "验证过于频繁，请 30 秒后再试（避免重复发送消息）",
         "verify_no_targets": "未配置任何推送目标",
-        "section_disk_detail": "磁盘明细"
+        "section_disk_detail": "磁盘明细",
+        "hidden_value": "已隐藏",
+        "error_hidden": "已隐藏（错误详情含主机或地址信息）",
+        "monitor_kind_http": "HTTP",
+        "monitor_kind_tcp": "TCP",
+        "monitor_kind_docker": "Docker",
+        "monitor_kind_process": "进程",
+        "monitor_kind_systemd": "systemd",
+        "report_sections_invalid": "日报内容配置里没有有效项，请检查配置页的勾选"
       }
     }
   }

@@ -72,13 +72,17 @@
 <div class="card section">
   <div class="section-title"><span class="section-icon">💾</span>磁盘使用</div>
   {% for d in v.disks %}
-  <div class="disk-row">
+  <div class="disk-row{% if d.error %} disk-row-error{% endif %}">
     <div class="disk-path">{{ d.path }}</div>
     <div class="disk-bar">
+      {% if d.error %}
+      <div class="disk-fill disk-fill-error" style="width: 100%"></div>
+      {% else %}
       <div class="disk-fill {{ d.percent | percent_to_color }}" style="width: {{ d.percent }}%"></div>
+      {% endif %}
     </div>
-    <div class="disk-size">{{ d.used }} / {{ d.total }}</div>
-    <div class="disk-pct">{{ d.percent_text }}</div>
+    <div class="disk-size">{% if d.error %}{{ d.error }}{% else %}{{ d.used }} / {{ d.total }}{% endif %}</div>
+    <div class="disk-pct">{% if d.error %}--{% else %}{{ d.percent_text }}{% endif %}</div>
   </div>
   {% endfor %}
   <div class="disk-io-row">

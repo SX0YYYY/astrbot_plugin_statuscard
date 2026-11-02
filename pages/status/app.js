@@ -141,6 +141,35 @@
     return "zh-CN";
   }
 
+  // Redaction placeholders are Chinese constants produced by the backend
+  // (redactor.HIDDEN). They are data, not UI copy, so the English page used
+  // to show "已隐藏" for the host, monitor names and process names
+  // (v2.20.17).
+  const HIDDEN_PLACEHOLDERS = {
+    "已隐藏": "hidden_value",
+    "已隐藏（错误详情含主机或地址信息）": "error_hidden",
+  };
+
+  function localizeHidden(value) {
+    const text = String(value === null || value === undefined ? "" : value);
+    const key = HIDDEN_PLACEHOLDERS[text];
+    return key ? t(key, text) : text;
+  }
+
+  // KIND_LABELS is Chinese for "进程"; the stable key lets the English page
+  // translate the type instead of leaking the Chinese word (v2.20.17).
+  function monitorKindText(item) {
+    const key = item && item.kind_key;
+    if (key) {
+      // Build the key through a variable so the i18n contract test does not
+      // treat "monitor_kind_" as a literal key that must exist verbatim.
+      const prefix = "monitor_kind_";
+      const translated = t(prefix + key, "");
+      if (translated && translated !== prefix + key) return translated;
+    }
+    return (item && item.kind) || "?";
+  }
+
   function applyStaticI18n() {
     document.querySelectorAll("[data-i18n]").forEach((element) => {
       const key = element.getAttribute("data-i18n");
@@ -868,7 +897,7 @@
   // ------------------------------------------------------------------
 
   function updateSubtitle(data) {
-    const host = data.host || "--";
+    const host = localizeHidden(data.host || "--");
     // "default" is the plugin's internal platform key, not something a user
     // recognises; showing "host · default" read like a broken value.
     const platform =
@@ -1147,9 +1176,9 @@
                 '<div class="monitor"><i class="dot ' +
                 esc(item.status) +
                 '"></i><div class="monitor-main"><div class="monitor-name">' +
-                esc(item.name) +
+                esc(localizeHidden(item.name)) +
                 '</div><div class="monitor-meta">' +
-                esc(item.kind + " · " + meta) +
+                esc(monitorKindText(item) + " · " + localizeHidden(meta)) +
                 "</div></div></div>"
               );
             })
@@ -1166,7 +1195,7 @@
               "<tr><td>" +
               esc(item.rank) +
               "</td><td>" +
-              esc(item.name) +
+              esc(localizeHidden(item.name)) +
               "</td><td>" +
               esc(item.cpu.toFixed(1) + "%") +
               "</td><td>" +
@@ -1478,7 +1507,7 @@
               '</div><div class="event-main"><div class="event-title">' +
               badge +
               '<span class="event-name">' +
-              esc(item.name) +
+              esc(localizeHidden(item.name)) +
               '</span><span class="monitor-meta">' +
               esc(kindText(item.kind)) +
               "</span></div>" +
@@ -1617,7 +1646,7 @@
                 "<tr><td>" +
                 esc(item.time || "--") +
                 "</td><td>" +
-                esc(item.name || "--") +
+                esc(localizeHidden(item.name || "--")) +
                 "</td><td>" +
                 esc(
                   item.status_key && STATUS_I18N[item.status_key]
@@ -1866,7 +1895,7 @@
                 "<tr><td>" +
                 esc(item.rank) +
                 "</td><td>" +
-                esc(item.name) +
+                esc(localizeHidden(item.name)) +
                 "</td><td>" +
                 esc(item.cpu_text) +
                 "</td><td>" +
@@ -1961,10 +1990,20 @@
     const sectionsEmpty =
       !Array.isArray(data.sections) || data.sections.length === 0;
     if (sectionsEmpty) {
-      $("report-day").textContent = t(
-        "report_sections_empty",
-        "未选择日报内容：daily_report.sections 为空，请在配置页勾选要显示的内容",
-      );
+      // The payload's ``sections`` is already filtered to valid names, so an
+      // empty result can also mean "every configured name is a typo". Say
+      // which one it is instead of always claiming the config is empty
+      // (v2.20.17).
+      $("report-day").textContent =
+        Number(data.sections_configured || 0) > 0
+          ? t(
+              "report_sections_invalid",
+              "日报内容配置里没有有效项，请检查配置页的勾选",
+            )
+          : t(
+              "report_sections_empty",
+              "未选择日报内容：daily_report.sections 为空，请在配置页勾选要显示的内容",
+            );
     }
     const summary = data.summary || {};
     const notEnabled = t("report_not_enabled", "未开启");
@@ -2159,9 +2198,13 @@
     if (!data || data.ok !== true) {
       // The backend sends a stable error_code so the English page can
       // translate the message; without it the Chinese sentence was shown
-      // verbatim (v2.20.14).
+      // verbatim (v2.20.14). ``t(code, "")`` falls back to the KEY, so an
+      // untranslated (new) code used to print "verify_xxx" in the error box
+      // -- treat "translation === key" as missing and use the real message.
+      const code = data && data.error_code;
+      const coded = code ? t(code, "") : "";
       const errorText =
-        (data && data.error_code && t(data.error_code, "")) ||
+        (coded && coded !== code ? coded : "") ||
         (data && data.error) ||
         t("verify_failed", "验证失败");
       box.innerHTML =
@@ -2225,7 +2268,12 @@
           ? ""
           : "（" + item.elapsed_ms + "ms）";
         return verifyRow(
-          (item.name || "--") + "：" + (item.ok ? "✅" : "❌") + " " + detail + elapsed,
+          localizeHidden(item.name || "--") +
+            "：" +
+            (item.ok ? "✅" : "❌") +
+            " " +
+            detail +
+            elapsed,
           !item.ok,
         );
       })

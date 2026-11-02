@@ -740,7 +740,7 @@ class ServiceMonitor:
                 prev_error = str(st.get("last_error") or "服务异常")
                 st["last_ok"] = now
                 st["last_error"] = ""
-                started = float(st.pop("silent_since", 0) or 0)
+                started = safe_float(st.pop("silent_since", 0) or 0)
                 if alerting:
                     # An item that was ALREADY alerting when the window began
                     # heals inside the window as well. The old code only ended
@@ -781,6 +781,11 @@ class ServiceMonitor:
                         "recovery_attempt",
                         "recovery_next_attempt",
                         "recovery_retry_count",
+                        # ``stale`` only suppresses the recovery notice of
+                        # the episode it was written for. Keeping it here
+                        # made the NEXT episode's recovery silent, because
+                        # this branch already closed the old one (v2.20.17).
+                        "stale",
                     ):
                         st.pop(stale_key, None)
                 elif started:
@@ -806,6 +811,10 @@ class ServiceMonitor:
                     st["since"] = 0
                     st.pop("alerted", None)
                     st.pop("pending", None)
+                    # Same reason as the alerting branch above: the episode
+                    # is over, so an old "stale recovery" marker must not
+                    # survive into the next one.
+                    st.pop("stale", None)
             else:
                 st["last_error"] = detail
                 # Only a *new* fault gets a silence-window start marker. An
@@ -824,7 +833,7 @@ class ServiceMonitor:
         # fault that outlives the window keeps its start time and simply
         # rejoins the normal state machine below (v2.20.0: the start used
         # to be dropped, so the pre-silence outage vanished from the log).
-        silent_since = float(st.pop("silent_since", 0) or 0)
+        silent_since = safe_float(st.pop("silent_since", 0) or 0)
         if silent_since and ok:
             prev_error = str(st.get("last_error") or "服务异常")
             self._record_event(
@@ -840,6 +849,13 @@ class ServiceMonitor:
                 "recovery",
             )
             st["last_error"] = ""
+        elif silent_since and not ok and not alerting:
+            # The fault started inside the maintenance window and outlived
+            # it. This branch used to drop the marker, so the alert that
+            # followed took the push moment as the start: the recovery
+            # notice and the daily report collapsed a ten-minute outage into
+            # “中断时长 00:00:00” (v2.20.17).
+            st["since"] = silent_since
 
         if not ok and not alerting:
             suppressed_by = self._suppress_alert(item)
@@ -1152,8 +1168,10 @@ class ServiceMonitor:
                 st["next_attempt"] = 0
                 # Episode is over: the buffered marker must not survive into
                 # the next one, or a later same-name abandon would withdraw
-                # this item's "notified" state (v2.20.0).
-                st.pop("summary_buffered", None)
+                # this item's "notified" state (v2.20.0). Read it first: only
+                # an alert that was actually buffered may queue its recovery
+                # behind the summary (v2.20.17).
+                buffered = bool(st.pop("summary_buffered", None))
                 # The event log does not depend on the notification pref: the
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
@@ -1162,6 +1180,14 @@ class ServiceMonitor:
                 # recover_notify=False recovery made the NEXT healthy
                 # recovery claim an undelivered alert out of nowhere.
                 exhausted = bool(st.pop("send_exhausted", False))
+                # Pop unconditionally, exactly like the resource rules: this
+                # marker describes one episode's alert, and a recovery that is
+                # not announced (recover_notify off / stale / suppressed) must
+                # not leave it behind. Leaving it made the NEXT recovery queue
+                # behind an unrelated open summary, and that summary's abandon
+                # then deleted the queued notice -- no recovery ever reached
+                # the user (v2.20.17).
+                awaiting = st.pop("awaiting_summary", False)
                 if self.recover_notify and not stale and notified:
                     had_failed = exhausted or bool(pending)
                     extra = "\n（异常告警此前未能送达）" if had_failed else ""
@@ -1174,13 +1200,12 @@ class ServiceMonitor:
                         f"恢复时间: {_now_text(self.config)}\n"
                         f"中断时长: {format_duration(duration)}{extra}"
                     )
-                    awaiting = st.pop("awaiting_summary", False)
                     remaining = (
                         self._aggregator.window_remaining("service")
                         if self._aggregator is not None
                         else 0.0
                     )
-                    if awaiting and remaining > 0:
+                    if awaiting and buffered and remaining > 0:
                         # This item's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat; queue it so the summary is
@@ -1605,7 +1630,42 @@ class ServiceMonitor:
             send=self._send,
             kind="service",
             on_abandon=self._on_summary_abandoned,
+            on_delivered=self._on_summary_delivered,
         )
+
+    def _on_summary_delivered(self, items: list[tuple[str, str]]) -> None:
+        """Clear the "waiting for the summary" markers after it lands.
+
+        A buffered monitor alert counts as announced once its summary reaches
+        the chat. Keeping ``awaiting_summary``/``summary_buffered`` behind
+        made the reload repair treat a delivered summary as lost: it
+        withdrew ``alerted``, so the still-failing item alerted again and a
+        recovered one lost its recovery notice (v2.20.17).
+        """
+
+        labels = {label for label, _reason in items if label}
+        if not labels:
+            return
+        changed = False
+        with self.state.section("monitors") as monitors:
+            states = monitors.get("items")
+            if not isinstance(states, dict):
+                return
+            for st in states.values():
+                if not isinstance(st, dict):
+                    continue
+                if str(st.get("name") or "") not in labels:
+                    continue
+                if not st.get("alerting"):
+                    continue
+                # Only items whose alert was actually buffered; a same-named
+                # item that delivered its own alert already cleared this.
+                if not st.pop("summary_buffered", None):
+                    continue
+                st.pop("awaiting_summary", None)
+                changed = True
+        if changed:
+            self.state.save()
 
     def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
         """Withdraw "alerted" for monitors whose summary never arrived.
@@ -1727,6 +1787,9 @@ class ServiceMonitor:
                 {
                     "name": item.get("name"),
                     "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
+                    # Stable key for the English dashboard: KIND_LABELS has
+                    # a Chinese "进程" that leaked into en-US (v2.20.17).
+                    "kind_key": str(item.get("__template_key") or ""),
                     "target": self._item_key(item),
                     "state": item_states.get(self._item_key(item), {}),
                     "config_error": item.get("config_error"),

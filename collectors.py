@@ -27,6 +27,7 @@ import httpx
 import psutil
 from astrbot.api import logger
 
+from .bg_provider import shrink_image_bytes
 from .redactor import Redactor, read_rules
 from .utils import (
     CpuFreq,
@@ -436,7 +437,22 @@ def disk_usage_bounded(
                     exception=str(exc),
                 )
         else:
+            was_running = future.running()
             future.cancel()  # queued jobs die here; running ones keep hanging
+            if not was_running:
+                # The pool is saturated by OTHER mounts (each hung statvfs
+                # keeps its worker forever). This mount never got a worker,
+                # so counting it as its own timeout eventually marked every
+                # healthy mount dead ("连续 3 次读取超时") while the hung one
+                # was the only real problem (v2.20.17).
+                results[name] = DiskUsage(
+                    name=name,
+                    used=None,
+                    total=None,
+                    percent=None,
+                    exception="读取超时",
+                )
+                continue
             failures = _DISK_FAIL_COUNT.get(name, 0) + 1
             _DISK_FAIL_COUNT[name] = failures
             if failures >= _DISK_MAX_TIMEOUTS:
@@ -1720,6 +1736,36 @@ def _write_avatar_cache(path: Path | None, data: bytes) -> None:
         logger.debug("写入头像缓存失败: %s", exc)
 
 
+_AVATAR_SHRINK_AT = 200_000
+
+
+def _shrink_avatar_sync(data: bytes) -> bytes:
+    """Downscale a large avatar before it becomes a data URL.
+
+    The avatar is embedded in the same HTML that is POSTed to the remote T2I
+    service. A 10 MB upload became a 13 MB JSON body on every render; the
+    background already shrinks, the avatar did not (v2.20.17). Avatars are
+    displayed small, so 512px is still sharp on high-DPI screens.
+    """
+
+    if not data or len(data) <= _AVATAR_SHRINK_AT:
+        return data
+    try:
+        shrunk, _mime = shrink_image_bytes(data, target_width=512, quality=85)
+        return shrunk or data
+    except Exception:
+        # An undecodable/oversized image keeps its old behaviour: the render
+        # path warns about it and falls back, it must not fail here.
+        logger.warning("头像压缩失败，使用原图", exc_info=True)
+        return data
+
+
+async def _prepare_avatar(data: bytes | None) -> bytes | None:
+    if not data or len(data) <= _AVATAR_SHRINK_AT:
+        return data
+    return await asyncio.to_thread(_shrink_avatar_sync, data)
+
+
 async def fetch_avatar_bytes(
     bot: dict[str, Any], config: Any, data_dir: Any = None
 ) -> bytes | None:
@@ -1739,7 +1785,7 @@ async def fetch_avatar_bytes(
                     data = uploaded.read_bytes()
                     if data:
                         _warn_if_undecodable_image(data, "头像", uploaded)
-                        return data
+                        return await _prepare_avatar(data)
             except Exception as exc:
                 logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
         logger.warning("头像来源为自定义上传，但没有可用的上传文件，回退 QQ 头像")
@@ -1750,7 +1796,7 @@ async def fetch_avatar_bytes(
     cache_path = _avatar_cache_path(data_dir, url)
     cached = _read_avatar_cache(cache_path, AVATAR_CACHE_TTL)
     if cached is not None:
-        return cached
+        return await _prepare_avatar(cached)
 
     async def _download() -> bytes:
         # The timeout is spelled out per phase so it is obvious that the
@@ -1778,13 +1824,14 @@ async def fetch_avatar_bytes(
         # slow-drip server could park the card render (and the 20:00 daily
         # image) indefinitely. Cap the whole download.
         payload = await asyncio.wait_for(_download(), timeout=15)
+        payload = await _prepare_avatar(payload) or payload
         _write_avatar_cache(cache_path, payload)
         return payload
     except Exception as exc:
         logger.warning("获取头像失败 %s: %s", url, exc)
         # A stale cached avatar is still better than dropping to the built-in
         # one just because qlogo.cn had a transient failure.
-        return _read_avatar_cache(cache_path, None)
+        return await _prepare_avatar(_read_avatar_cache(cache_path, None))
 
 
 # ---------------------------------------------------------------------------
@@ -1953,10 +2000,16 @@ def build_network_chart(
     for i in range(5):
         fraction = i / 4
         ts = t_first + time_span * fraction
+        try:
+            label = datetime.fromtimestamp(ts, tz).strftime("%H:%M")
+        except (OverflowError, OSError, ValueError):
+            # A poisoned timestamp in state.json (1e30, -1e18) used to abort
+            # the whole card build here; the chart can still draw the line.
+            label = "--:--"
         x_labels.append(
             {
                 "x": round(left + plot_w * fraction, 1),
-                "text": datetime.fromtimestamp(ts, tz).strftime("%H:%M"),
+                "text": label,
             }
         )
 
@@ -2247,7 +2300,14 @@ async def collect_all(
 
     history = net_state.get("history") if isinstance(net_state, dict) else []
     chart_interval = net_state.get("interval") if isinstance(net_state, dict) else None
-    chart = build_network_chart(history, tz, interval=int(chart_interval or 60))
+    chart = build_network_chart(
+        history,
+        tz,
+        # A poisoned value ("abc", NaN, a list) used to raise before the
+        # first chart point was drawn. Clamp exactly like the sampler does,
+        # or a huge interval overflows the padding arithmetic (v2.20.17).
+        interval=max(5, min(3600, safe_int(chart_interval, 60) or 60)),
+    )
     up_rate = safe_float(net_state.get("up_rate")) or 0.0
     down_rate = safe_float(net_state.get("down_rate")) or 0.0
     month_names = {

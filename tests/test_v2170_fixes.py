@@ -441,7 +441,15 @@ def test_weekly_resource_trend_includes_report_day() -> None:
 
 def test_weekly_guard_uses_weekly_sections() -> None:
     reporter = object.__new__(DailyReporter)
-    reporter.config = {"daily_report": {"sections": [], "weekly_sections": ["token"]}}
+    reporter.config = {
+        "daily_report": {
+            "sections": [],
+            "weekly_sections": ["token"],
+            # A target is required before the send path reaches the database
+            # check: an empty list is now rejected earlier (v2.20.17).
+            "targets": ["123456"],
+        }
+    }
     reporter.store = SimpleNamespace(
         available=False,
         ensure_ready=lambda: False,

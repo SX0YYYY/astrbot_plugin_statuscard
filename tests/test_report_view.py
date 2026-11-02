@@ -170,7 +170,10 @@ def test_anomaly_pairs_alert_and_recovery(tmp_path: Path) -> None:
     )
     anomalies = view["anomalies"]
 
-    assert anomalies["count"] == 2
+    # Nginx started before the window and recovered inside it; the table
+    # shows that row, so it must be included in the count. It used to be
+    # excluded and the header said "0 次" above a visible outage (v2.20.17).
+    assert anomalies["count"] == 3
     assert anomalies["normal"]["monitors"] == 3
     assert anomalies["normal"]["resource_rules"] == 5
     recovery = next(
