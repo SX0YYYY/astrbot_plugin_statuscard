@@ -240,7 +240,13 @@
       index += 1;
     }
     const digits = index === 0 ? 0 : 2;
-    return number.toFixed(digits) + " " + units[index];
+    let text = number.toFixed(digits);
+    // 200.00 KB/s reads like a measurement with fake precision; the axis
+    // ticks are exact multiples now, so drop a trailing ".00"/"0".
+    if (digits && text.indexOf(".") !== -1) {
+      text = text.replace(/\.?0+$/, "");
+    }
+    return text + " " + units[index];
   }
 
   function formatRate(value) {
@@ -480,16 +486,22 @@
   }
 
   function metric(label, value, sub, percent) {
+    // The card surface stays neutral; only the number picks up the warning
+    // colour, so a wall of five cards does not read as five alarms.
+    const level = tone(percent);
+    const className = "metric" + (level ? " tone-" + level : "");
     const bar =
       percent === null || percent === undefined || !Number.isFinite(percent)
         ? ""
         : '<div class="bar ' +
-          tone(percent) +
+          level +
           '"><i style="width:' +
           Math.max(0, Math.min(100, percent)) +
           '%"></i></div>';
     return (
-      '<div class="metric"><div class="metric-label">' +
+      '<div class="' +
+      className +
+      '"><div class="metric-label">' +
       esc(label) +
       '</div><div class="metric-value">' +
       esc(value) +
@@ -508,12 +520,22 @@
   // SVG chart
   // ------------------------------------------------------------------
 
-  function niceMax(value) {
+  function niceMax(value, base) {
     if (!Number.isFinite(value) || value <= 0) return 1;
-    const exp = Math.floor(Math.log10(value));
-    const base = value / Math.pow(10, exp);
-    const step = [1, 2, 5, 10].find((item) => base <= item) || 10;
-    return step * Math.pow(10, exp);
+    // Byte rates need a 1024-based unit step: nice-rounding 189632 to
+    // 200000 and then printing it as KB/s produced "195.31 KB/s" ticks,
+    // which look like arbitrary cut-offs. Snap the rounded number in the
+    // displayed unit instead, so the axis reads 50/100/150/200 KB/s.
+    const stepBase = base === 1024 ? 1024 : 10;
+    const unit =
+      stepBase === 1024
+        ? Math.pow(1024, Math.max(0, Math.floor(Math.log(value) / Math.log(1024))))
+        : 1;
+    const scaled = value / unit;
+    const exp = Math.max(0, Math.floor(Math.log10(scaled)));
+    const fraction = scaled / Math.pow(10, exp);
+    const step = [1, 2, 5, 10].find((item) => fraction <= item) || 10;
+    return step * Math.pow(10, exp) * unit;
   }
 
   function renderChart(container, series, options) {
@@ -539,7 +561,8 @@
     const bottom = 26;
     const plotW = width - left - right;
     const plotH = height - top - bottom;
-    const max = options.max || niceMax(Math.max.apply(null, values) * 1.15);
+    const max =
+      options.max || niceMax(Math.max.apply(null, values) * 1.15, options.niceBase);
     const formatter = options.format || ((value) => String(Math.round(value)));
     const count = labels.length;
     // Place samples by timestamp, not by array index: with a 30-day window
@@ -665,6 +688,7 @@
           "</text>";
       });
     }
+    const peakLabels = [];
     series.forEach((item) => {
       const segments = [];
       let current = [];
@@ -694,9 +718,24 @@
           numeric[0],
         );
         if (peak[1] > 0) {
+          const peakX = x(peak[0]);
+          let peakY = y(peak[1]) - 7;
+          // Two series peaking at almost the same x used to print their
+          // labels on top of each other (119.4 KB/s over 161.03 KB/s).
+          // Lift the later label above any label already placed nearby.
+          for (const placed of peakLabels) {
+            if (
+              Math.abs(placed.x - peakX) < 52 &&
+              Math.abs(placed.y - peakY) < 13
+            ) {
+              peakY = placed.y - 13;
+            }
+          }
+          peakY = Math.max(top + 10, peakY);
+          peakLabels.push({ x: peakX, y: peakY });
           svg +=
             '<circle cx="' +
-            x(peak[0]) +
+            peakX +
             '" cy="' +
             y(peak[1]) +
             '" r="3" fill="' +
@@ -704,9 +743,9 @@
             '" />';
           svg +=
             '<text class="peak" x="' +
-            x(peak[0]) +
+            peakX +
             '" y="' +
-            (y(peak[1]) - 7) +
+            peakY +
             '" text-anchor="middle">' +
             esc(formatter(peak[1])) +
             "</text>";
@@ -1448,6 +1487,7 @@
       labels: networkLabels,
       height: 170,
       format: formatRate,
+      niceBase: 1024,
       timestamps: network.map((point) => point.ts),
       windowStart: data.window_start,
       windowEnd: data.window_end,
@@ -2122,10 +2162,13 @@
               "</td><td>" +
               esc(formatDateTime(run.ts)) +
               "</td><td>" +
+              '<span class="result ' +
+              (run.ok ? "result-ok" : "result-fail") +
+              '">' +
               (run.ok
                 ? t("result_ok", "成功")
                 : t("result_fail", "失败")) +
-              "</td><td>" +
+              "</span></td><td>" +
               esc(methodText(run.detail)) +
               "</td></tr>",
           )

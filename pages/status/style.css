@@ -2,43 +2,74 @@
   display: none !important;
 }
 
+/* ------------------------------------------------------------------
+   Design tokens
+   The palette stays close to the previous blue/green language; what
+   changes is the layering: a colder page ground, one quiet surface per
+   card, and a single accent that is only used for actionable things.
+   ------------------------------------------------------------------ */
+
 :root {
-  --bg: #f4f7fb;
+  --bg: #f2f5fa;
+  --bg-glow: rgba(37, 99, 235, 0.07);
   --panel: #ffffff;
-  --panel-soft: #f8fafc;
-  --text: #1e293b;
-  --muted: #64748b;
-  --faint: #5f6f86;
-  --line: #e2e8f0;
+  --panel-soft: #f7f9fd;
+  --panel-strong: #eef3fa;
+  --text: #101828;
+  --muted: #5b6b82;
+  --faint: #64748b;
+  --line: #e4eaf3;
+  --line-strong: #d3dce9;
   --accent: #2563eb;
-  --accent-soft: #dbeafe;
-  --good: #16a34a;
-  --good-soft: #dcfce7;
-  --bad: #dc2626;
-  --bad-soft: #fee2e2;
-  --warn: #d97706;
-  --warn-soft: #fef3c7;
-  --shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
-  --radius: 16px;
+  --accent-strong: #1d4ed8;
+  --accent-soft: #e4edff;
+  --accent-ink: #ffffff;
+  --good: #15803d;
+  --good-soft: #e6f7ec;
+  --bad: #d92d20;
+  --bad-soft: #feeceb;
+  --warn: #b45309;
+  --warn-soft: #fef3d7;
+  --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-sm: 0 2px 6px rgba(16, 24, 40, 0.05),
+    0 12px 32px -18px rgba(16, 24, 40, 0.22);
+  --shadow-md: 0 4px 10px rgba(16, 24, 40, 0.06),
+    0 20px 44px -24px rgba(16, 24, 40, 0.28);
+  --shadow: var(--shadow-sm);
+  --radius: 18px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --ring: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 [data-theme="dark"] {
-  --bg: #0b1220;
-  --panel: #111a2e;
-  --panel-soft: #0f172a;
-  --text: #e2e8f0;
-  --muted: #94a3b8;
-  --faint: #8798b8;
-  --line: #1e293b;
-  --accent: #60a5fa;
-  --accent-soft: #172554;
+  --bg: #080e19;
+  --bg-glow: rgba(96, 165, 250, 0.12);
+  --panel: #101a2c;
+  --panel-soft: #0c1524;
+  --panel-strong: #16233a;
+  --text: #e8eef8;
+  --muted: #9fb0c7;
+  --faint: #8b9db7;
+  --line: #1e2c42;
+  --line-strong: #2a3b55;
+  --accent: #6aa5ff;
+  --accent-strong: #8ab8ff;
+  --accent-soft: #12294a;
+  --accent-ink: #06101f;
   --good: #4ade80;
-  --good-soft: #052e16;
-  --bad: #f87171;
-  --bad-soft: #450a0a;
+  --good-soft: #0b2b1a;
+  --bad: #ff8b84;
+  --bad-soft: #3a1512;
   --warn: #fbbf24;
-  --warn-soft: #451a03;
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+  --warn-soft: #33230a;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35),
+    0 18px 40px -24px rgba(0, 0, 0, 0.7);
+  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.45),
+    0 28px 60px -28px rgba(0, 0, 0, 0.8);
+  --shadow: var(--shadow-sm);
 }
 
 * {
@@ -59,10 +90,18 @@ body {
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
   font-size: 14px;
   line-height: 1.55;
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image: radial-gradient(
+      1100px 420px at 50% -180px,
+      var(--bg-glow),
+      transparent 70%
+    );
+  background-repeat: no-repeat;
 }
 
 button,
@@ -70,39 +109,69 @@ input {
   font: inherit;
 }
 
+::selection {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--faint) 34%, transparent);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--faint) 52%, transparent);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------------
+   Shell
+   ------------------------------------------------------------------ */
+
 .page {
-  max-width: 1120px;
+  max-width: 1160px;
   margin: 0 auto;
-  padding: 22px 20px 44px;
+  padding: 26px 22px 56px;
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 18px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 13px;
   min-width: 0;
 }
 
 .logo {
-  width: 42px;
-  height: 42px;
-  border-radius: 13px;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
   display: grid;
   place-items: center;
   flex: none;
   color: #fff;
   font-size: 15px;
   font-weight: 800;
-  letter-spacing: 0.5px;
-  background: linear-gradient(135deg, #1d4ed8, #0ea5e9);
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.25);
+  letter-spacing: 0.6px;
+  background: linear-gradient(140deg, #1d4ed8 0%, #2f7bf6 55%, #0ea5e9 100%);
+  box-shadow: 0 10px 22px -8px rgba(37, 99, 235, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
 .brand-text {
@@ -112,11 +181,13 @@ input {
 .brand-text h1 {
   margin: 0;
   font-size: 21px;
+  font-weight: 700;
   line-height: 1.2;
+  letter-spacing: -0.01em;
 }
 
 .brand-text p {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
@@ -135,55 +206,81 @@ input {
   display: inline-flex;
   align-items: center;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 11px;
   border-radius: 999px;
   background: var(--panel);
   border: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  box-shadow: var(--shadow-xs);
 }
 
+/* ------------------------------------------------------------------
+   Controls
+   ------------------------------------------------------------------ */
+
 button {
-  height: 34px;
-  padding: 0 13px;
-  border-radius: 10px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
-  transition: filter 0.15s ease, background 0.15s ease;
+  transition: background 0.16s var(--ease), border-color 0.16s var(--ease),
+    color 0.16s var(--ease), box-shadow 0.16s var(--ease),
+    transform 0.1s var(--ease), filter 0.16s var(--ease);
 }
 
 button:hover {
-  filter: brightness(1.06);
+  filter: brightness(1.05);
+  box-shadow: 0 6px 16px -8px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+
+button:active {
+  transform: translateY(1px);
+  box-shadow: none;
 }
 
 /* A disabled control (export in progress, "next day" at today's report)
    must look inactive, otherwise the click that does nothing reads as a bug. */
 button:disabled {
   opacity: 0.45;
-  cursor: default;
+  cursor: not-allowed;
   filter: none;
+  transform: none;
+  box-shadow: none;
 }
 
 button:focus-visible,
 input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  box-shadow: var(--ring);
 }
 
 button.ghost {
   background: var(--panel);
   border-color: var(--line);
   color: var(--text);
+  box-shadow: var(--shadow-xs);
+}
+
+button.ghost:hover {
+  background: var(--panel-soft);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-xs);
 }
 
 /* Refresh button states: idle / loading / done / failed. */
 button.ghost.refreshing {
   color: var(--muted);
   cursor: progress;
-  opacity: 0.75;
+  opacity: 0.8;
 }
 
 button.ghost.refreshing::before {
@@ -191,7 +288,7 @@ button.ghost.refreshing::before {
   display: inline-block;
   width: 12px;
   height: 12px;
-  margin-right: 6px;
+  margin-right: 7px;
   vertical-align: -1px;
   border: 2px solid currentColor;
   border-right-color: transparent;
@@ -200,12 +297,12 @@ button.ghost.refreshing::before {
 }
 
 button.ghost.refresh-done {
-  border-color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 45%, var(--line));
   color: var(--good);
 }
 
 button.ghost.refresh-failed {
-  border-color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
   color: var(--bad);
 }
 
@@ -231,38 +328,74 @@ main.is-refreshing::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: var(--bg);
-  opacity: 0.45;
+  z-index: 30;
   border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: saturate(0.8);
 }
 
+/* ------------------------------------------------------------------
+   Tabs — sticky, so switching back to a section never means scrolling
+   to the top first.
+   ------------------------------------------------------------------ */
+
 .tabs {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
   display: flex;
-  gap: 6px;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
   margin: 20px 0 16px;
-  padding: 5px;
-  border-radius: 13px;
-  background: var(--panel);
+  padding: 4px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 1px solid var(--line);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(14px) saturate(1.15);
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {
+  position: relative;
   height: 34px;
   padding: 0 16px;
   border: 0;
-  border-radius: 9px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   font-weight: 600;
+  font-size: 13px;
   white-space: nowrap;
+  box-shadow: none;
+}
+
+.tab:hover {
+  background: color-mix(in srgb, var(--panel-soft) 85%, transparent);
+  color: var(--text);
+  filter: none;
+  box-shadow: none;
 }
 
 .tab.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
+  box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 80%, transparent);
 }
+
+.tab.active:hover {
+  background: var(--accent);
+}
+
+/* ------------------------------------------------------------------
+   Panels & cards
+   ------------------------------------------------------------------ */
 
 .panel {
   display: none;
@@ -272,14 +405,34 @@ main.is-refreshing::after {
 
 .panel.active {
   display: flex;
+  animation: panel-in 0.18s var(--ease);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .card {
+  position: relative;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px 18px;
-  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+@media (hover: hover) {
+  .card:hover {
+    border-color: var(--line-strong);
+  }
 }
 
 .card-head {
@@ -288,6 +441,7 @@ main.is-refreshing::after {
   justify-content: space-between;
   gap: 12px;
   min-height: 30px;
+  margin-bottom: 12px;
   /* At 390px the title and the range buttons used to squeeze each other:
      "资源趋/势" and "24 小/时" both wrapped. */
   flex-wrap: wrap;
@@ -296,13 +450,30 @@ main.is-refreshing::after {
 .card-head h2 {
   margin: 0;
   font-size: 15px;
-  letter-spacing: 0.2px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A small accent tick before each section title gives the cards a shared
+   rhythm without turning every heading into a chip. */
+.card-head h2::before {
+  content: "";
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), #38bdf8);
+  opacity: 0.85;
+  flex: none;
 }
 
 .card-head > span {
   color: var(--faint);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .segmented button,
@@ -310,44 +481,79 @@ main.is-refreshing::after {
   white-space: nowrap;
 }
 
+/* ------------------------------------------------------------------
+   Metric cards
+   ------------------------------------------------------------------ */
+
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
   gap: 12px;
 }
 
 .metric {
-  padding: 13px 14px;
-  border-radius: 13px;
-  background: var(--panel-soft);
+  position: relative;
+  padding: 14px 15px 13px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--panel-soft), var(--panel));
   border: 1px solid var(--line);
   min-width: 0;
+  overflow: hidden;
+  transition: border-color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+
+@media (hover: hover) {
+  .metric:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-1px);
+  }
 }
 
 .metric-label {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .metric-value {
-  margin-top: 3px;
-  font-size: 22px;
+  margin-top: 4px;
+  font-size: 25px;
   font-weight: 750;
-  line-height: 1.2;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
   word-break: break-word;
 }
 
 .metric-sub {
-  margin-top: 3px;
+  margin-top: 4px;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The percentage tells the story before the number does: tint only the
+   value, keep the card surface neutral. */
+.metric.tone-warn .metric-value {
+  color: var(--warn);
+}
+
+.metric.tone-bad .metric-value {
+  color: var(--bad);
 }
 
 .bar {
-  margin-top: 8px;
-  height: 7px;
+  margin-top: 9px;
+  height: 6px;
   border-radius: 999px;
-  background: var(--line);
+  background: color-mix(in srgb, var(--line-strong) 70%, transparent);
   overflow: hidden;
 }
 
@@ -356,52 +562,72 @@ main.is-refreshing::after {
   height: 100%;
   width: 0;
   border-radius: inherit;
-  background: var(--accent);
-  transition: width 0.35s ease;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  transition: width 0.45s var(--ease);
 }
 
 .bar.good > i {
-  background: var(--good);
+  background: linear-gradient(90deg, #0f9f4f, #34d399);
 }
 
 .bar.warn > i {
-  background: var(--warn);
+  background: linear-gradient(90deg, #d97706, #fbbf24);
 }
 
 .bar.bad > i {
-  background: var(--bad);
+  background: linear-gradient(90deg, #dc2626, #f87171);
 }
+
+/* ------------------------------------------------------------------
+   Key/value blocks (network, disk detail, LLM quality)
+   ------------------------------------------------------------------ */
 
 .network-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
   gap: 10px;
   margin-top: 10px;
 }
 
 .network-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 11px;
+  display: grid;
+  gap: 2px;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
   background: var(--panel-soft);
   border: 1px solid var(--line);
+  min-width: 0;
+  transition: border-color 0.16s var(--ease);
+}
+
+.network-item:hover {
+  border-color: var(--line-strong);
 }
 
 .network-item span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .network-item strong {
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+/* ------------------------------------------------------------------
+   Monitors
+   ------------------------------------------------------------------ */
 
 .monitor-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(228px, 1fr));
   gap: 8px;
   margin-top: 10px;
 }
@@ -409,37 +635,47 @@ main.is-refreshing::after {
 .monitor {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 9px 11px;
-  border-radius: 11px;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
   background: var(--panel-soft);
   border: 1px solid var(--line);
   min-width: 0;
+  transition: border-color 0.16s var(--ease), background 0.16s var(--ease);
+}
+
+.monitor:hover {
+  border-color: var(--line-strong);
 }
 
 .dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex: none;
   background: var(--faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 16%, transparent);
 }
 
 .dot.ok {
   background: var(--good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 16%, transparent);
 }
 
 .dot.fail {
   background: var(--bad);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent);
 }
 
 .dot.unknown {
   background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent);
 }
 
 /* Failed the latest probe but has not reached the alert threshold. */
 .dot.degraded {
   background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent);
 }
 
 .monitor-main {
@@ -449,6 +685,7 @@ main.is-refreshing::after {
 
 .monitor-name {
   font-size: 13px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -456,26 +693,32 @@ main.is-refreshing::after {
 
 .monitor-meta {
   color: var(--faint);
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* ------------------------------------------------------------------
+   Tables
+   ------------------------------------------------------------------ */
+
 .table-wrap {
   overflow-x: auto;
+  border-radius: var(--radius-sm);
 }
 
 .table {
   width: 100%;
-  margin-top: 10px;
+  margin-top: 4px;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .table th,
 .table td {
-  padding: 8px 9px;
+  padding: 9px 10px;
   text-align: left;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
@@ -483,7 +726,27 @@ main.is-refreshing::after {
 
 .table th {
   color: var(--faint);
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--panel-soft);
+}
+
+.table th:first-child {
+  border-top-left-radius: var(--radius-sm);
+}
+
+.table th:last-child {
+  border-top-right-radius: var(--radius-sm);
+}
+
+.table tbody tr {
+  transition: background 0.14s var(--ease);
+}
+
+.table tbody tr:hover {
+  background: var(--panel-soft);
 }
 
 .table tr:last-child td {
@@ -496,30 +759,89 @@ main.is-refreshing::after {
   text-overflow: ellipsis;
 }
 
+#process-table td:first-child {
+  width: 34px;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+#process-table th:nth-child(3),
+#process-table td:nth-child(3),
+#process-table th:nth-child(4),
+#process-table td:nth-child(4) {
+  text-align: right;
+}
+
+/* Delivery result in "发送记录": a bare 成功/失败 is easy to skim past. */
+.result {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.result::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.result-ok {
+  color: var(--good);
+}
+
+.result-fail {
+  color: var(--bad);
+}
+
+/* ------------------------------------------------------------------
+   Segmented controls
+   ------------------------------------------------------------------ */
+
 .segmented {
   display: inline-flex;
-  gap: 3px;
+  gap: 2px;
   padding: 3px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: var(--panel-soft);
   border: 1px solid var(--line);
 }
 
 .segmented button {
-  height: 27px;
-  padding: 0 10px;
-  border-radius: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+  box-shadow: none;
+}
+
+.segmented button:hover {
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  color: var(--text);
+  filter: none;
+  box-shadow: none;
 }
 
 .segmented button.active {
   background: var(--panel);
   color: var(--text);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.1);
+  box-shadow: var(--shadow-xs), 0 0 0 1px var(--line);
 }
+
+.segmented button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* ------------------------------------------------------------------
+   Legend & charts
+   ------------------------------------------------------------------ */
 
 .legend {
   display: flex;
@@ -527,7 +849,7 @@ main.is-refreshing::after {
   gap: 14px;
   margin-top: 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .legend-item {
@@ -537,16 +859,39 @@ main.is-refreshing::after {
 }
 
 .legend-item i {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   display: inline-block;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 12%, transparent);
 }
 
 .chart {
   position: relative;
   margin-top: 6px;
   min-height: 190px;
+}
+
+.chart:empty::before {
+  content: "";
+  display: block;
+  height: 190px;
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    var(--panel-soft) 0%,
+    var(--panel-strong) 40%,
+    var(--panel-soft) 80%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-wave 1.6s linear infinite;
+  opacity: 0.7;
+}
+
+@keyframes skeleton-wave {
+  to {
+    background-position: -220% 0;
+  }
 }
 
 .chart:focus-visible {
@@ -559,16 +904,18 @@ main.is-refreshing::after {
   width: 100%;
   height: auto;
   display: block;
+  overflow: visible;
 }
 
 .chart .grid {
-  stroke: var(--line);
+  stroke: color-mix(in srgb, var(--line-strong) 62%, transparent);
   stroke-width: 1;
 }
 
 .chart .axis {
   fill: var(--faint);
-  font-size: 10px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .chart .plot-bg {
@@ -577,7 +924,14 @@ main.is-refreshing::after {
 
 .chart .peak {
   fill: var(--muted);
-  font-size: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  /* Without a matching halo the label collides with the line it annotates
+     and with a nearby peak (the two network peaks used to overlap). */
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .chart .hover-line {
@@ -597,9 +951,9 @@ main.is-refreshing::after {
   min-width: 120px;
   padding: 8px 10px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-md);
   color: var(--text);
   font-size: 11px;
   line-height: 1.5;
@@ -672,19 +1026,30 @@ main.is-refreshing::after {
   animation: statuscard-spin 0.9s linear infinite;
 }
 
-.segmented button:disabled {
-  cursor: progress;
-  opacity: 0.6;
-}
+/* ------------------------------------------------------------------
+   Empty & error states
+   ------------------------------------------------------------------ */
 
 .empty {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
   margin-top: 10px;
-  padding: 26px 16px;
-  border: 1px dashed var(--line);
-  border-radius: 12px;
+  padding: 30px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
   background: var(--panel-soft);
   color: var(--muted);
   text-align: center;
+}
+
+.empty::before {
+  content: "";
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  background: linear-gradient(140deg, var(--accent-soft), var(--panel-strong));
+  border: 1px solid var(--line);
 }
 
 .error-state {
@@ -695,7 +1060,7 @@ main.is-refreshing::after {
   margin-bottom: 14px;
   padding: 14px 16px;
   border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--bad-soft);
   color: var(--text);
 }
@@ -709,28 +1074,68 @@ main.is-refreshing::after {
   flex: none;
 }
 
+/* ------------------------------------------------------------------
+   Events
+   ------------------------------------------------------------------ */
+
 .event-list {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 
 .event {
+  position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 11px;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  border-radius: var(--radius-sm);
   background: var(--panel-soft);
   border: 1px solid var(--line);
+  overflow: hidden;
+  transition: border-color 0.16s var(--ease), background 0.16s var(--ease);
+}
+
+.event:hover {
+  border-color: var(--line-strong);
+}
+
+/* A 3px status rail on the left edge: the badge alone is easy to miss
+   when scanning a long list. Falls back to no rail where :has() is
+   unavailable; the badge still carries the meaning. */
+.event::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--line-strong);
+}
+
+.event:has(.badge.alert)::before,
+.event:has(.badge.unresolved)::before {
+  background: var(--bad);
+}
+
+.event:has(.badge.recovery)::before,
+.event:has(.badge.recovered)::before {
+  background: var(--good);
+}
+
+.event:has(.badge.failed)::before {
+  background: var(--warn);
 }
 
 .event-time {
   flex: none;
-  min-width: 72px;
+  min-width: 74px;
   color: var(--faint);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
 }
 
 .event-main {
@@ -753,10 +1158,11 @@ main.is-refreshing::after {
   display: inline-flex;
   align-items: center;
   height: 20px;
-  padding: 0 7px;
+  padding: 0 8px;
   border-radius: 999px;
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 650;
+  letter-spacing: 0.01em;
 }
 
 .badge.alert {
@@ -788,17 +1194,22 @@ main.is-refreshing::after {
 .event-detail {
   margin-top: 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   word-break: break-word;
 }
 
+/* ------------------------------------------------------------------
+   Report details
+   ------------------------------------------------------------------ */
+
 .detail-block {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .detail-block h3 {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   font-size: 13px;
+  font-weight: 650;
 }
 
 .detail-grid {
@@ -809,7 +1220,7 @@ main.is-refreshing::after {
 
 .detail-item {
   padding: 9px 11px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--panel-soft);
   border: 1px solid var(--line);
   font-size: 12px;
@@ -822,6 +1233,7 @@ main.is-refreshing::after {
 .detail-item strong {
   display: block;
   margin-top: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 .detail-sub {
@@ -831,21 +1243,62 @@ main.is-refreshing::after {
   color: var(--muted);
 }
 
+#report-day-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#report-day-nav button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: none;
+}
+
+#report-day-nav button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text);
+  filter: none;
+  box-shadow: none;
+}
+
+#report-day {
+  min-width: 108px;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------
+   Toast
+   ------------------------------------------------------------------ */
+
 .toast {
   position: fixed;
   left: 50%;
   bottom: 26px;
   transform: translate(-50%, 16px);
   padding: 10px 16px;
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #f8fafc;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text) 92%, transparent);
+  color: var(--panel);
   font-size: 12px;
+  font-weight: 500;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
   max-width: min(90vw, 520px);
   text-align: center;
+  box-shadow: var(--shadow-md);
+  z-index: 60;
 }
 
 .toast.show {
@@ -853,80 +1306,14 @@ main.is-refreshing::after {
   transform: translate(-50%, 0);
 }
 
-@media (max-width: 560px) {
-  .page {
-    padding: 14px 12px 30px;
-  }
+/* ------------------------------------------------------------------
+   Audit banner
+   ------------------------------------------------------------------ */
 
-  /* The English labels are longer than the Chinese ones. At 390px the four
-     tabs were clipped mid-word and the three verify buttons pushed the whole
-     page into a horizontal scroll. Let both wrap instead (v2.20.17). */
-  .tabs {
-    flex-wrap: wrap;
-    overflow-x: visible;
-  }
-
-  .segmented {
-    display: flex;
-    flex-wrap: wrap;
-  }
-
-  .segmented button {
-    flex: 1 1 auto;
-  }
-
-  .brand-text h1 {
-    font-size: 18px;
-  }
-
-  .top-actions .pill {
-    display: none;
-  }
-
-  .card {
-    padding: 13px 13px;
-  }
-
-  .card-head h2 {
-    flex: 1 1 100%;
-  }
-
-  .card-head > button {
-    margin-left: auto;
-  }
-
-  .metric-value {
-    font-size: 19px;
-  }
-
-  .event {
-    flex-direction: column;
-    gap: 3px;
-  }
-
-  .event-time {
-    min-width: 0;
-  }
-
-
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
-/* Configuration audit banner (overview) */
 .audit-banner {
   display: grid;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 4px;
 }
 
 .audit-item {
@@ -934,7 +1321,7 @@ main.is-refreshing::after {
   gap: 10px;
   align-items: baseline;
   padding: 10px 14px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   font-size: 13px;
 }
 
@@ -944,12 +1331,12 @@ main.is-refreshing::after {
 
 .audit-item.error {
   background: var(--bad-soft);
-  border: 1px solid var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--line));
 }
 
 .audit-item.warning {
   background: var(--warn-soft);
-  border: 1px solid var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
 }
 
 .dot.config_error {
@@ -962,7 +1349,7 @@ main.is-refreshing::after {
 }
 
 .chart-gap {
-  fill: color-mix(in srgb, var(--faint) 22%, transparent);
+  fill: color-mix(in srgb, var(--faint) 20%, transparent);
 }
 
 .verify-list {
@@ -983,4 +1370,125 @@ main.is-refreshing::after {
   border-color: var(--bad);
   color: var(--bad);
   font-weight: 600;
+}
+
+/* ------------------------------------------------------------------
+   Responsive
+   ------------------------------------------------------------------ */
+
+@media (max-width: 760px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Five metrics in a two-column grid used to leave the fifth card on a
+     half-empty row. Let the odd one out span the full width. */
+  #metrics > .metric:last-child:nth-child(odd),
+  #report-summary > .metric:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .monitor-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .card-head h2 {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .page {
+    padding: 16px 12px 34px;
+  }
+
+  /* The English labels are longer than the Chinese ones. Wrapping the four
+     tabs made the sticky bar two rows tall and ate the viewport; scroll
+     inside the bar instead (the page itself never scrolls sideways). */
+  .tabs {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    top: 6px;
+  }
+
+  .segmented {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .segmented button {
+    flex: 1 1 auto;
+  }
+
+  .brand-text h1 {
+    font-size: 18px;
+  }
+
+  .top-actions .pill {
+    display: none;
+  }
+
+  .card {
+    padding: 14px 14px;
+    border-radius: 16px;
+  }
+
+  .card-head h2 {
+    flex: 1 1 100%;
+  }
+
+  .card-head > button {
+    margin-left: auto;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .metric {
+    padding: 12px 12px;
+  }
+
+  .metric-value {
+    font-size: 20px;
+  }
+
+  .metric-sub {
+    font-size: 10.5px;
+  }
+
+  .network-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .monitor-list {
+    grid-template-columns: 1fr;
+  }
+
+  .event {
+    flex-direction: column;
+    gap: 3px;
+    padding-left: 13px;
+  }
+
+  .event-time {
+    min-width: 0;
+  }
+
+  #report-day {
+    min-width: 92px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
