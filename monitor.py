@@ -178,7 +178,8 @@ class ServiceMonitor:
     def _normalize_items(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
             return []
-        out: list[dict[str, Any]] = []
+        normalized_items: list[tuple[dict[str, Any], tuple[str, ...]]] = []
+        seen_signatures: set[tuple[str, ...]] = set()
         for item in raw:
             if not isinstance(item, dict):
                 continue
@@ -217,14 +218,92 @@ class ServiceMonitor:
                     config_error,
                 )
             normalized = dict(item)
+            normalized.pop("__key_suffix", None)
             normalized["__template_key"] = kind
             normalized["name"] = str(item.get("name") or kind)
             if isinstance(item.get(required), str):
                 normalized[required] = str(item.get(required)).strip()
             if config_error:
                 normalized["config_error"] = config_error
-            out.append(normalized)
-        return out
+            # Two entries with the same probe are the same check: running both
+            # interleaved on one shared state slot sent the same alert twice
+            # (and, when they disagreed, a "recovered" notice for a service
+            # that was still down). Keep the first and say so.
+            signature = self._probe_signature(normalized)
+            if signature in seen_signatures:
+                logger.warning(
+                    "监测项 %r（%s）与前面的条目重复，已忽略后面的重复项",
+                    normalized["name"],
+                    kind,
+                )
+                continue
+            seen_signatures.add(signature)
+            normalized_items.append((normalized, signature))
+
+        # Group by the historical key. A key shared by different probes (same
+        # kind + name + target but another keyword/expected status) would put
+        # them in one state slot; suffix ALL of them, not just the later one,
+        # so reordering the config cannot swap which probe owns which state.
+        groups: dict[str, list[tuple[dict[str, Any], tuple[str, ...]]]] = {}
+        for normalized, signature in normalized_items:
+            groups.setdefault(self._item_key(normalized), []).append(
+                (normalized, signature)
+            )
+        for base_key, entries in groups.items():
+            if len(entries) < 2:
+                # A group that shrank back to one entry (one duplicate was
+                # deleted/disabled) must keep its suffixed state key; falling
+                # back to the base key would prune the live state and write a
+                # fake "monitor removed" recovery for an item that still
+                # exists.
+                normalized, signature = entries[0]
+                suffix = self._signature_suffix(signature)
+                if self._state_has_key(f"{base_key}#{suffix}"):
+                    normalized["__key_suffix"] = suffix
+                continue
+            if self._state_has_key(base_key):
+                # Legacy shared state from before the keys were split (an
+                # upgrade with two colliding entries already alerting). Give
+                # it to the first entry instead of letting the prune turn it
+                # into a fake "monitor removed" recovery. One-time: the base
+                # key is consumed.
+                first_signature = entries[0][1]
+                target = f"{base_key}#{self._signature_suffix(first_signature)}"
+                if not self._state_has_key(target):
+                    self._move_state_key(base_key, target)
+            for normalized, signature in entries:
+                normalized["__key_suffix"] = self._signature_suffix(signature)
+            logger.info(
+                "监测项 %r 有 %d 个同名同目标但检查参数不同的条目，已分配独立状态键",
+                entries[0][0].get("name"),
+                len(entries),
+            )
+        return [normalized for normalized, _signature in normalized_items]
+
+    @staticmethod
+    def _signature_suffix(signature: tuple[str, ...]) -> str:
+        return hashlib.sha1(repr(signature).encode("utf-8")).hexdigest()[:8]
+
+    def _state_has_key(self, key: str) -> bool:
+        try:
+            monitors = self.state.get("monitors", {}) or {}
+            items = monitors.get("items") if isinstance(monitors, dict) else None
+            return isinstance(items, dict) and key in items
+        except Exception:
+            return False
+
+    def _move_state_key(self, old: str, new: str) -> None:
+        """Move one persisted state entry to a new key (one-time migration)."""
+
+        try:
+            with self.state.section("monitors") as monitors:
+                items = monitors.get("items")
+                if isinstance(items, dict) and old in items and new not in items:
+                    items[new] = items.pop(old)
+            self.state.save()
+            logger.info("监测项状态键已从旧共享键迁移：%s -> %s", old, new)
+        except Exception:
+            logger.debug("迁移监测项状态键失败", exc_info=True)
 
     def _mark_stale_items(self) -> None:
         """Mark items that were alerting while the probe loop was not running.
@@ -1082,6 +1161,11 @@ class ServiceMonitor:
             st["last_checked"] = now
             st["last_ok"] = now
             st["last_error"] = ""
+            # The abandoned-summary marker belongs to the episode that just
+            # ended. Keeping it made the NEXT failure bypass the cooldown and
+            # push immediately, while the resource rules clear it here
+            # (v2.20.17 audit, same asymmetry as the resource side).
+            st.pop("summary_abandoned", None)
             pending_text = st.get("pending_recovery")
             if pending_text and not self.recover_notify:
                 # The operator turned recovery notices off after this one was
@@ -1551,6 +1635,61 @@ class ServiceMonitor:
         return False, f"未知监测类型: {kind}", "-"
 
     @staticmethod
+    def _probe_signature(item: dict[str, Any]) -> tuple[str, ...]:
+        """Everything that can change what one monitor item actually checks.
+
+        Used to drop exact duplicate entries and to tell apart two entries
+        that share ``kind + name + target`` but probe differently (the same
+        URL with a different keyword or expected status). ``show_advanced``
+        and other display-only fields are deliberately excluded so a copied
+        entry is still recognised as a duplicate.
+        """
+
+        kind = str(item.get("__template_key") or "")
+        name = str(item.get("name") or "")
+        # Normalise the values exactly like the probe does: an omitted
+        # timeout and an explicit "10" behave identically, so they must be
+        # the same signature (otherwise a copied entry gets a second state
+        # slot and alerts twice).
+        timeout = str(max(1, min(60, cfg_int(item, "timeout_seconds", 10))))
+        if kind == "http":
+            return (
+                kind,
+                name,
+                str(item.get("url") or ""),
+                str(item.get("keyword") or ""),
+                str(cfg_int(item, "expected_status", 0)),
+                str(cfg_bool(item, "verify_tls", True)),
+                str(item.get("suppress_when_down") or "").strip(),
+                timeout,
+            )
+        if kind == "tcp":
+            return (
+                kind,
+                name,
+                str(item.get("host") or ""),
+                str(cfg_int(item, "port", 0)),
+                timeout,
+            )
+        if kind == "docker":
+            return (
+                kind,
+                name,
+                str(item.get("container") or ""),
+                timeout,
+            )
+        if kind == "process":
+            return (kind, name, str(item.get("pattern") or ""))
+        if kind == "systemd":
+            return (
+                kind,
+                name,
+                str(item.get("unit") or ""),
+                timeout,
+            )
+        return (kind, name)
+
+    @staticmethod
     def _item_key(item: dict[str, Any]) -> str:
         kind = str(item.get("__template_key") or "")
         name = str(item.get("name") or "")
@@ -1568,26 +1707,46 @@ class ServiceMonitor:
                 # Only a short hash is persisted, so tokens stay out of
                 # state.json.
                 key_target += "#q" + hashlib.sha1(query.encode("utf-8")).hexdigest()[:8]
-            return f"{kind}:{name}:{key_target}"
-        if kind == "tcp":
-            target = f"{item.get('host', '')}:{item.get('port', '')}"
-        elif kind == "docker":
-            target = str(item.get("container") or "")
-        elif kind == "process":
-            target = str(item.get("pattern") or "")
-        elif kind == "systemd":
-            target = str(item.get("unit") or "")
+            base = f"{kind}:{name}:{key_target}"
         else:
-            target = ""
-        # Keep credentials out of state.json: the key is persisted and also
-        # returned by status(); probe/event paths already redact the URL.
-        return f"{kind}:{name}:{redact_url(target)}"
+            if kind == "tcp":
+                target = f"{item.get('host', '')}:{item.get('port', '')}"
+            elif kind == "docker":
+                target = str(item.get("container") or "")
+            elif kind == "process":
+                target = str(item.get("pattern") or "")
+            elif kind == "systemd":
+                target = str(item.get("unit") or "")
+            else:
+                target = ""
+            # Keep credentials out of state.json: the key is persisted and also
+            # returned by status(); probe/event paths already redact the URL.
+            base = f"{kind}:{name}:{redact_url(target)}"
+        # A same-kind/name/target entry with a different probe (keyword,
+        # expected status, timeout) gets its own state slot. The suffix is
+        # only present on those later duplicates, so existing state keys keep
+        # working after an upgrade.
+        suffix = str(item.get("__key_suffix") or "")
+        if suffix:
+            base += "#" + suffix
+        return base
 
     def _targets_for(self, kind: str = "service") -> list[str]:
         picked = resolve_targets(self.config, kind)
         return self.targets if picked is None else picked
 
     async def _send(self, text: str) -> DeliveryResult:
+        if self._is_silenced():
+            # The maintenance window promises "probe only, never push". The
+            # per-item paths already return before reaching a send, but a
+            # summary whose aggregation window was opened just before the
+            # silence began (or a retry queued earlier) used to slip through
+            # here. Report failure, not success: a swallowed summary must not
+            # mark its rules "notified", or their later recovery would claim
+            # an alert the user never saw. The aggregator retries twice and
+            # then abandons the batch, which withdraws ``alerted``.
+            logger.info("服务监测维护静默中，已跳过一条推送")
+            return DeliveryResult(ok=False)
         targets = self._targets_for("service")
         if not targets:
             logger.warning("服务监测推送目标为空")

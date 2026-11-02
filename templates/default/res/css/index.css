@@ -388,6 +388,13 @@ body {
   color: #444454;
   text-align: right;
   white-space: nowrap;
+  /* An unreadable mount prints its error here. The text used to overflow this
+     152px column, run across .disk-pct and clip at the card edge, hiding the
+     percentage marker entirely. Clip it with an ellipsis instead; the full
+     details stay in the log. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .disk-pct {

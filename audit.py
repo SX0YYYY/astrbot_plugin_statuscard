@@ -142,9 +142,9 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "error",
                 "monitors_no_targets",
                 "服务监测已启用，但没有可用的推送目标（通知中心无 service 规则，"
-                "默认推送目标也为空）。监测项仍会探测并记录事件，但告警与恢复"
-                "通知不会送达任何会话。"
-                "请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
+                "默认推送目标也为空）。为避免无意义探测，监测项不会探测、也不会"
+                "记录事件（看板与日报里不会有监测数据）；请先在"
+                "「告警与每日定时状态图 → 默认推送目标」填写群号。",
             )
         )
     if monitors_on and monitor is not None and not monitor.items:

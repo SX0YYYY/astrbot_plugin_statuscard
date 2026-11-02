@@ -628,6 +628,9 @@
         esc(formatter((max * index) / 4)) +
         "</text>";
     }
+    // The first and last ticks are anchored to the plot edges, not centred:
+    // a date-stamped label ("11/02 12:31") is wider than the 16px right
+    // margin and was clipped by the viewBox.
     if (useTimeAxis && options.labelForTime) {
       [0, 0.25, 0.5, 0.75, 1].forEach((ratio) => {
         svg +=
@@ -635,7 +638,9 @@
           (left + plotW * ratio) +
           '" y="' +
           (height - 6) +
-          '" text-anchor="middle">' +
+          '" text-anchor="' +
+          (ratio === 0 ? "start" : ratio === 1 ? "end" : "middle") +
+          '">' +
           esc(options.labelForTime(windowStart + span * ratio)) +
           "</text>";
       });
@@ -647,13 +652,15 @@
           ),
         ),
       );
-      indexes.forEach((index) => {
+      indexes.forEach((index, position) => {
         svg +=
           '<text class="axis" x="' +
           x(index) +
           '" y="' +
           (height - 6) +
-          '" text-anchor="middle">' +
+          '" text-anchor="' +
+          (position === 0 ? "start" : position === indexes.length - 1 ? "end" : "middle") +
+          '">' +
           esc(labels[index]) +
           "</text>";
       });
@@ -1383,7 +1390,12 @@
       windowStart: data.window_start,
       windowEnd: data.window_end,
       gaps: data.gaps || [],
-      labelForTime: (ts) => labelForTs(ts, range),
+      // The time axis samples the whole window, not the points: a 24h window
+      // always spans two calendar days, so its ticks need the date. Without
+      // it the axis read "12:31 · 18:31 · 00:31 · 06:31 · 12:31" and looked
+      // backwards (the labels array was fixed in v2.20.5, but it is ignored
+      // whenever timestamps are available -- this path is the one used).
+      labelForTime: (ts) => labelForTs(ts, range, range === "24h"),
       titleFor: (index) => formatDateTime(points[index] && points[index].ts),
     });
     const gapNote = $("history-gap-note");
@@ -1409,6 +1421,16 @@
       return;
     }
     const networkLabels = network.map((point) => labelForTs(point.ts, range));
+    // Same cross-midnight flag as the resource chart: the network series has
+    // its own timestamps and may cover a different window (state.json vs the
+    // sampled table), so it cannot reuse the resource chart's flag.
+    const networkFirst = network.length ? network[0].ts : 0;
+    const networkLast = network.length ? network[network.length - 1].ts : 0;
+    const networkCrossesDay = Boolean(
+      networkFirst &&
+        networkLast &&
+        dayKey(networkFirst) !== dayKey(networkLast),
+    );
     const networkSeries = [
       {
         name: t("network_up", "上行"),
@@ -1429,7 +1451,7 @@
       timestamps: network.map((point) => point.ts),
       windowStart: data.window_start,
       windowEnd: data.window_end,
-      labelForTime: (ts) => labelForTs(ts, range),
+      labelForTime: (ts) => labelForTs(ts, range, range === "24h"),
       titleFor: (index) =>
         formatDateTime(network[index] && network[index].ts),
     });
@@ -1559,6 +1581,36 @@
     );
   }
 
+  // ``duration_code`` is a *suffix* marker for "started before the window",
+  // not a replacement for the whole duration. Rendering it as one dropped
+  // the number ("04:15:38（窗口前开始）" became just "窗口前开始" / "Started
+  // before the window"), leaving the dashboard table without the outage
+  // length while the report image still showed it.
+  function reportDurationText(item) {
+    const raw = String((item && item.duration) || "");
+    const code = item && item.duration_code;
+    if (!code) return raw || "--";
+    const zh = String(currentLocale()).toLowerCase().indexOf("zh") === 0;
+    const suffix = function (value) {
+      return value ? (zh ? "（" + value + "）" : " (" + value + ")") : "";
+    };
+    if (code === "started_before_window") {
+      const marker = "（窗口前开始）";
+      const value = raw.endsWith(marker)
+        ? raw.slice(0, -marker.length).trim()
+        : raw;
+      if (!value) return t("report_started_before_window", "窗口前开始");
+      return value + suffix(t("report_started_before_window", "窗口前开始"));
+    }
+    if (code === "cross_window") {
+      const base = t("report_cross_window", "跨窗口关闭");
+      return raw.indexOf("窗口前开始") >= 0
+        ? base + suffix(t("report_started_before_window", "窗口前开始"))
+        : base;
+    }
+    return t(DURATION_I18N[code] || code, raw || "--");
+  }
+
   function reportDetails(data) {
     const blocks = [];
     // The backend computes an empty_reason per section; dropping it left a
@@ -1654,12 +1706,7 @@
                     : item.status || "--",
                 ) +
                 "</td><td>" +
-                esc(
-                  item.duration_code
-                    ? t(DURATION_I18N[item.duration_code] || item.duration_code,
-                        item.duration || "--")
-                    : item.duration || "--",
-                ) +
+                esc(reportDurationText(item)) +
                 "</td></tr>",
             )
             .join("") +

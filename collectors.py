@@ -334,6 +334,34 @@ class DiskUsage:
     exception: str | None = None
 
 
+def _short_disk_error(value: Any) -> str | None:
+    """A card-sized reason for a mount that could not be read.
+
+    psutil embeds the full errno text and path ("[Errno 13] Permission denied:
+    '/mnt/very-long-nfs/...'"), which is far wider than the disk row's column
+    and used to run across the percentage cell and off the card. The card
+    shows a short cause; the original exception is written to the log by
+    ``disk_usage_bounded`` (rate-limited to once per 10 minutes).
+    """
+
+    if not value:
+        return None
+    text = str(value).strip()
+    low = text.lower()
+    # Errno-specific causes first: a mount path may itself contain a word
+    # like "timeout", and a permission error on /mnt/timeout-backup must not
+    # be reported as a read timeout.
+    if "permission denied" in low or "errno 13" in low:
+        return "无权限读取"
+    if "no such file" in low or "errno 2" in low:
+        return "挂载点不存在"
+    if "input/output error" in low or "errno 5" in low:
+        return "I/O 错误"
+    if "timed out" in low or "超时" in text:
+        return "读取超时"
+    return text if len(text) <= 24 else text[:23] + "…"
+
+
 def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
     targets = paths or _default_disk_paths()
     ret: list[DiskUsage] = []
@@ -484,7 +512,11 @@ def disk_usage_bounded(
             _DISK_WARN_AT = time.time()
             logger.warning(
                 "部分磁盘挂载点读取超时或失败（%s），请检查挂载点是否可达",
-                ", ".join(name for name, r in results.items() if r.exception),
+                ", ".join(
+                    f"{name}（{str(r.exception)[:120]}）"
+                    for name, r in results.items()
+                    if r.exception
+                ),
             )
     return [results[name] for name in targets]
 
@@ -2365,7 +2397,7 @@ async def collect_all(
                 "percent_text": (
                     f"{d.percent:.1f}%" if d.percent is not None else "--"
                 ),
-                "error": d.exception,
+                "error": _short_disk_error(d.exception),
             }
             for d in disks
         ],

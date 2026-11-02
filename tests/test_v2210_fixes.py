@@ -651,8 +651,8 @@ def test_audit_monitor_target_message_is_accurate() -> None:
         (issue.message for issue in issues if issue.code == "monitors_no_targets"),
         "",
     )
-    assert "仍会探测" in message
-    assert "不会探测" not in message
+    assert "不会探测" in message
+    assert "仍会探测" not in message
 
 
 # ----------------------------------------------------------------------

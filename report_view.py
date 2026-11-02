@@ -772,6 +772,12 @@ class DailyReportBuilder:
                 continue
             if not math.isfinite(number):
                 continue
+            # A negative CPU/RAM/disk percentage can only come from a
+            # hand-edited or corrupted row: drop it like any other invalid
+            # sample. Including it (or clamping it to zero) pulled the day's
+            # average down and disagreed with the visible data.
+            if number < 0:
+                continue
             values.append(number)
         if not values:
             return {

@@ -11,6 +11,9 @@ import psutil
 from astrbot.api import logger
 
 from .collectors import (
+    _call_action,
+    _get_aiocqhttp_client,
+    _normalize_object,
     cached_cpu_percent,
     cfg_bool,
     cfg_get,
@@ -550,6 +553,11 @@ class DailyReporter:
         # reports into the chat (v2.20.5).
         self._pending_recovery_day: str | None = None
         self._pending_recovery_since = 0.0
+        # Consecutive failed channel probes. The probe is a hint, not ground
+        # truth (a OneBot implementation may not support get_status), so after
+        # three failures one real send is allowed through rather than
+        # blocking every report forever.
+        self._channel_probe_failures = 0
         # A configuration problem ("targets empty" / "sections empty") cannot
         # heal within the second the loop otherwise waits before re-entering
         # the send path: without a pause the daily loop spun at 1 Hz from the
@@ -1595,6 +1603,41 @@ class DailyReporter:
             self._weekly_pause_until = time.time() + 600
             self._save_delivery_state()
             return
+        if getattr(self, "_weekly_pending_recovery_week", None):
+            recovery_day = self._weekly_pending_report_day or day
+            if not self._weekly_recovery_within_window(recovery_day):
+                stale_day = self._weekly_pending_report_day
+                logger.warning(
+                    "周报 %s 的掉线补发已超出 8.5 小时窗口，已放弃",
+                    self._weekly_pending_recovery_week,
+                )
+                self._weekly_pending_recovery_week = None
+                self._weekly_pending_recovery_since = 0.0
+                self._weekly_pending_report_day = None
+                self._weekly_pending = None
+                self._save_delivery_state()
+                if day and stale_day and day == stale_day:
+                    # This call was the stale recovery itself; a later normal
+                    # slot builds the current week.
+                    return
+            elif not await self._channel_reachable():
+                if self._channel_probe_failures >= 3:
+                    # The probe is a hint, not ground truth: after three
+                    # ambiguous failures let one real send through instead of
+                    # blocking this week forever.
+                    self._channel_probe_failures = 0
+                    logger.warning(
+                        "周报掉线补发：通道探测连续 3 次失败，放行一次真实发送以确认"
+                    )
+                else:
+                    # Still disconnected: retry the (pinned) report later
+                    # instead of rebuilding it on every 15-minute poll.
+                    logger.warning(
+                        "周报掉线补发：Bot 连接仍不可用，稍后重试（不重建报告）"
+                    )
+                    self._weekly_pending = time.time() + 900
+                    self._save_delivery_state()
+                    return
         if not self.store.probe() or not self.store.ensure_ready():
             # ``probe()`` MUST run before ``ensure_ready()`` (v2.20.14):
             # probe() touches a real table and fails on a database whose file
@@ -1958,6 +2001,102 @@ class DailyReporter:
     def _today(self) -> str:
         return now_in_timezone(self.config).strftime("%Y-%m-%d")
 
+    async def _channel_reachable(self) -> bool:
+        """Cheap OneBot liveness probe used before rebuilding a queued report.
+
+        A disconnected Bot makes every send fail exactly like a content error
+        would, but rebuilding and rendering the whole report first spent one
+        T2I render per 15-minute retry poll (and a post-midnight backfill could
+        be lost entirely when ``alerts.enabled`` was off, because the alerting
+        engine is the only other caller of ``notify_offline_recovery``). The
+        report module cannot read the alert engine's offline latch (alerts may
+        be disabled), so it asks OneBot directly.
+        """
+
+        try:
+            getter = getattr(self.plugin, "_onebot_client", None)
+        except Exception:
+            getter = None
+        if not callable(getter):
+            # No OneBot integration in this host (or a test double): there is
+            # nothing to probe, so do not block the report on it.
+            self._channel_probe_failures = 0
+            return True
+        try:
+            client = getter()
+        except Exception:
+            client = None
+        if client is None:
+            # ``alerts.platform_id`` may have been renamed; the status card
+            # already falls back to any aiocqhttp instance in that case, and
+            # so must this probe. Without the fallback a renamed platform
+            # would look "offline" forever and every queued report would be
+            # skipped although the framework send path still works.
+            try:
+                client = _get_aiocqhttp_client(
+                    getattr(self.plugin, "context", None), None
+                )
+            except Exception:
+                client = None
+        if client is None:
+            # A host without any aiocqhttp adapter may still deliver through
+            # another platform (Telegram, official QQ, webchat) via the
+            # framework path. Never make the report queue permanent on a
+            # guess: treat "no client to ask" as reachable.
+            self._channel_probe_failures = 0
+            return True
+        try:
+            status = _normalize_object(
+                await _call_action(client, "get_status", timeout=3)
+            )
+        except Exception as exc:
+            if type(exc).__name__ == "ActionFailed":
+                # The transport answered (with status=failed): it is up, the
+                # action itself was refused. The alert engine treats the same
+                # exception as "online" (alerts.py), keep both semantics in
+                # sync.
+                self._channel_probe_failures = 0
+                return True
+            # Ambiguous (timeout, closed socket, unsupported action): count
+            # it; the caller lets one real send through after three.
+            self._channel_probe_failures += 1
+            return False
+        # A definitive answer, online or not; the escape hatch is only for
+        # ambiguous probe failures.
+        self._channel_probe_failures = 0
+        return status.get("online") is not False
+
+    def _weekly_recovery_within_window(self, report_day: str | None) -> bool:
+        """Whether a queued weekly report may still be delivered late.
+
+        Mirrors the 8.5-hour catch-up window the weekly loop uses. A stale
+        marker (a Wednesday reconnect for last Sunday's report) must not send
+        an arbitrary "weekly" window; worse, the send used to fall back to
+        "yesterday" as the report day and mark the CURRENT week as sent, which
+        silently skipped the real Sunday report.
+        """
+
+        slot_text = self._weekly_slot_for_report_day(report_day)
+        if not slot_text:
+            return False
+        try:
+            slot = datetime.strptime(slot_text, "%Y-%m-%d %H:%M").replace(
+                tzinfo=get_timezone(self.config)
+            )
+        except (TypeError, ValueError):
+            return False
+        now = now_in_timezone(self.config)
+        return now >= slot and now - slot <= timedelta(hours=8, minutes=30)
+
+    def _report_day_for_week(self, week_key: str) -> str | None:
+        """The Saturday report day named by an ISO week key ("2026-W44")."""
+
+        try:
+            year_text, week_text = str(week_key).split("-W", 1)
+            return date.fromisocalendar(int(year_text), int(week_text), 6).isoformat()
+        except (TypeError, ValueError):
+            return None
+
     def notify_offline_recovery(self) -> bool:
         """Queue the newest missed report right after the bot reconnects.
 
@@ -1980,8 +2119,30 @@ class DailyReporter:
                 self._pending_retry = (day, time.time())
                 queued = True
         if self._weekly_pending_recovery_week:
-            self._weekly_pending = time.time()
-            queued = True
+            report_day = getattr(self, "_weekly_pending_report_day", None)
+            if not report_day:
+                # Reload dropped the report day after its six-hour retry
+                # expired; the ISO week key still names the Saturday report.
+                report_day = self._report_day_for_week(
+                    self._weekly_pending_recovery_week
+                )
+            if report_day and self._weekly_recovery_within_window(report_day):
+                self._weekly_pending_report_day = report_day
+                self._weekly_pending = time.time()
+                queued = True
+            else:
+                # A reconnect days later must not build a "weekly report" for
+                # an arbitrary seven-day window, and (because the report day
+                # was missing) it used to mark the CURRENT week as sent,
+                # swallowing the real Sunday report. Drop the stale marker.
+                logger.warning(
+                    "周报 %s 的掉线补发已超出 8.5 小时补发窗口（或缺少报告日），已放弃",
+                    self._weekly_pending_recovery_week,
+                )
+                self._weekly_pending_recovery_week = None
+                self._weekly_pending_recovery_since = 0.0
+                self._weekly_pending_report_day = None
+                self._weekly_pending = None
         if queued:
             self._save_delivery_state()
             logger.info("Bot 连接恢复：已安排补发最近一份未送达的报告")
@@ -2236,6 +2397,37 @@ class DailyReporter:
             self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
+        if (
+            backfill or getattr(self, "_pending_recovery_day", None)
+        ) and not await self._channel_reachable():
+            # A queued report is retried every 15 minutes in some paths. If
+            # the channel is still down, building and rendering the whole
+            # report first only burned a T2I render per poll (and a
+            # post-midnight backfill was lost entirely when alerts were
+            # disabled, because the alert engine is the only other caller of
+            # notify_offline_recovery). Probe the channel cheaply first.
+            if self._channel_probe_failures >= 3:
+                # Ambiguous probe failures only: a definitive "online=false"
+                # resets the counter in the probe. Let one real send through
+                # rather than blocking every report forever.
+                self._channel_probe_failures = 0
+                logger.warning(
+                    "通道探测连续 3 次失败，放行一次真实发送以确认（避免永久卡住）"
+                )
+            else:
+                logger.warning(
+                    "Bot 连接不可用，跳过本次日报重建并稍后重试（不消耗渲染）"
+                )
+                # Keep the 15-minute poll even for a backfill: it is cheap now
+                # (the channel probe skips the build while disconnected) and it
+                # no longer depends on the alert engine's reconnect hook, which
+                # does not run when alerts are disabled.
+                self._schedule_retry(
+                    day or self._default_report_day(),
+                    transport_offline=True,
+                    poll_offline=True,
+                )
+                return
         if not self.store.probe() or not self.store.ensure_ready():
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
@@ -2368,7 +2560,12 @@ class DailyReporter:
                 isinstance(result, DeliveryResult) and result.transport_offline
             )
             if not self._schedule_retry(
-                day, transport_offline=offline, poll_offline=not backfill
+                day,
+                transport_offline=offline,
+                # The poll is the fallback (and, with alerts disabled, the
+                # only recovery path); the channel probe above keeps it from
+                # rebuilding the report while the transport is down.
+                poll_offline=True,
             ):
                 await self._notify_give_up(targets, day, weekly=False)
 

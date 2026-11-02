@@ -811,7 +811,13 @@ class StatusCardPlugin(Star):
         cpu = resources[0]
         ram = resources[1]
         swap = resources[2]
-        disk = view["disks"][0] if view["disks"] else None
+        # Prefer a readable mount: the first entry may be a pulled NAS path,
+        # and printing its "-- / --" hid the healthy local disk from the text
+        # fallback (the card and the local fallback card already do this).
+        disks = view["disks"]
+        disk = next((item for item in disks if not item.get("error")), None)
+        if disk is None and disks:
+            disk = disks[0]
         network = view["network"]
         process = view["process"]["counts"]
         lines = [

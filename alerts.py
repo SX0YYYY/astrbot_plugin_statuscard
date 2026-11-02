@@ -2350,6 +2350,14 @@ class AlertEngine:
             watch["last_streak"] = streak
             self.state.save()
             if delivered:
+                # This fresh alert supersedes any copy queued by an earlier
+                # failed push: leaving it behind delivered the same outage a
+                # second time (the retry loop and the cooldown deadline can
+                # land in different orders). Clear it only on delivery, so a
+                # failed fresh attempt can still fall back to the queued copy.
+                watch.pop("pending_alert_text", None)
+                watch.pop("next_attempt", None)
+                watch.pop("alert_retry_count", None)
                 self._record_event(
                     "provider",
                     "LLM 服务",
