@@ -504,7 +504,12 @@ class PageApi:
                     "last_error": self._mask_host_text(
                         str(state.get("last_error") or "")[:160]
                     ),
-                    "config_error": config_error,
+                    # ``config_error`` quotes the raw operator input (for a
+                    # bad TCP port it is ``repr(item["port"])``), so a pasted
+                    # URL with credentials leaked on a dashboard that had
+                    # the hostname rule on. Mask it exactly like last_error
+                    # (v2.20.19).
+                    "config_error": self._mask_host_text(str(config_error or "")[:160]),
                 }
             )
 
@@ -650,6 +655,16 @@ class PageApi:
                     raw = cfg_get(plugin.config, legacy_key, [])
                     if isinstance(raw, str):
                         raw = [raw]
+                    if not raw and legacy_key != "alerts.targets":
+                        # The real senders fall back to alerts.targets when
+                        # the module-specific list is empty:
+                        # ServiceMonitor for ``service`` and DailyReporter
+                        # for ``daily``/``weekly``. Verify only read the
+                        # module list, so a correct alerts.targets channel
+                        # was never exercised (v2.20.19).
+                        raw = cfg_get(plugin.config, "alerts.targets", [])
+                        if isinstance(raw, str):
+                            raw = [raw]
                     picked = normalize_targets(raw or [], platform_id)
                 for one in picked:
                     if one not in merged:

@@ -41,6 +41,7 @@ from .utils import (
     delivery_offline,
     normalize_targets,
     retry_delay,
+    summary_item_parts,
     truncate_text,
 )
 from .utils import (
@@ -427,6 +428,8 @@ class AlertEngine:
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
                     st.pop("recovery_awaits_summary", None)
+                    st.pop("summary_key", None)
+                    st.pop("summary_reason", None)
                     changed = True
                     logger.info(
                         "告警规则 %s 的排队恢复在重启前失去对应的汇总，已撤回", key
@@ -445,6 +448,8 @@ class AlertEngine:
                     st["summary_abandoned"] = True
                     st.pop("awaiting_summary", None)
                     st.pop("summary_buffered", None)
+                    st.pop("summary_key", None)
+                    st.pop("summary_reason", None)
                     # The queued recovery belongs to the summary that never
                     # arrived, so it has to go with it: leaving it behind
                     # delivered a stale "已恢复" for an incident the user
@@ -589,7 +594,12 @@ class AlertEngine:
         return result
 
     async def _push_alert(
-        self, name: str, reason: str, text: str, retry: bool = False
+        self,
+        name: str,
+        reason: str,
+        text: str,
+        retry: bool = False,
+        item_key: str = "",
     ) -> Any | None:
         """Send the first alert of an episode, or buffer it in the window.
 
@@ -609,6 +619,7 @@ class AlertEngine:
             kind="resource",
             on_abandon=self._on_summary_abandoned,
             on_delivered=self._on_summary_delivered,
+            item_key=item_key,
         )
 
     def _on_summary_delivered(self, items: list[tuple[str, str]]) -> None:
@@ -622,7 +633,10 @@ class AlertEngine:
         its recovery notice (v2.20.17).
         """
 
-        labels = {label for label, _reason in items if label}
+        parts = [summary_item_parts(item) for item in items]
+        labels = {label for label, _reason, _key in parts if label}
+        pairs = {(label, reason) for label, reason, _key in parts}
+        keys = {key for _label, _reason, key in parts if key}
         if not labels:
             return
         changed = False
@@ -633,8 +647,32 @@ class AlertEngine:
             for st in rules.values():
                 if not isinstance(st, dict):
                     continue
-                if str(st.get("label") or "") not in labels:
+                label = str(st.get("label") or "")
+                if label not in labels:
                     continue
+                # Two rules can share a name. Prefer the exact rule key
+                # carried by the aggregation batch; older/legacy batches have
+                # no key, so fall back to the buffered (name, reason).
+                # Without this one rule's delivered summary cleared the other
+                # rule's queued recovery, which then overtook its own
+                # still-pending summary (v2.20.19 reverse audit).
+                key = str(st.get("summary_key") or "")
+                if keys and key:
+                    if key not in keys:
+                        continue
+                else:
+                    reason = str(st.get("summary_reason") or "")
+                    if reason and (label, reason) not in pairs:
+                        continue
+                st.pop("summary_key", None)
+                st.pop("summary_reason", None)
+                # A rule that recovered inside the aggregation window is no
+                # longer ``alerting``, but its queued recovery still waits
+                # for this very summary. Clear the marker here: the summary
+                # DID reach the chat, so a later reload must not mistake the
+                # recovery for an orphan and delete it (v2.20.19).
+                if st.pop("recovery_awaits_summary", False):
+                    changed = True
                 if not st.get("alerting"):
                     continue
                 # Only rules whose alert was actually buffered. A same-named
@@ -660,7 +698,10 @@ class AlertEngine:
         cooldown for half an hour after the summary was given up on.
         """
 
-        labels = {label for label, _reason in items if label}
+        parts = [summary_item_parts(item) for item in items]
+        labels = {label for label, _reason, _key in parts if label}
+        pairs = {(label, reason) for label, reason, _key in parts}
+        keys = {key for _label, _reason, key in parts if key}
         if not labels:
             return
         changed = False
@@ -674,6 +715,17 @@ class AlertEngine:
                 label = str(st.get("label") or "")
                 if not label or label not in labels:
                     continue
+                key = str(st.get("summary_key") or "")
+                if keys and key:
+                    if key not in keys:
+                        continue
+                else:
+                    reason = str(st.get("summary_reason") or "")
+                    if reason and (label, reason) not in pairs:
+                        # A different rule with the same name owns this summary.
+                        continue
+                st.pop("summary_key", None)
+                st.pop("summary_reason", None)
                 if st.get("recovery_awaits_summary"):
                     # The rule recovered while its alert was still buffered in
                     # this very summary, so the queued "已恢复" exists only
@@ -780,7 +832,7 @@ class AlertEngine:
         except Exception:
             logger.exception("记录告警事件失败")
 
-    async def send_test(self, target_umo: str | None = None) -> bool:
+    async def send_test(self, target_umo: str | None = None) -> dict[str, Any]:
         # Exercise both the current chat and the targets real alerts would
         # use. Sending only to the invoking chat reported success while every
         # real alert went to a mistyped group id -- the most common reason
@@ -805,7 +857,13 @@ class AlertEngine:
             if text_candidate and text_candidate not in targets:
                 targets.append(text_candidate)
         if not targets:
-            return False
+            return {
+                "ok": False,
+                "targets": [],
+                "ok_targets": [],
+                "failed_targets": [],
+                "uncertain_targets": [],
+            }
         text = (
             "🔔 测试通知\n"
             "──────────────\n"
@@ -817,10 +875,28 @@ class AlertEngine:
         if isinstance(result, DeliveryResult):
             # A partial or unconfirmed result must not read as "sent": the
             # whole point of this command is to diagnose a broken target.
-            return bool(result.ok_targets) and not (
-                result.failed_targets or result.uncertain_targets
-            )
-        return bool(result)
+            # Return the per-target lists so the command can name the bad
+            # target instead of a bare "发送失败" (the invoking chat often
+            # DID receive the message, which made the reply contradict the
+            # notification the operator was looking at) (v2.20.19).
+            ok_targets = list(result.ok_targets)
+            failed = list(result.failed_targets)
+            uncertain = list(result.uncertain_targets)
+            return {
+                "ok": bool(ok_targets) and not (failed or uncertain),
+                "targets": targets,
+                "ok_targets": ok_targets,
+                "failed_targets": failed,
+                "uncertain_targets": uncertain,
+            }
+        ok = bool(result)
+        return {
+            "ok": ok,
+            "targets": targets,
+            "ok_targets": list(targets) if ok else [],
+            "failed_targets": [] if ok else list(targets),
+            "uncertain_targets": [],
+        }
 
     # ------------------------------------------------------------------
     # monitor loop
@@ -1292,11 +1368,13 @@ class AlertEngine:
                     # aggregation; the first alert must still open the window
                     # (v2.20.8).
                     is_retry = cooldown_retry or _safe_int(st.get("retry_count")) > 0
+                    reason_text = f"{value_text}（阈值 {threshold:.1f}{unit}）"
                     result = await self._push_alert(
                         name,
-                        f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                        reason_text,
                         text,
                         retry=is_retry,
+                        item_key=key,
                     )
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
@@ -1322,12 +1400,21 @@ class AlertEngine:
                         st["awaiting_summary"] = True
                         # Identifies THIS rule as the buffered one: two rules
                         # may share a name (the same disk path twice, a
-                        # renamed monitor), and the abandon callback matches
-                        # by name -- without the marker it also withdrew the
-                        # rule whose alert was delivered on its own, which
-                        # made the next fault of that rule alert a second
-                        # time (v2.20.14, same fix as the service monitors).
+                        # renamed monitor), and the callbacks match by name --
+                        # without the marker they also touched the rule whose
+                        # alert was delivered on its own, which made the next
+                        # fault of that rule alert a second time (v2.20.14,
+                        # same fix as the service monitors).
                         st["summary_buffered"] = True
+                        # The exact rule key this alert was buffered under.
+                        # Two rules can share a name; the delivered summary
+                        # must only clear the matching rule (v2.20.19).
+                        st["summary_key"] = key
+                        # The exact reason this alert was buffered. Two rules
+                        # can share a name; matching the delivered summary by
+                        # (name, reason) prevents one rule's summary from
+                        # clearing the other rule's queued recovery (v2.20.19).
+                        st["summary_reason"] = reason_text
                         self._record_event(
                             "resource",
                             name,
@@ -1348,6 +1435,8 @@ class AlertEngine:
                         # later same-name abandon would withdraw this rule's
                         # "notified" state.
                         st.pop("summary_buffered", None)
+                        st.pop("summary_key", None)
+                        st.pop("summary_reason", None)
                         self._record_event(
                             "resource",
                             name,
@@ -1593,6 +1682,8 @@ class AlertEngine:
                             max(15.0, remaining + 3.0),
                         )
                         return
+                    st.pop("summary_key", None)
+                    st.pop("summary_reason", None)
                     result = await self._send(text)
                     if not self._delivered(result):
                         st["pending_recovery"] = text
@@ -2255,7 +2346,11 @@ class AlertEngine:
                 watch.pop(stale_key, None)
             self.state.save()
             pending_text = ""
-        if pending_text:
+        if pending_text and latest == "completed":
+            # Retry the queued recovery only while the service is actually
+            # healthy. A new failure means the notice is stale; sending it
+            # here raced the alert branch below and delivered "✅ 已恢复"
+            # during an outage (v2.20.19).
             next_attempt = _safe_float(watch.get("recovery_next_attempt"))
             if now >= next_attempt:
                 result = await self._send(
@@ -2302,14 +2397,6 @@ class AlertEngine:
         if (not alerting and streak >= self.provider_watch_threshold) or (
             cooldown_retry and streak >= self.provider_watch_threshold
         ):
-            text = (
-                "⚠️ LLM 服务连续失败\n"
-                "──────────────\n"
-                f"主机: {self._hostname()}\n"
-                f"连续失败: {streak} 次（阈值 {self.provider_watch_threshold}）\n"
-                f"最近状态: {_PROVIDER_STATUS_TEXT.get(str(latest or ''), latest or '未知')}\n"
-                f"时间: {_now_text(self.config)}"
-            )
             in_cooldown = bool(
                 last_alert_ts and now - last_alert_ts < self.provider_watch_cooldown
             )
@@ -2317,6 +2404,10 @@ class AlertEngine:
                 # Latch and record without pushing. ``alerted=False`` keeps
                 # the recovery notice from arriving without a matching alert
                 # -- the exact defect v2.18.1 fixed for the resource rules.
+                # Keep any queued recovery from the previous episode: it is
+                # still owed to the user and will be retried once the service
+                # is healthy again; dropping it here left the previous outage
+                # permanently "unrecovered" (v2.20.19 reverse audit).
                 watch["alerting"] = True
                 watch["alerted"] = False
                 watch["last_streak"] = streak
@@ -2332,6 +2423,28 @@ class AlertEngine:
                     streak,
                 )
                 return
+            # A queued recovery from the PREVIOUS episode must not be
+            # delivered while this new alert is being pushed: fold it into
+            # the alert text. If the alert is cooldown-suppressed, the
+            # branch above returns first and keeps the notice for a later
+            # healthy retry (v2.20.19).
+            had_pending_recovery = bool(watch.pop("pending_recovery", None))
+            if had_pending_recovery:
+                watch.pop("recovery_retry_count", None)
+                watch.pop("recovery_next_attempt", None)
+            text = (
+                "⚠️ LLM 服务连续失败\n"
+                "──────────────\n"
+                f"主机: {self._hostname()}\n"
+                f"连续失败: {streak} 次（阈值 {self.provider_watch_threshold}）\n"
+                f"最近状态: {_PROVIDER_STATUS_TEXT.get(str(latest or ''), latest or '未知')}\n"
+                f"时间: {_now_text(self.config)}"
+                + (
+                    "\n（上一次的恢复通知未送达，已并入本条）"
+                    if had_pending_recovery
+                    else ""
+                )
+            )
             result = await self._send(text, source="provider", kind="provider")
             delivered = self._delivered(result)
             watch["alerting"] = True
@@ -2442,6 +2555,25 @@ class AlertEngine:
                     ):
                         watch.pop(stale_key, None)
             logger.info("LLM 服务已恢复（最近一次调用成功）")
+
+        if pending_text and latest != "completed":
+            # Keep a still-recent recovery queued: when the service is
+            # failing again (or the newest call was aborted), the notice is
+            # only valid once a completed call proves recovery. Do not drop
+            # it immediately -- the previous outage is still owed a
+            # "recovered" message (v2.20.19 reverse audit). A notice that
+            # waits more than a day without ever seeing a completed call is
+            # stale residue; drop it then.
+            overdue = now - _safe_float(watch.get("recovery_next_attempt"))
+            if overdue > 24 * 3600:
+                for stale_key in (
+                    "pending_recovery",
+                    "recovery_retry_count",
+                    "recovery_next_attempt",
+                ):
+                    watch.pop(stale_key, None)
+                self.state.save()
+                logger.info("LLM 服务恢复通知等待超过 24 小时，已丢弃过期通知")
 
     def _hostname(self) -> str:
         # The push text must obey the same hostname rule as the card, the

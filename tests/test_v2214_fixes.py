@@ -108,7 +108,15 @@ def test_send_scheduled_probes_before_ensure_ready(tmp_path: Path) -> None:
     """The daily send path must probe first (the call order is asserted)."""
 
     source = Path(report_module.__file__).read_text(encoding="utf-8")
-    assert "self.store.probe() or not self.store.ensure_ready()" in source
+    # v2.20.19 moved the two calls into ``_store_ready`` so a failed probe
+    # can also repair the store for the next attempt; the ordering contract
+    # is unchanged and asserted on the helper body.
+    assert "if not self._store_ready():" in source
+    helper = source.split("def _store_ready(self) -> bool:", 1)[1]
+    helper = helper.split("async def preview(", 1)[0]
+    assert helper.index("self.store.probe()") < helper.index(
+        "self.store.ensure_ready()"
+    )
     assert "self.store.ensure_ready() or not self.store.probe()" not in source
 
 

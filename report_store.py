@@ -23,10 +23,21 @@ class ReportStore:
         self.path = Path(path)
         self.available = False
         self.init_error: str | None = None
+        # Set when the database had to be REBUILT (deleted/empty file or
+        # corruption), not when an existing healthy database was reopened.
+        # The reporter uses it to skip a report day whose data was lost,
+        # instead of sending an all-"--" page and locking the day (v2.20.19).
+        self.repaired_at: float | None = None
+        # True when this process had to create the file from scratch. The
+        # reporter uses it together with its own persisted delivery markers
+        # to tell a first install (no history) from a database deleted while
+        # the plugin was stopped (history exists, so the data is lost).
+        self.created_new = False
         self._write_failures = 0
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.created_new = not self.path.exists() or self.path.stat().st_size == 0
             self._init_db_with_recovery()
             self._secure_permissions()
             self.available = True
@@ -49,16 +60,48 @@ class ReportStore:
             return True
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # probe() failed because the file was deleted/empty or locked.
+            # Check for the actual schema before ensure_ready() creates it:
+            # a deleted file leaves an empty (or header-only) sqlite file
+            # behind, so file size is not a reliable signal. A locked but
+            # healthy database answers the sqlite_master query normally (or
+            # raises, which is treated conservatively as "not rebuilt").
+            rebuilt = not self._has_schema()
             self._init_db_with_recovery()
             self._secure_permissions()
             self.available = True
             self.init_error = None
+            if rebuilt:
+                self.repaired_at = time.time()
             logger.info("日报数据库已恢复: %s", self.path)
             return True
         except Exception as exc:
             self.init_error = f"初始化失败（{exc.__class__.__name__}）"
             logger.warning("日报数据库仍不可用: %s", exc)
             return False
+
+    def _has_schema(self) -> bool:
+        """Whether the business tables already exist.
+
+        Used to tell a rebuild (the file was deleted/emptied) from merely
+        reopening an existing database. Any error is treated as "still
+        present" so a transient lock never makes the reporter skip a valid
+        report day.
+        """
+
+        con: sqlite3.Connection | None = None
+        try:
+            con = sqlite3.connect(self.path, timeout=1)
+            row = con.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'resource_samples'"
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return True
+        finally:
+            if con is not None:
+                con.close()
 
     def probe(self) -> bool:
         """Cheap liveness check run before a report is built.
@@ -125,6 +168,7 @@ class ReportStore:
                 logger.exception("损坏数据库改名失败: %s", source)
                 raise
         self._init_db()
+        self.repaired_at = time.time()
         logger.warning("已重建日报数据库，原损坏文件保留为 %s", backup)
 
     def _secure_permissions(self) -> None:

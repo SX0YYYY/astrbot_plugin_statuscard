@@ -70,6 +70,12 @@
     website_none: "reason_website_none",
     process_since: "reason_process_since",
     process_none: "reason_process_none",
+    // The resource section's "sampling started {date}" sentences were sent
+    // without a code, so the English page showed the Chinese sentence (the
+    // whitelist below only knows a few fixed strings) (v2.20.19).
+    resource_since: "reason_resource_since",
+    resource_incomplete_day: "reason_resource_incomplete_day",
+    resource_incomplete_span: "reason_resource_incomplete_span",
     // The LLM quality section used to fall back to the Chinese sentence,
     // because the backend sent the reason without a code. The English page
     // then showed "未找到 AstrBot 数据库（data_v4.db）" inside an otherwise
@@ -413,7 +419,7 @@
   // Say out loud how much history the selected window actually contains:
   // with only a few days of samples, 7d and 30d look identical and users
   // assume the button did nothing.
-  function historyRangeNote(points, range) {
+  function historyRangeNote(points, range, truncated) {
     if (!points.length) return "";
     const first = Number(points[0].ts);
     const last = Number(points[points.length - 1].ts);
@@ -439,6 +445,20 @@
     );
     const wanted = { "24h": 1, "7d": 7, "30d": 30 }[range] || 1;
     if (range !== "24h" && days + 0.5 < wanted) {
+      if (truncated) {
+        // The history route caps at 20k rows. Saying "only N days of data,
+        // less than 30" described the cap as missing data and contradicted
+        // the truncation toast (v2.20.19).
+        return (
+          text +
+          " · " +
+          t(
+            "history_range_truncated",
+            "范围数据超出上限，仅显示最近 {days} 天",
+            { days: shownDays },
+          )
+        );
+      }
       return (
         text +
         " · " +
@@ -514,6 +534,42 @@
 
   function empty(message) {
     return '<div class="empty">' + esc(message) + "</div>";
+  }
+
+  // The three database-backed tabs used to show only a short toast and an
+  // otherwise blank panel. After the toast faded the page looked like "no
+  // data was ever recorded", which is the most misleading empty state
+  // (v2.20.19).
+  function showDbUnavailable(panel) {
+    const message = t(
+      "db_unavailable_panel",
+      "数据库暂时不可用，正在自动恢复。请稍后切换标签或刷新页面重试。",
+    );
+    if (panel === "history") {
+      ["history-legend", "network-legend"].forEach((id) => {
+        const node = $(id);
+        if (node) node.innerHTML = "";
+      });
+      ["history-chart", "network-chart"].forEach((id) => {
+        const node = $(id);
+        if (node) node.innerHTML = empty(message);
+      });
+      const note = $("history-range-note");
+      if (note) note.textContent = "";
+    } else if (panel === "events") {
+      const list = $("event-list");
+      if (list) list.innerHTML = empty(message);
+      const summary = $("event-summary");
+      if (summary) summary.textContent = "";
+    } else if (panel === "reports") {
+      const summary = $("report-summary");
+      if (summary) summary.innerHTML = "";
+      const details = $("report-details");
+      if (details) details.innerHTML = empty(message);
+      const table = $("report-runs");
+      const body = table && table.querySelector("tbody");
+      if (body) body.innerHTML = "";
+    }
   }
 
   // ------------------------------------------------------------------
@@ -630,6 +686,7 @@
         plotH +
         '" rx="4" />';
     });
+    let lastTickText = null;
     for (let index = 0; index <= 4; index += 1) {
       const lineY = top + plotH * (1 - index / 4);
       svg +=
@@ -642,13 +699,19 @@
         '" y2="' +
         lineY +
         '" />';
+      const tickText = String(formatter((max * index) / 4));
+      // A zero-traffic window (max=1) formatted in whole bytes produced
+      // "0 B/s / 0 B/s / 1 B/s / 1 B/s / 1 B/s" -- five labels for two
+      // values. Keep the grid lines but not the duplicate text (v2.20.19).
+      if (tickText === lastTickText) continue;
+      lastTickText = tickText;
       svg +=
         '<text class="axis" x="' +
         (left - 6) +
         '" y="' +
         (lineY + 4) +
         '" text-anchor="end">' +
-        esc(formatter((max * index) / 4)) +
+        esc(tickText) +
         "</text>";
     }
     // The first and last ticks are anchored to the plot edges, not centred:
@@ -1363,6 +1426,7 @@
     }
     if (seq !== state.historySeq) return;
     if (data.db_unavailable) {
+      showDbUnavailable("history");
       toast(
         t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
       );
@@ -1387,7 +1451,11 @@
       toast(t("history_truncated", "范围数据超出上限，仅显示最近的记录"));
     }
     const points = data.points || [];
-    $("history-range-note").textContent = historyRangeNote(points, range);
+    $("history-range-note").textContent = historyRangeNote(
+      points,
+      range,
+      Boolean(data.truncated),
+    );
     // A 24h window that crosses midnight must put the date on the axis
     // labels; the old call omitted the flag and the axis read
     // "10:00 16:00 22:00 04:00 10:00" (v2.20.5).
@@ -1532,6 +1600,7 @@
     const data = await apiGet("events", { days: state.eventDays });
     if (seq !== state.eventsSeq) return;
     if (data.db_unavailable) {
+      showDbUnavailable("events");
       toast(
         t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
       );
@@ -2054,6 +2123,7 @@
     state.reportsStale = Boolean(data && data.stale);
     if (data && data.today) state.reportToday = String(data.today);
     if (data.db_unavailable) {
+      showDbUnavailable("reports");
       toast(
         t("db_unavailable", "数据库暂时不可用，正在自动恢复；当前显示的可能是旧数据"),
       );

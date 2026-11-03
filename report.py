@@ -39,7 +39,7 @@ from .report_view import (
 )
 from .sampler import read_message_stats_total
 from .state import StateStore
-from .utils import normalize_targets
+from .utils import normalize_targets, safe_float
 from .version import resolve_astrbot_version
 
 
@@ -650,6 +650,20 @@ class DailyReporter:
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
         self._daily_given_up_day = saved.get("daily_given_up_day") or None
+        # When the report database had to be rebuilt during a report day,
+        # that day's data is gone; sending an all-"--" report would lock the
+        # day. Persist across restarts (the store flag is in-memory only).
+        self._db_repaired_at = safe_float(saved.get("db_repaired_at")) or None
+        # A day whose report was attempted with an empty ``sections`` list.
+        # It is deliberately not persisted: a restart may retry once, which
+        # is harmless, while the loop must not write one "sections empty"
+        # row every 10 minutes until midnight (v2.20.19).
+        self._daily_empty_sections_day: str | None = None
+        # A report day/week skipped because the database rebuild destroyed
+        # its data. In-memory is enough: a restart may retry once, but the
+        # loop must not write one "db rebuilt" row every 10 minutes.
+        self._daily_db_rebuilt_day: str | None = None
+        self._weekly_db_rebuilt_week: str | None = None
         self._pending_recovery_day = saved.get("pending_recovery_day") or None
         self._weekly_pending_recovery_week = (
             saved.get("weekly_pending_recovery_week") or None
@@ -791,6 +805,39 @@ class DailyReporter:
             # and the on-disk state reflects what the process is using
             # (v2.20.6).
             self._save_delivery_state()
+        # Seed the rebuild marker from the store BEFORE the first send: the
+        # store may have been rebuilt at start-up (corrupt file) or while the
+        # plugin was stopped (deleted file + existing delivery history). Both
+        # would otherwise send an all-"--" report for the affected day.
+        store_repaired = safe_float(getattr(self.store, "repaired_at", None))
+        if self._db_repaired_at:
+            self._db_repaired_at = min(self._db_repaired_at, time.time())
+        if store_repaired:
+            self._db_repaired_at = min(store_repaired, time.time())
+        elif getattr(self.store, "created_new", False) and (
+            saved.get("last_attempt_day") or saved.get("last_sent_day")
+        ):
+            self._db_repaired_at = time.time()
+        if self._db_repaired_at:
+            self._save_delivery_state()
+
+    def _sync_store_repair(self) -> None:
+        """Adopt a rebuild performed by another component.
+
+        The dashboard and the collector loop also call ``ensure_ready()``.
+        When one of them repairs a deleted database, the reporter must learn
+        about it before building a report, not only when its own
+        ``_store_ready()`` was the caller (v2.20.19 second reverse audit).
+        """
+
+        repaired = safe_float(getattr(self.store, "repaired_at", None))
+        if not repaired:
+            return
+        repaired = min(repaired, time.time())
+        current = safe_float(getattr(self, "_db_repaired_at", None))
+        if repaired > current:
+            self._db_repaired_at = repaired
+            self._save_delivery_state()
 
     def _save_delivery_state(self) -> None:
         state = getattr(getattr(self, "plugin", None), "state", None)
@@ -811,6 +858,7 @@ class DailyReporter:
                     "last_attempt_wall_day": self._last_attempt_wall_day,
                     "schema": 2,
                     "daily_given_up_day": self._daily_given_up_day,
+                    "db_repaired_at": getattr(self, "_db_repaired_at", None),
                     "pending_recovery_day": getattr(
                         self, "_pending_recovery_day", None
                     ),
@@ -1638,7 +1686,7 @@ class DailyReporter:
                     self._weekly_pending = time.time() + 900
                     self._save_delivery_state()
                     return
-        if not self.store.probe() or not self.store.ensure_ready():
+        if not self._store_ready():
             # ``probe()`` MUST run before ``ensure_ready()`` (v2.20.14):
             # probe() touches a real table and fails on a database whose file
             # was deleted -- the empty file sqlite silently recreates has no
@@ -1662,6 +1710,17 @@ class DailyReporter:
             # outage made the whole weekly report disappear without a
             # trace (v2.20.12).
             self._schedule_weekly_retry(store_unavailable=True)
+            return
+        if self._report_window_lost(day, 7):
+            logger.warning(
+                "周报窗口内有数据因报表数据库重建而丢失，跳过本周周报（不发送全空报告）"
+            )
+            self._record(day or self._default_report_day(), False, "weekly db rebuilt")
+            self._weekly_db_rebuilt_week = self._week_key(
+                day or self._default_report_day()
+            )
+            self._weekly_pause_until = time.time() + 600
+            self._clear_retry()
             return
         try:
             view = await asyncio.to_thread(
@@ -2174,6 +2233,19 @@ class DailyReporter:
             return False
         if self._daily_given_up_day == report_day:
             return False
+        if getattr(self, "_daily_db_rebuilt_day", None) == report_day:
+            # This day's data was lost to a database rebuild; one failed
+            # record is enough for the night.
+            return False
+        sections = self._sections()
+        if sections is not None and not sections:
+            # Nothing can be built. Allow one attempt so the send record
+            # names the real reason, then stop re-entering the catch-up
+            # branch every 10 minutes (the pause alone re-armed it and wrote
+            # ~18 failed rows per evening) (v2.20.19). If the operator fixes
+            # the sections later, ``sections`` is non-empty and the normal
+            # one-catch-up path below applies immediately.
+            return getattr(self, "_daily_empty_sections_day", None) != report_day
         if self._last_attempt_day == report_day:
             # The attempt marker is written before the slow work. If the
             # process was restarted mid-send (config reload at 21:00, OOM,
@@ -2300,6 +2372,10 @@ class DailyReporter:
             # Already gave up after three failed attempts this week; retrying
             # again would produce the same notice every ~40 minutes.
             return False
+        if getattr(self, "_weekly_db_rebuilt_week", None) == week_key:
+            # This week's data was lost to a database rebuild; one failed
+            # record is enough for the catch-up window.
+            return False
         return self._weekly_last_sent_week != week_key
 
     def _weekly_slot_before(self, now: datetime) -> datetime | None:
@@ -2383,6 +2459,10 @@ class DailyReporter:
             # older than yesterday) and pause the loop: without the pause the
             # catch-up guard re-armed every second until midnight.
             self._record(day or self._default_report_day(), False, "sections empty")
+            # Remember which report day already produced that record:
+            # ``_daily_catch_up_allowed`` reads it and stops re-entering the
+            # send path every 10 minutes for the rest of the evening.
+            self._daily_empty_sections_day = day or self._default_report_day()
             self._daily_pause_until = time.time() + 600
             self._clear_retry()
             return
@@ -2428,7 +2508,7 @@ class DailyReporter:
                     poll_offline=True,
                 )
                 return
-        if not self.store.probe() or not self.store.ensure_ready():
+        if not self._store_ready():
             # A damaged or read-only database would otherwise produce a page
             # full of "--" and send it as if it were a real report.
             #
@@ -2452,6 +2532,15 @@ class DailyReporter:
                 day or self._default_report_day(), store_unavailable=True
             )
             await self._notify_store_unavailable(targets)
+            return
+        if self._report_window_lost(day, 1):
+            logger.warning(
+                "日报数据因报表数据库重建而丢失，跳过本报告日（不发送全空报告）"
+            )
+            self._record(day or self._default_report_day(), False, "db rebuilt")
+            self._daily_db_rebuilt_day = day or self._default_report_day()
+            self._daily_pause_until = time.time() + 600
+            self._clear_retry()
             return
         try:
             view = await asyncio.to_thread(self._build_view, day)
@@ -2569,18 +2658,72 @@ class DailyReporter:
             ):
                 await self._notify_give_up(targets, day, weekly=False)
 
+    def _store_ready(self) -> bool:
+        """Probe the report store, repairing it for the NEXT attempt.
+
+        ``probe()`` detects a database whose file was deleted or locked at
+        runtime and flips ``available`` to False. The old short-circuit
+        ``probe() or ensure_ready()`` then never called ``ensure_ready()``,
+        so with ``daily_report.collect=false`` (no collector loop) the store
+        stayed unavailable until a reload: every scheduled report was skipped
+        and the user got the "database unavailable" notice every day. The
+        probe must still run FIRST (a schema rebuilt by ensure_ready looks
+        healthy but is empty, and sending that report would burn the day),
+        so repair here and return False for this attempt (v2.20.19).
+        """
+
+        # Another component (dashboard / collector loop) may already have
+        # repaired a deleted database. Adopt its marker first, otherwise the
+        # fresh empty schema looks healthy and this send builds an all-"--"
+        # report (v2.20.19 second reverse audit).
+        self._sync_store_repair()
+        if self.store.probe():
+            return True
+        if self.store.ensure_ready():
+            # Remember the rebuild across restarts. The in-memory store flag
+            # disappears on reload; the next process would otherwise see a
+            # healthy-but-empty schema and send an all-"--" report.
+            self._sync_store_repair()
+        return False
+
+    def _report_window_lost(self, day: str | None, span_days: int = 1) -> bool:
+        """Whether the report window contains data lost to a DB rebuild.
+
+        A deleted/corrupt ``report.db`` is rebuilt with an empty schema. The
+        next probe then looks healthy, and sending a report for a window that
+        began before the rebuild would deliver a page of "--" and lock the
+        day as delivered. Skip those windows instead; the following days
+        accumulate fresh samples and resume normally (v2.20.19).
+        """
+
+        repaired = safe_float(getattr(self, "_db_repaired_at", None))
+        if not repaired:
+            return False
+        day_text = day or self._default_report_day()
+        try:
+            tz = now_in_timezone(self.config).tzinfo
+            day_start = datetime.fromisoformat(day_text).replace(tzinfo=tz).timestamp()
+        except Exception:
+            return False
+        window_start = day_start - (max(1, span_days) - 1) * 86400
+        return repaired >= window_start
+
     async def preview(
         self, target_umo: str | None, span_days: int = 1, day: str | None = None
     ) -> tuple[bool, str]:
         if not target_umo:
             return False, tr(self.config, "report_no_session")
-        if not self.store.probe() or not self.store.ensure_ready():
+        if not self._store_ready():
             # Preview used to build a page of "--" and send it as if it were
             # a real report; the scheduled path already refuses to.
             # The order matters (v2.20.14): probe() must detect the missing
             # schema before ensure_ready() rebuilds an empty database.
             return False, tr(self.config, "report_db_unavailable_preview")
         span = max(1, min(30, int(span_days or 1)))
+        if self._report_window_lost(day, span):
+            # The preview would be a page of "--" for data that a rebuild
+            # destroyed; say why instead of pretending the range was empty.
+            return False, tr(self.config, "report_db_rebuilt")
         prefix = "report" if span == 1 else "weekly"
         source = "report_preview" if span == 1 else "weekly_preview"
         try:

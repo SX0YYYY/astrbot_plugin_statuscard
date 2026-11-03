@@ -31,6 +31,7 @@ from .utils import (
     retry_delay,
     safe_float,
     safe_int,
+    summary_item_parts,
 )
 
 KIND_LABELS = {
@@ -82,6 +83,17 @@ _CONFIG_ERROR_HINTS = (
     "name or service not known",
     "nodename nor servname provided",
     "no address associated with hostname",
+    # Windows (and a localized Python) reports the same two cases with
+    # different text: a missing docker/systemctl executable is
+    # "FileNotFoundError: [WinError 2] 系统找不到指定的文件。" and a bad host
+    # is "getaddrinfo failed". Neither matched the English/Linux hints, so a
+    # Windows deployment alerted every cooldown and stayed "未恢复" forever
+    # (v2.20.19).
+    "[winerror 2]",
+    "系统找不到指定的文件",
+    "cannot find the file specified",
+    "not recognized as an internal or external command",
+    "is not recognized as the name of a cmdlet",
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
@@ -100,6 +112,12 @@ MAX_RECOVERY_RETRIES = 5
 
 def _looks_like_config_error(text: str) -> bool:
     lowered = str(text or "").lower()
+    if "getaddrinfo failed" in lowered:
+        # Windows uses the same text for errno 11001 (host not found, a
+        # typo) and 11002 (WSATRY_AGAIN, a temporary resolver failure).
+        # Treating both as configuration suppressed real DNS outages
+        # forever; only 11001 is a config error (v2.20.19 reverse audit).
+        return "11001" in lowered or "host not found" in lowered
     return any(hint in lowered for hint in _CONFIG_ERROR_HINTS)
 
 
@@ -346,6 +364,8 @@ class ServiceMonitor:
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
                     st.pop("recovery_awaits_summary", None)
+                    st.pop("summary_key", None)
+                    st.pop("summary_reason", None)
                     changed = True
                     logger.info(
                         "监测项 %s 的排队恢复在重启前失去对应的汇总，已撤回", key
@@ -360,6 +380,8 @@ class ServiceMonitor:
                     st["summary_abandoned"] = True
                     st.pop("awaiting_summary", None)
                     st.pop("summary_buffered", None)
+                    st.pop("summary_key", None)
+                    st.pop("summary_reason", None)
                     changed = True
                     logger.info(
                         "监测项 %s 的聚合汇总在重启前未送达，已标记为可重试", key
@@ -819,6 +841,12 @@ class ServiceMonitor:
                 prev_error = str(st.get("last_error") or "服务异常")
                 st["last_ok"] = now
                 st["last_error"] = ""
+                # A successful probe breaks the consecutive-failure streak
+                # even inside the maintenance window. Leaving ``fails``
+                # behind made the first post-window failure reach the
+                # threshold with a stale count and alert on a service that
+                # was healthy (v2.20.19).
+                st["fails"] = 0
                 started = safe_float(st.pop("silent_since", 0) or 0)
                 if alerting:
                     # An item that was ALREADY alerting when the window began
@@ -855,6 +883,8 @@ class ServiceMonitor:
                         "alerted",
                         "pending",
                         "summary_buffered",
+                        "summary_key",
+                        "summary_reason",
                         "send_exhausted",
                         "awaiting_summary",
                         "recovery_attempt",
@@ -1040,7 +1070,9 @@ class ServiceMonitor:
                     st["last_attempt"] = now
                     st["send_inflight"] = True
                     self.state.save()
-                    result = await self._push_alert(name, detail, text, target_text)
+                    result = await self._push_alert(
+                        name, detail, text, target_text, item_key=key
+                    )
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
                     st.pop("send_inflight", None)
@@ -1080,10 +1112,18 @@ class ServiceMonitor:
                         st["awaiting_summary"] = True
                         # Identifies THIS item as the buffered one: two
                         # monitors may share a name (keys differ by target),
-                        # and the abandon callback matches by name -- without
-                        # the marker it also withdrew the item whose alert
+                        # and the callbacks match by name -- without the
+                        # marker they also touched the item whose alert
                         # was delivered on its own.
                         st["summary_buffered"] = True
+                        # The exact monitor key this alert was buffered
+                        # under; two items may share a name.
+                        st["summary_key"] = key
+                        # Match the delivered summary by (name, reason): two
+                        # monitors can share a name, and one item's summary
+                        # must not clear the other's queued recovery
+                        # (v2.20.19).
+                        st["summary_reason"] = detail
                         self._record_event(name, target_text, detail, "alert")
                     elif delivered:
                         st["last_sent"] = now
@@ -1094,6 +1134,8 @@ class ServiceMonitor:
                         # later same-name abandon would withdraw this item's
                         # "notified" state (v2.20.0).
                         st.pop("summary_buffered", None)
+                        st.pop("summary_key", None)
+                        st.pop("summary_reason", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
                         retry_count = safe_int(st.get("retry_count") or 0) + 1
@@ -1125,6 +1167,8 @@ class ServiceMonitor:
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
                         st.pop("summary_buffered", None)
+                        st.pop("summary_key", None)
+                        st.pop("summary_reason", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
                         if self._transport_offline() or delivery_offline(result):
@@ -1308,6 +1352,8 @@ class ServiceMonitor:
                             max(15.0, remaining + 3.0),
                         )
                     else:
+                        st.pop("summary_key", None)
+                        st.pop("summary_reason", None)
                         result = await self._send(text)
                         if not self._delivered(result):
                             st["pending_recovery"] = text
@@ -1349,6 +1395,8 @@ class ServiceMonitor:
         for stale_key in (
             "awaiting_summary",
             "summary_buffered",
+            "summary_key",
+            "summary_reason",
             "send_exhausted",
             "stale",
             "silent_since",
@@ -1360,6 +1408,7 @@ class ServiceMonitor:
             "recovery_attempt",
             "recovery_next_attempt",
             "recovery_retry_count",
+            "recovery_awaits_summary",
         ):
             st.pop(stale_key, None)
         self._record_event(
@@ -1454,10 +1503,12 @@ class ServiceMonitor:
                                 ),
                             )
                             body = bytearray()
+                            truncated = False
                             async for chunk in resp.aiter_bytes():
                                 body.extend(chunk)
                                 if len(body) >= limit:
                                     body = body[:limit]
+                                    truncated = True
                                     break
                             encoding = resp.charset_encoding or "utf-8"
                             try:
@@ -1465,6 +1516,20 @@ class ServiceMonitor:
                             except LookupError:
                                 text = body.decode("utf-8", errors="replace")
                             if keyword not in text:
+                                if truncated:
+                                    # "Keyword not found" is a lie when the
+                                    # body was cut at max_response_bytes: the
+                                    # keyword may simply be past the cut. The
+                                    # default 256 KiB made a normal large
+                                    # page alert as down every cooldown
+                                    # (v2.20.19). Treat it as an inconclusive
+                                    # probe, not an outage.
+                                    return (
+                                        False,
+                                        f"{PROBE_ERROR_PREFIX}响应超过 {limit} 字节，"
+                                        + "未能读取完整正文，无法确认关键字",
+                                        url,
+                                    )
                                 return False, "响应中未找到关键字", url
                         ms = (time.perf_counter() - started) * 1000
                         return True, f"HTTP {status_code}（{ms:.0f}ms）", url
@@ -1475,6 +1540,12 @@ class ServiceMonitor:
                 return ok, detail, target_text
             except TimeoutError:
                 return False, f"探测超时（超过 {timeout + 2} 秒）", url
+            except httpx.TimeoutException:
+                # httpx raises ReadTimeout/ConnectTimeout, which are NOT the
+                # builtin TimeoutError. The generic branch stringified them as
+                # "ReadTimeout: " (empty message), so the alert body had no
+                # hint at all (v2.20.19).
+                return False, f"探测超时（超过 {timeout} 秒）", url
             except Exception as exc:
                 detail = f"{exc.__class__.__name__}: {exc}"
                 if _looks_like_config_error(detail):
@@ -1503,6 +1574,10 @@ class ServiceMonitor:
                 except Exception:
                     pass
                 return True, f"TCP {target} 连接成功", target
+            except TimeoutError:
+                # A black-holed port raises TimeoutError with no message;
+                # the generic branch showed "TimeoutError: " (v2.20.19).
+                return False, f"探测超时（超过 {timeout} 秒）", target
             except Exception as exc:
                 detail = f"{exc.__class__.__name__}: {exc}"
                 if _looks_like_config_error(detail):
@@ -1772,7 +1847,12 @@ class ServiceMonitor:
             return DeliveryResult(ok=False)
 
     async def _push_alert(
-        self, name: str, detail: str, text: str, target_text: str
+        self,
+        name: str,
+        detail: str,
+        text: str,
+        target_text: str,
+        item_key: str = "",
     ) -> Any | None:
         """Send the first alert of an episode, or buffer it in the window.
 
@@ -1790,6 +1870,7 @@ class ServiceMonitor:
             kind="service",
             on_abandon=self._on_summary_abandoned,
             on_delivered=self._on_summary_delivered,
+            item_key=item_key,
         )
 
     def _on_summary_delivered(self, items: list[tuple[str, str]]) -> None:
@@ -1802,7 +1883,10 @@ class ServiceMonitor:
         recovered one lost its recovery notice (v2.20.17).
         """
 
-        labels = {label for label, _reason in items if label}
+        parts = [summary_item_parts(item) for item in items]
+        labels = {label for label, _reason, _key in parts if label}
+        pairs = {(label, reason) for label, reason, _key in parts}
+        keys = {key for _label, _reason, key in parts if key}
         if not labels:
             return
         changed = False
@@ -1813,8 +1897,30 @@ class ServiceMonitor:
             for st in states.values():
                 if not isinstance(st, dict):
                     continue
-                if str(st.get("name") or "") not in labels:
+                label = str(st.get("name") or "")
+                if label not in labels:
                     continue
+                # Prefer the exact item key carried by the batch. Older
+                # batches have no key; fall back to the buffered
+                # (name, reason). A different same-named item's summary must
+                # not clear this item's queued recovery (v2.20.19).
+                key = str(st.get("summary_key") or "")
+                if keys and key:
+                    if key not in keys:
+                        continue
+                else:
+                    reason = str(st.get("summary_reason") or "")
+                    if reason and (label, reason) not in pairs:
+                        continue
+                st.pop("summary_key", None)
+                st.pop("summary_reason", None)
+                # A monitor that recovered inside the aggregation window is
+                # no longer ``alerting``, but its queued recovery still waits
+                # for this summary. Clear the marker here: the summary DID
+                # reach the chat, so a later reload must not mistake the
+                # recovery for an orphan and delete it (v2.20.19).
+                if st.pop("recovery_awaits_summary", False):
+                    changed = True
                 if not st.get("alerting"):
                     continue
                 # Only items whose alert was actually buffered; a same-named
@@ -1835,7 +1941,10 @@ class ServiceMonitor:
         summary was given up on.
         """
 
-        labels = {label for label, _reason in items if label}
+        parts = [summary_item_parts(item) for item in items]
+        labels = {label for label, _reason, _key in parts if label}
+        pairs = {(label, reason) for label, reason, _key in parts}
+        keys = {key for _label, _reason, key in parts if key}
         if not labels:
             return
         changed = False
@@ -1846,8 +1955,20 @@ class ServiceMonitor:
             for st in states.values():
                 if not isinstance(st, dict):
                     continue
-                if str(st.get("name") or "") not in labels:
+                label = str(st.get("name") or "")
+                if label not in labels:
                     continue
+                key = str(st.get("summary_key") or "")
+                if keys and key:
+                    if key not in keys:
+                        continue
+                else:
+                    reason = str(st.get("summary_reason") or "")
+                    if reason and (label, reason) not in pairs:
+                        # Another monitor with the same name owns this summary.
+                        continue
+                st.pop("summary_key", None)
+                st.pop("summary_reason", None)
                 # A recovery that was queued because its alert sat in the
                 # summary may only be posted when that summary reaches the
                 # chat. The summary never arrived, so the recovery goes with

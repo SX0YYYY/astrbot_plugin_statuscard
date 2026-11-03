@@ -585,6 +585,8 @@ class DailyReportBuilder:
             for row in by_day.get((previous - timedelta(days=offset)).isoformat(), [])
         ]
         available = len(yesterday_rows) >= 2
+        empty_reason_code = None
+        empty_reason_vars: dict[str, Any] = {}
         if not rows:
             first_ts = self.store.first_resource_ts()
             if first_ts is not None:
@@ -594,11 +596,29 @@ class DailyReportBuilder:
                 empty_reason = (
                     f"资源采样从 {first_day} 开始，暂无 {day.isoformat()} 数据"
                 )
+                empty_reason_code = "resource_since"
+                empty_reason_vars = {"first_day": first_day, "day": day.isoformat()}
             else:
                 empty_reason = "暂无资源采样数据"
+                empty_reason_code = "reason_no_resource_samples"
         elif not available:
-            scope = day_label if span == 1 else f"近 {span} 天"
-            empty_reason = f"资源采样从 {first_day or '--'} 开始，暂无完整{scope}数据"
+            if span == 1:
+                empty_reason = (
+                    f"资源采样从 {first_day or '--'} 开始，暂无完整{day_label}数据"
+                )
+                empty_reason_code = "resource_incomplete_day"
+                # The structured code is rendered on the English page too;
+                # an ISO date keeps both languages free of Chinese words.
+                empty_reason_vars = {
+                    "first_day": first_day or "--",
+                    "day": day.isoformat(),
+                }
+            else:
+                empty_reason = (
+                    f"资源采样从 {first_day or '--'} 开始，暂无完整近 {span} 天数据"
+                )
+                empty_reason_code = "resource_incomplete_span"
+                empty_reason_vars = {"first_day": first_day or "--", "span": span}
         else:
             empty_reason = None
 
@@ -741,6 +761,8 @@ class DailyReportBuilder:
         return {
             "available": available,
             "empty_reason": empty_reason,
+            "empty_reason_code": empty_reason_code,
+            "empty_reason_vars": empty_reason_vars,
             # "较前日" is only meaningful for a single-day report; a weekly
             # report compares against the previous period (or shows nothing
             # when that window has no samples).
@@ -1139,6 +1161,15 @@ class DailyReportBuilder:
                         duration_text = "跨窗口关闭"
                     else:
                         duration_text = format_duration(episode_end - episode_start)
+                        if episode_start < window_start_ts:
+                            # The alert row is rendered (not the recovery
+                            # row) when the episode began before the window
+                            # but an in-window alert/failed row exists. The
+                            # recovery branch already marked this; omitting
+                            # it here printed an in-window time with a
+                            # duration measured from the previous day
+                            # (v2.20.19).
+                            duration_text += "（窗口前开始）"
                 else:
                     episode_open.add(key)
                     duration_text = "进行中"
@@ -1871,7 +1902,26 @@ class DailyReportBuilder:
         rows, min_created, available, truncated = self._provider_rows(
             chart_days[0], chart_days[-1]
         )
-        if not available or not rows:
+        if not available:
+            # The database itself is missing/unreadable. Saying "no provider
+            # requests in range" made the Token section contradict the LLM
+            # quality block on the same page, which correctly reported the
+            # missing data_v4.db and sent the operator looking in the wrong
+            # place (v2.20.19).
+            return {
+                "available": False,
+                "empty_reason": "未找到或无法读取 AstrBot 数据库（data_v4.db）",
+                "empty_reason_code": "reason_no_provider_db",
+                "total": 0,
+                "total_text": "暂无数据",
+                "calls": 0,
+                "calls_text": "--",
+                "success_text": "--",
+                "top_models": [],
+                "trend": _line_chart(labels, [], y_formatter=_fmt_compact),
+                "note": "Token 口径：token_input_other + token_input_cached + token_output。",
+            }
+        if not rows:
             return {
                 "available": False,
                 "empty_reason": "暂无数据（所选时间范围内没有 provider 请求）",
@@ -1904,7 +1954,11 @@ class DailyReportBuilder:
             bucket = by_day.get(local_day)
             if bucket is None:
                 continue
-            tokens = sum(int(value or 0) for value in (row[3], row[4], row[5]))
+            # One dirty token column used to raise ValueError out of
+            # build(), which sent the whole day's report down the retry
+            # ladder and dropped it after three attempts. Every other
+            # numeric read in this file uses safe_* (v2.20.19).
+            tokens = sum(safe_int(value) for value in (row[3], row[4], row[5]))
             bucket["tokens"] += tokens
             bucket["calls"] += 1
             status = str(row[1] or "")

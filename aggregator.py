@@ -34,7 +34,7 @@ class _Bucket:
     """One notification kind's open aggregation window."""
 
     until: float = 0.0
-    pending: list[tuple[str, str]] = field(default_factory=list)
+    pending: list[tuple] = field(default_factory=list)
     flush_task: asyncio.Task | None = None
     send: SendFn | None = None
     retries: int = 0
@@ -48,13 +48,13 @@ class _Bucket:
     # Called with the batch when a summary is abandoned for good. The caller
     # then withdraws "alerted" so the user does not receive a recovery notice
     # for an alert that never reached the chat.
-    on_abandon: Callable[[list[tuple[str, str]]], None] | None = None
+    on_abandon: Callable[[list[tuple]], None] | None = None
     # Called with the batch once the summary has actually reached the chat
     # (delivered, or "may have arrived" and therefore not retried). The rules
     # use it to clear their "waiting for the summary" markers: leaving them
     # behind made a later reload treat a delivered summary as lost, withdraw
     # "alerted" and alert the same outage a second time (v2.20.17).
-    on_delivered: Callable[[list[tuple[str, str]]], None] | None = None
+    on_delivered: Callable[[list[tuple]], None] | None = None
     # The first alert of this window is still being sent. A slow channel can
     # take longer than the window, and the summary must not appear before the
     # alert it summarizes.
@@ -138,8 +138,9 @@ class AlertAggregator:
         text: str,
         send: SendFn,
         kind: str = "default",
-        on_abandon: Callable[[list[tuple[str, str]]], None] | None = None,
-        on_delivered: Callable[[list[tuple[str, str]]], None] | None = None,
+        on_abandon: Callable[[list[tuple]], None] | None = None,
+        on_delivered: Callable[[list[tuple]], None] | None = None,
+        item_key: str = "",
     ) -> Any | None:
         """Deliver ``text`` now, or buffer it for the window summary.
 
@@ -202,7 +203,9 @@ class AlertAggregator:
                 raise
             finally:
                 bucket.first_inflight = False
-        bucket.pending.append((label, reason))
+        bucket.pending.append(
+            (label, reason, item_key) if item_key else (label, reason)
+        )
         # Keep a bounded buffer (max_items are listed, the rest are counted).
         self._trim_pending(bucket, key)
         # A summary send in progress blocks _schedule_flush; without this the
@@ -211,7 +214,7 @@ class AlertAggregator:
         self._schedule_if_pending(key)
         return None
 
-    def _trim_pending(self, bucket: _Bucket, key: str) -> list[tuple[str, str]]:
+    def _trim_pending(self, bucket: _Bucket, key: str) -> list[tuple]:
         """Drop the oldest overflows and account for them honestly.
 
         Dropped items can never reach the chat, so their rules must not claim
@@ -352,7 +355,8 @@ class AlertAggregator:
         total = len(pending)
         dropped = bucket.dropped_count
         lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
-        for label, reason in pending[: self.max_items]:
+        for item in pending[: self.max_items]:
+            label, reason = item[0], item[1]
             lines.append(f"• {label}: {reason}")
         extra = total - self.max_items
         if extra > 0:
@@ -412,7 +416,7 @@ class AlertAggregator:
             self._schedule_if_pending(key)
 
     def _notify_delivered(
-        self, bucket: _Bucket, pending: list[tuple[str, str]], key: str
+        self, bucket: _Bucket, pending: list[tuple], key: str
     ) -> None:
         """Tell the owning rules that their summary reached the chat.
 
@@ -432,7 +436,7 @@ class AlertAggregator:
     def _requeue(
         self,
         bucket: _Bucket,
-        pending: list[tuple[str, str]],
+        pending: list[tuple],
         key: str,
         why: str,
     ) -> None:

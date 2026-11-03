@@ -607,7 +607,13 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         retention_days = int(cfg_get(config, "daily_report.retention_days", 30) or 30)
     except (TypeError, ValueError):
         history_days = retention_days = 0
-    if daily_on and 0 < retention_days < history_days:
+    # Compare what the runtime actually uses, not the raw config: the
+    # collector clamps retention to 7–365 and the builder clamps the trend
+    # window to 7–30. A raw retention=3 or history=40 therefore warned about
+    # missing days that the plugin never misses (v2.20.19).
+    history_days = max(7, min(30, history_days))
+    retention_days = max(7, min(365, retention_days))
+    if daily_on and retention_days < history_days:
         issues.append(
             AuditIssue(
                 "warning",

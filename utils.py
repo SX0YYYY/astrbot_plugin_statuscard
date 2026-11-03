@@ -46,9 +46,26 @@ def delivery_offline(result: Any) -> bool:
     return bool(getattr(result, "transport_offline", False))
 
 
+def summary_item_parts(item: Any) -> tuple[str, str, str]:
+    """Normalise one aggregation item to ``(label, reason, key)``.
+
+    The aggregator stores 2-tuples for legacy callers and 3-tuples when the
+    engine supplies the owning rule/monitor key. A summary callback uses the
+    key to tell two same-named items apart; older persisted/test batches have
+    no key and fall back to the label+reason match (v2.20.19).
+    """
+
+    try:
+        label = str(item[0] or "")
+        reason = str(item[1] or "")
+        key = str(item[2] or "") if len(item) >= 3 else ""
+    except (TypeError, IndexError):
+        return "", "", ""
+    return label, reason, key
+
+
 def safe_int(value: Any, default: int = 0) -> int:
     """Convert ``value`` to int, falling back instead of raising."""
-
     try:
         return int(value)
     except (TypeError, ValueError):

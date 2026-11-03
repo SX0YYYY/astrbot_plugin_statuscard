@@ -114,6 +114,10 @@ class StatusCardPlugin(Star):
         )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
+        # Preview renders are the most expensive path (full report build +
+        # T2I). Two rapid ``预览日报`` commands used to run concurrently and
+        # send two images; the status card already had this guard (v2.20.19).
+        self._preview_inflight: set[str] = set()
         # Cached shrink result for the uploaded background: (path, mtime, bytes).
         self._bg_shrink_cache: tuple[str, float, bytes] | None = None
         self._privacy_notified: set[str] = set()
@@ -864,10 +868,29 @@ class StatusCardPlugin(Star):
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
         # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
-        ok = await self.alerts.send_test(event.unified_msg_origin)
-        yield event.plain_result(
-            tr(self.config, "test_sent") if ok else tr(self.config, "test_failed")
-        )
+        result = await self.alerts.send_test(event.unified_msg_origin)
+        if result.get("ok"):
+            message = tr(self.config, "test_sent")
+        elif result.get("ok_targets"):
+            # The invoking chat (and possibly some targets) really received
+            # the notification; a flat "发送失败" contradicted the message
+            # the operator was looking at and named no target (v2.20.19).
+            bad = list(result.get("failed_targets") or []) + list(
+                result.get("uncertain_targets") or []
+            )
+            shown = "、".join(mask_umo(target) for target in bad[:3])
+            if len(bad) > 3:
+                shown += f" 等 {len(bad)} 个"
+            message = tr(
+                self.config,
+                "test_partial",
+                ok=len(result.get("ok_targets") or []),
+                failed=len(bad),
+                targets=shown or "--",
+            )
+        else:
+            message = tr(self.config, "test_failed")
+        yield event.plain_result(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("立即检测")
@@ -881,6 +904,10 @@ class StatusCardPlugin(Star):
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
+        # Probing every item can take minutes (slow HTTP/TCP targets, six
+        # concurrent); the command used to stay completely silent until the
+        # final summary, so the operator could not tell it was running.
+        yield event.plain_result(tr(self.config, "monitor_testing"))
         results = await self.monitor.test_all()
         failed = [item for item in results if not item["ok"]]
         lines = [
@@ -1035,10 +1062,15 @@ class StatusCardPlugin(Star):
                 )
             if len(actionable) > 4:
                 lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
+        elif self._audit_failed:
+            # ``initialize()`` already logs "体检未完成" when run_audit raised
+            # or timed out, but the command still claimed "未发现问题" --
+            # the most misleading all-clear (v2.20.19).
+            lines.append("配置体检: 未完成（执行失败或超时），本次未检查配置")
         elif audit:
             lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
             for issue in audit[:4]:
-                tag = "错误" if issue.level == "error" else "提醒"
+                tag = "错误" if issue.level == "error" else "提示"
                 lines.append(
                     f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
                 )
@@ -1197,10 +1229,17 @@ class StatusCardPlugin(Star):
         # Rendering takes seconds; acknowledge immediately like 查看状态 does.
         yield event.plain_result(tr(self.config, "report_generating"))
         day_arg = None
+        invalid_date = False
         for token in str(getattr(event, "message_str", "") or "").split():
+            looks_like_date = (
+                len(token) >= 8 and token.count("-") == 2 and token[0].isdigit()
+            )
+            if not looks_like_date:
+                continue
             try:
                 parsed = date.fromisoformat(token)
             except ValueError:
+                invalid_date = True
                 continue
             try:
                 today = now_in_timezone(self.config).date()
@@ -1209,6 +1248,17 @@ class StatusCardPlugin(Star):
             if parsed <= today:
                 day_arg = parsed.isoformat()
                 break
+            invalid_date = True
+        if invalid_date and day_arg is None:
+            # Silently generating "yesterday" for ``预览日报 2026-13-40`` or
+            # a future date looked like the date was honoured (v2.20.19).
+            yield event.plain_result(tr(self.config, "report_date_invalid"))
+        _ok = False
+        preview_key = "preview:" + str(getattr(event, "unified_msg_origin", "") or "")
+        if preview_key in self._preview_inflight:
+            yield event.plain_result(tr(self.config, "report_preview_busy"))
+            return
+        self._preview_inflight.add(preview_key)
         try:
             _ok, detail = await self.daily_report.preview(
                 getattr(event, "unified_msg_origin", None), day=day_arg
@@ -1221,6 +1271,13 @@ class StatusCardPlugin(Star):
             # user as a literal key (v2.20.17 audit).
             logger.exception("预览日报失败")
             detail = tr(self.config, "report_preview_failed")
+        finally:
+            self._preview_inflight.discard(preview_key)
+        if _ok and day_arg:
+            # Confirm which report day was actually built when the operator
+            # asked for an older one; the generic "已发送" left it ambiguous
+            # (v2.20.19).
+            detail = f"{detail}\n" + tr(self.config, "report_date_used", day=day_arg)
         yield event.plain_result(detail)
         # The trailing ``stop_event()`` is deliberate and MUST stay: it is
         # what keeps this reply out of the LLM branch. The framework enters
@@ -1244,6 +1301,11 @@ class StatusCardPlugin(Star):
         # never be sent (issue #1). The trailing call below is a different
         # thing and stays.
         yield event.plain_result(tr(self.config, "weekly_generating"))
+        preview_key = "preview:" + str(getattr(event, "unified_msg_origin", "") or "")
+        if preview_key in self._preview_inflight:
+            yield event.plain_result(tr(self.config, "report_preview_busy"))
+            return
+        self._preview_inflight.add(preview_key)
         try:
             _ok, detail = await self.daily_report.preview(
                 getattr(event, "unified_msg_origin", None), span_days=7
@@ -1251,6 +1313,8 @@ class StatusCardPlugin(Star):
         except Exception:
             logger.exception("预览周报失败")
             detail = tr(self.config, "weekly_preview_failed")
+        finally:
+            self._preview_inflight.discard(preview_key)
         yield event.plain_result(detail)
         # See cmd_preview_report: this trailing call is the LLM guard and
         # must stay (v2.5.1).

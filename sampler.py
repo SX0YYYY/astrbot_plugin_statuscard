@@ -231,6 +231,24 @@ class Sampler:
         self._sample_message_stats(now)
         self.state.save()
 
+    def _zero_net_rates(self, now: float) -> None:
+        """Publish "no traffic right now" when the counters are unavailable.
+
+        The sampler skips booking a delta when the interface is down or the
+        fallback counter cannot be compared with the saved baseline, but the
+        old code left ``up_rate``/``down_rate`` untouched. ``updated_at``
+        still advanced, so every reader (card, report snapshot, dashboard)
+        treated the frozen value as current (v2.20.19).
+        """
+
+        try:
+            with self.state.section("net") as net:
+                net["up_rate"] = 0.0
+                net["down_rate"] = 0.0
+                net["updated_at"] = now
+        except Exception:
+            logger.debug("写入网络零速率失败", exc_info=True)
+
     def _sample_network(self, now: float) -> None:
         interface = ""
         try:
@@ -296,6 +314,7 @@ class Sampler:
                 counters = psutil.net_io_counters()
             except Exception:
                 logger.debug("读取网络计数器失败，本轮跳过网络采样", exc_info=True)
+                self._zero_net_rates(now)
                 return
             # The fallback counter sums every interface (loopback, docker
             # bridges, veth) and cannot be compared with the single-interface
@@ -311,8 +330,16 @@ class Sampler:
                     net["month_down"] = 0
                     logger.info("已进入 %s，本月流量统计已重置", month)
                 net["updated_at"] = now
+                # The interface is down (or its counters are unreadable), so
+                # the previous rate no longer describes "now". Leaving it in
+                # state made the card, the daily snapshot and the dashboard
+                # show the last speed forever while updated_at kept moving
+                # (v2.20.19).
+                net["up_rate"] = 0.0
+                net["down_rate"] = 0.0
             return
         if counters is None:
+            self._zero_net_rates(now)
             return
         with self.state.section("net") as net:
             previous_iface = str(net.get("interface") or "")
