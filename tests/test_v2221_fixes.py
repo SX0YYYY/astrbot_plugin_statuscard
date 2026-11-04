@@ -207,7 +207,16 @@ def test_monitor_silence_recovery_writes_one_alert_row(tmp_path) -> None:
     monitor._probe = probe  # type: ignore[assignment]
     asyncio.run(monitor._check_item(item))
 
-    rows = store.list_events("2026-11-04", limit=50)
+    # ``_record_event`` stamps the day with the CONFIGURED timezone, not the
+    # runner's UTC date. Hard-coding "2026-11-04" passed locally at 23:xx
+    # Asia/Shanghai but failed in CI, where 16:15 UTC is already 11-05 there
+    # (the project's recurring UTC-vs-config-timezone trap).
+    from astrbot_plugin_statuscard.collectors import now_in_timezone
+
+    today = now_in_timezone({"display": {"timezone": "Asia/Shanghai"}}).strftime(
+        "%Y-%m-%d"
+    )
+    rows = store.list_events(today, limit=50)
     rows = [row for row in rows if row["name"] == "站点"]
     alert_rows = [row for row in rows if row["status"] in {"alert", "failed"}]
     recovery_rows = [row for row in rows if row["status"] == "recovery"]
