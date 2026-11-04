@@ -212,6 +212,25 @@
     toast.timer = setTimeout(() => el.classList.remove("show"), 2600);
   }
 
+  // The bridge has no request timeout: when a route hangs (a stuck SQLite
+  // probe, a slow backend), the panel stayed on its skeleton forever and the
+  // range buttons stayed disabled, because the loading reset only runs after
+  // the promise settles. GETs are capped at 30s; POSTs (verify/preview) can
+  // legitimately probe dozens of targets, so they get 90s (v2.20.21).
+  const API_GET_TIMEOUT_MS = 30000;
+  const API_POST_TIMEOUT_MS = 90000;
+
+  function withTimeout(promise, ms, label) {
+    let timer = 0;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(label || t("error_timeout", "请求超时，请重试"))),
+        ms,
+      );
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   async function apiGet(name, params) {
     const bridge = getBridge();
     if (!bridge || typeof bridge.apiGet !== "function") {
@@ -219,7 +238,10 @@
         t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
       );
     }
-    const data = await bridge.apiGet(name, params);
+    const data = await withTimeout(
+      bridge.apiGet(name, params),
+      API_GET_TIMEOUT_MS,
+    );
     return typeof data === "string" ? JSON.parse(data) : data;
   }
 
@@ -230,7 +252,10 @@
         t("error_bridge", "插件页面桥接不可用，请从 AstrBot 插件页面打开"),
       );
     }
-    const data = await bridge.apiPost(name, body);
+    const data = await withTimeout(
+      bridge.apiPost(name, body),
+      API_POST_TIMEOUT_MS,
+    );
     return typeof data === "string" ? JSON.parse(data) : data;
   }
 
@@ -573,6 +598,19 @@
       const table = $("report-runs");
       const body = table && table.querySelector("tbody");
       if (body) body.innerHTML = "";
+      // The header kept the previous successful day and its arrows looked
+      // clickable while the body said "database unavailable"; the user could
+      // not tell whether the date was still valid (v2.20.21).
+      const dayLabel = $("report-day");
+      if (dayLabel) dayLabel.textContent = t("report_no_data", "暂无数据");
+      state.reportDayShown = null;
+      ["report-prev", "report-next"].forEach((id) => {
+        const node = $(id);
+        if (node) {
+          node.disabled = true;
+          node.setAttribute("aria-disabled", "true");
+        }
+      });
     }
   }
 
@@ -611,6 +649,13 @@
       .filter((value) => value !== null && Number.isFinite(value));
     if (!labels.length || !values.length) {
       container.innerHTML = empty(t("empty_chart", "暂无图表数据"));
+      // A previous non-empty render left role="img", tabIndex=0 and a stale
+      // aria-label behind. The keydown listener is aborted above, so a
+      // keyboard user could focus a "chart" whose arrow keys do nothing and
+      // a screen reader announced a chart that is not there (v2.20.21).
+      container.removeAttribute("role");
+      container.removeAttribute("aria-label");
+      container.tabIndex = -1;
       return;
     }
     const width = 640;
@@ -1246,6 +1291,22 @@
             "</span></div>",
         )
         .join("");
+    } else if (data.audit_status === "failed") {
+      // An empty audit list also means "the audit did not run". Hiding the
+      // banner in that case was the same misleading all-green result the
+      // diagnostic command already avoids (v2.20.21).
+      banner.hidden = false;
+      banner.innerHTML =
+        '<div class="audit-item warning"><strong>' +
+        esc(t("audit_failed_tag", "配置体检")) +
+        "</strong><span>" +
+        esc(
+          t(
+            "audit_failed_message",
+            "本次配置体检未完成（执行失败或超时），请查看日志或使用「状态卡诊断」。",
+          ),
+        ) +
+        "</span></div>";
     } else {
       banner.hidden = true;
       banner.innerHTML = "";
@@ -1266,7 +1327,7 @@
     } else {
       $("monitor-summary").textContent = t(
         "monitor_summary",
-        "正常 {ok} · 检查中 {degraded} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
+        "正常 {ok} · 探测失败 {degraded} · 异常 {fail} · 未知 {unknown} · 配置错误 {config_error}",
         {
           ok: monitors.ok || 0,
           degraded: monitors.degraded || 0,
@@ -1454,7 +1515,13 @@
         : noteKind === "db"
           ? t(
               "network_note_db",
-              "网络折线来自日报采样（按所选范围自动抽样），与资源趋势同一时间窗口。",
+              "网络折线来自日报采样（约 {minutes} 分钟一条），与资源趋势同一时间窗口。",
+              {
+                minutes: Math.max(
+                  1,
+                  Math.round((data.network_sample_seconds || 300) / 60),
+                ),
+              },
             )
           : noteKind === "state"
             ? // The backend sentence is Chinese only; the i18n key carries
@@ -1572,8 +1639,12 @@
       format: formatRate,
       niceBase: 1024,
       timestamps: network.map((point) => point.ts),
-      windowStart: data.window_start,
-      windowEnd: data.window_end,
+      // The state.json fallback holds about one hour of points. Mapping it
+      // onto the selected 7d/30d window squeezed them into the last sliver
+      // of the axis (a vertical line at the right edge). Let that path use
+      // the index axis instead (v2.20.21).
+      windowStart: data.network_note_kind === "state" ? null : data.window_start,
+      windowEnd: data.network_note_kind === "state" ? null : data.window_end,
       labelForTime: (ts) => labelForTs(ts, range, range === "24h"),
       titleFor: (index) =>
         formatDateTime(network[index] && network[index].ts),
@@ -2096,6 +2167,13 @@
     );
     next.disabled = atLimit;
     next.setAttribute("aria-disabled", atLimit ? "true" : "false");
+    // ``showDbUnavailable`` disables both arrows; a later successful load
+    // must re-enable the previous-day arrow, or paging back stays dead.
+    const prev = $("report-prev");
+    if (prev && state.reportDayShown) {
+      prev.disabled = false;
+      prev.setAttribute("aria-disabled", "false");
+    }
   }
 
   function shiftReportDay(delta) {
@@ -2367,6 +2445,24 @@
       if (code === "monitor_items_empty") {
         return t("verify_monitor_items_empty", "没有已启用的监测项");
       }
+      if (code === "monitor_disabled") {
+        return t(
+          "verify_monitor_disabled",
+          "服务监测已关闭：本次只是手动探测，后台不会自动检查或告警",
+        );
+      }
+      if (code === "monitor_no_targets") {
+        return t(
+          "verify_monitor_no_targets",
+          "没有可用的服务监测推送目标：后台不会自动检查或告警",
+        );
+      }
+      if (code === "monitor_verify_timeout") {
+        return t(
+          "monitor_verify_timeout",
+          "另有 {count} 个监测项在 80 秒内未完成，已取消",
+        ).replace("{count}", String(data.note_code.count || 0));
+      }
     }
     return data.note || t("verify_none", "没有可验证的项");
   }
@@ -2407,16 +2503,30 @@
         return;
       }
       const good = Number(data.http_status) === 200;
+      // ``http_status: 0`` means the request never got a response. Telling
+      // the operator to "check the Token" (the advice for a 403/503) sent
+      // them in the wrong direction (v2.20.21).
       const text = good
         ? t(
             "verify_webhook_ok",
             "链路验证通过（HTTP 200）：监听 → 解析 → 推送均正常。",
           )
-        : (data.message || "") +
-          " " +
-          t("verify_webhook_bad", "HTTP {status}：请检查 Token 与目标配置。", {
-            status: data.http_status,
-          });
+        : Number(data.http_status) === 0
+          ? (data.message || "") +
+            " " +
+            t(
+              "verify_webhook_unreachable",
+              "无法连接到 Webhook 监听地址：请确认 host/port 与插件进程状态。",
+            )
+          : (data.message || "") +
+            " " +
+            t(
+              "verify_webhook_bad",
+              "HTTP {status}：请检查 Token 与目标配置。",
+              {
+                status: data.http_status,
+              },
+            );
       box.innerHTML = '<ul class="verify-list">' + verifyRow(text, !good) + "</ul>";
       return;
     }
@@ -2428,6 +2538,13 @@
         "</ul>";
       return;
     }
+    // A manual probe can return green rows while the background monitor is
+    // disabled or has no push target. Keep that note visible ABOVE the rows
+    // instead of dropping it (v2.20.21).
+    const noteRow =
+      data.note || data.note_code
+        ? verifyRow(verifyNoteText(data), false)
+        : "";
     const rows = results
       .map((item) => {
         if (kind === "targets") {
@@ -2451,14 +2568,18 @@
           );
         }
         const detail = String(item.detail || "");
-        // HTTP probe details already end with their own "（N ms）"; appending
-        // the measured elapsed time again showed the duration twice.
-        const elapsed = /（\d+ms）\s*$/.test(detail)
+        // HTTP probe details already end with their own elapsed time;
+        // appending it again showed the duration twice. Match either the
+        // full-width or the ASCII parentheses so the English page does not
+        // duplicate it (v2.20.21).
+        const openParen = isEnglish() ? " (" : "（";
+        const closeParen = isEnglish() ? ")" : "）";
+        const elapsed = /[（(]\d+ms[）)]\s*$/.test(detail)
           ? ""
-          : "（" + item.elapsed_ms + "ms）";
+          : openParen + item.elapsed_ms + "ms" + closeParen;
         return verifyRow(
           localizeHidden(item.name || "--") +
-            "：" +
+            (isEnglish() ? ": " : "：") +
             (item.ok ? "✅" : "❌") +
             " " +
             detail +
@@ -2467,7 +2588,8 @@
         );
       })
       .join("");
-    box.innerHTML = '<ul class="verify-list">' + rows + "</ul>";
+    box.innerHTML =
+      '<ul class="verify-list">' + noteRow + rows + "</ul>";
   }
 
   let verifyArmTimer = 0;

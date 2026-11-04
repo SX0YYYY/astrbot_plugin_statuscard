@@ -58,7 +58,7 @@ class _StateStub:
 def _service(monkeypatch, fallback):
     from astrbot_plugin_statuscard import delivery as delivery_module
 
-    async def fake_send_direct(client, target, segments):
+    async def fake_send_direct(client, target, segments, **kwargs):
         return OnebotReceipt(
             ok=False,
             retcode=100,

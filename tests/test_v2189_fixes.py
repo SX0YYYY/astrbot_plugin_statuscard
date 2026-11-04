@@ -194,7 +194,8 @@ def test_first_disk_keeps_legacy_key(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(alerts_module, "disk_usage_bounded", _fake_disk)
     asyncio.run(engine._sample_once())
     disk_keys = [key for key in keys if str(key).startswith("disk")]
-    assert disk_keys == ["disk", "disk:/data"]
+    # v2.20.21: path-bound keys for every mount.
+    assert disk_keys == ["disk:/", "disk:/data"]
 
 
 def test_adding_second_disk_migrates_old_latch(monkeypatch, tmp_path: Path) -> None:
@@ -221,7 +222,7 @@ def test_adding_second_disk_migrates_old_latch(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(alerts_module, "disk_usage_bounded", _fake_disk)
     asyncio.run(engine._sample_once())
     rules = state.get("alerts", {})["rules"]
-    assert rules["disk"]["alerting"] is True
+    assert rules["disk:/"]["alerting"] is True
 
 
 # ---------------------------------------------------------------------------

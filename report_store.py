@@ -1028,7 +1028,14 @@ class ReportStore:
         if table not in {"website_samples", "process_samples"}:
             return None
         rows = self._query(f"SELECT MIN(ts) FROM {table}")
-        return int(rows[0][0]) if rows and rows[0][0] is not None else None
+        try:
+            return int(rows[0][0]) if rows and rows[0][0] is not None else None
+        except (TypeError, ValueError):
+            # These two tables declare ``ts`` as a plain INTEGER column, so
+            # SQLite accepts TEXT there; one hand-edited/externally written
+            # row used to raise inside build() and abort the whole report.
+            # ``latest_resource_ts`` already degrades to None.
+            return None
 
     def list_events(self, day: str, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._query(

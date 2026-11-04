@@ -50,6 +50,7 @@ from .utils import (
     clean_report_sections,
     is_supported_platform,
     mask_umo,
+    redact_url,
     safe_float,
 )
 from .version import __version__
@@ -801,6 +802,7 @@ class StatusCardPlugin(Star):
                 self.state,
                 self._onebot_client,
                 self._build_message_chain,
+                str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
             )
         return self._delivery
 
@@ -965,14 +967,24 @@ class StatusCardPlugin(Star):
             ),
         ]
         if failed:
+            # The command replies in the chat where it was invoked, so the
+            # group sees it too. Every other surface (event log, report,
+            # dashboard) strips URL credentials and honours the hostname
+            # rule; this command used to print the raw monitor name and the
+            # raw probe detail (v2.20.21).
+            redactor = Redactor(read_rules(self.config, "display.redact"))
             for item in failed:
                 lines.append(
                     tr(
                         self.config,
                         "monitor_result_item",
-                        name=item["name"],
+                        name=redactor.mask_name(
+                            redact_url(str(item.get("name") or ""))
+                        ),
                         kind=item["kind"],
-                        detail=item["detail"],
+                        detail=redactor.mask_addresses(
+                            redact_url(str(item.get("detail") or ""))
+                        ),
                     )
                 )
         else:
@@ -1308,6 +1320,10 @@ class StatusCardPlugin(Star):
         preview_key = "preview:" + str(getattr(event, "unified_msg_origin", "") or "")
         if preview_key in self._preview_inflight:
             yield event.plain_result(tr(self.config, "report_preview_busy"))
+            # The trailing guard at the normal end never runs on this early
+            # return, so the busy reply could fall through to the LLM branch
+            # and get a second, unrelated answer (v2.20.21).
+            event.stop_event()
             return
         self._preview_inflight.add(preview_key)
         try:
@@ -1355,6 +1371,10 @@ class StatusCardPlugin(Star):
         preview_key = "preview:" + str(getattr(event, "unified_msg_origin", "") or "")
         if preview_key in self._preview_inflight:
             yield event.plain_result(tr(self.config, "report_preview_busy"))
+            # The trailing guard at the normal end never runs on this early
+            # return, so the busy reply could fall through to the LLM branch
+            # and get a second, unrelated answer (v2.20.21).
+            event.stop_event()
             return
         self._preview_inflight.add(preview_key)
         try:

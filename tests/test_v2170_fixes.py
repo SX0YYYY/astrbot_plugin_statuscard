@@ -523,7 +523,7 @@ def test_sampler_prime_survives_counter_failure(monkeypatch, tmp_path: Path) -> 
 def test_local_image_skips_onebot_direct(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
-    async def fake_direct(client, target, segments):
+    async def fake_direct(client, target, segments, **kwargs):
         calls.append("direct")
         raise AssertionError("local image must not use the direct path")
 

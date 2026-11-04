@@ -204,6 +204,15 @@ class ReportCollector:
         # Sampler seeds the system CPU snapshot asynchronously; a short wait
         # avoids recording a misleading 0% first resource sample.
         await asyncio.sleep(2)
+        # Wait until the store is usable before replaying the cache. A
+        # startup with a locked/read-only database used to run the only
+        # backfill pass against an unavailable store (every write returned
+        # False) and still log that it had backfilled the points -- losing
+        # exactly the reload gap the cache exists for (v2.20.21).
+        while self._running and not self.store.ensure_ready():
+            await asyncio.sleep(60)
+        if not self._running:
+            return
         await asyncio.to_thread(self._backfill_from_cache)
         while self._running:
             try:
@@ -1620,6 +1629,12 @@ class DailyReporter:
             # Remember the week that was abandoned: without it the catch-up
             # check instantly queued another attempt after the give-up notice.
             self._weekly_given_up_week = week_key
+            # Drop the offline-recovery marker too. A later reconnect while
+            # the recovery window was still valid re-queued a report that had
+            # already been announced as given up; the daily path clears
+            # ``_pending_recovery_day`` here for exactly the same reason.
+            self._weekly_pending_recovery_week = None
+            self._weekly_pending_recovery_since = 0.0
             self._save_delivery_state()
             logger.warning("周报重试 3 次后仍失败，停止重试")
             return False

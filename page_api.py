@@ -148,7 +148,7 @@ def _normalize_range(raw: Any, default: str) -> str:
     the chart and in the CSV (v2.20.20).
     """
 
-    key = str(raw or "").lower()
+    key = str(raw or "").strip().lower()
     if key in RANGE_SECONDS:
         return key
     match = re.match(r"^(\d+)\s*([hd])$", key)
@@ -195,7 +195,7 @@ class PageApi:
     # degraded store gate
     # ------------------------------------------------------------------
 
-    def _db_unavailable_payload(self) -> dict[str, Any]:
+    async def _db_unavailable_payload(self) -> dict[str, Any] | None:
         """Shared marker + empty payload for a broken report store.
 
         v2.18.9 taught the send path to retry via ``ensure_ready``; the
@@ -204,6 +204,12 @@ class PageApi:
         The page gets an explicit ``db_unavailable`` marker instead, and one
         recovery attempt is kicked off in the background so the next refresh
         can already succeed.
+
+        The probe runs in a worker thread: it opens a connection, issues
+        PRAGMAs and takes ``BEGIN IMMEDIATE`` (a WRITE lock) under the
+        store's lock. Called from the event loop it could block every other
+        task (including QQ message handling) for up to the 5-second SQLite
+        timeout, on every history/events/reports refresh (v2.20.21).
         """
 
         store = self.plugin.report_store
@@ -212,7 +218,7 @@ class PageApi:
         # dashboard then showed "no data was ever recorded" instead of the
         # explicit database error. ``probe()`` is a cheap SELECT MAX(ts) and
         # also flips the flag when the file is gone (v2.20.17).
-        if store.available and store.probe():
+        if store.available and await asyncio.to_thread(store.probe):
             return None
         if any(not task.done() for task in self._recovery_tasks):
             # A recovery attempt is already running; spawning another per
@@ -556,6 +562,19 @@ class PageApi:
                 "success_text": "--",
                 "error_streak": 0,
             }
+        # ``psutil.boot_time()`` raises in a sandboxed container that hides
+        # /proc. The collectors module already guards its copy; the overview
+        # is the FIRST screen of the dashboard, and an exception here also
+        # withheld ``timezone`` (sent only by this route), so history/events
+        # fell back to the browser timezone and the whole panel looked dead
+        # while the QQ card still worked (v2.20.21).
+        try:
+            boot_time = psutil.boot_time()
+        except Exception:
+            boot_time = None
+        uptime_seconds = (
+            int(max(0, time.time() - boot_time)) if boot_time is not None else None
+        )
         return jsonify(
             {
                 "ok": True,
@@ -565,8 +584,12 @@ class PageApi:
                 "platform": self._platform(),
                 "astrbot_version": self._astrbot_version(),
                 "plugin_version": PLUGIN_VERSION,
-                "uptime": format_duration(time.time() - psutil.boot_time()),
-                "uptime_seconds": int(max(0, time.time() - psutil.boot_time())),
+                "uptime": (
+                    format_duration(uptime_seconds)
+                    if uptime_seconds is not None
+                    else "--"
+                ),
+                "uptime_seconds": uptime_seconds,
                 "cpu": {
                     "percent": round(cached_cpu_percent(), 1),
                     "count": psutil.cpu_count(logical=True) or 1,
@@ -611,6 +634,13 @@ class PageApi:
                 ),
                 "provider_quality": provider_quality,
                 "audit": self._mask_audit(plugin.audit_issues()),
+                # An empty list means either "no problems" or "the audit did
+                # not run". The dashboard used to render both as a hidden
+                # banner, i.e. the misleading all-green result the diagnostic
+                # command already avoids (v2.20.21).
+                "audit_status": (
+                    "failed" if getattr(plugin, "_audit_failed", False) else "ok"
+                ),
             }
         )
 
@@ -788,8 +818,54 @@ class PageApi:
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 }
 
-            results = await asyncio.gather(*(probe_one(item) for item in items))
-            return jsonify({"ok": True, "kind": kind, "results": list(results)})
+            # A verify click with dozens of unreachable targets can take
+            # minutes (6 concurrent × up to 60s each); the browser call then
+            # timed out first and the operator saw "request timed out" while
+            # the backend kept probing. Bound the whole batch and report the
+            # items that did not finish (v2.20.21).
+            tasks = [asyncio.create_task(probe_one(item)) for item in items]
+            done, pending = await asyncio.wait(tasks, timeout=80)
+            for task in pending:
+                task.cancel()
+            results = [
+                task.result()
+                for task in done
+                if not task.cancelled() and task.exception() is None
+            ]
+            timed_out = len(pending)
+            # The button is a manual probe, but with the monitor disabled
+            # (the default) or without a push target the background loop
+            # never runs at all. Showing a wall of green checks without that
+            # context told the operator everything was being watched while
+            # the overview said "服务监测已关闭" (v2.20.21).
+            monitor_on = cfg_bool(plugin.config, "monitors.enabled", False)
+            targets: list[str] = []
+            get_targets = getattr(monitor, "_targets_for", None)
+            if callable(get_targets):
+                try:
+                    targets = list(get_targets("service") or [])
+                except Exception:
+                    targets = []
+            payload: dict[str, Any] = {
+                "ok": True,
+                "kind": kind,
+                "results": list(results),
+            }
+            if not monitor_on:
+                payload["note"] = (
+                    "服务监测已关闭：本次只是手动探测，后台不会自动检查或告警"
+                )
+                payload["note_code"] = {"code": "monitor_disabled"}
+            elif not targets:
+                payload["note"] = "没有可用的服务监测推送目标：后台不会自动检查或告警"
+                payload["note_code"] = {"code": "monitor_no_targets"}
+            if timed_out and not payload.get("note"):
+                payload["note"] = f"另有 {timed_out} 个监测项在 80 秒内未完成，已取消"
+                payload["note_code"] = {
+                    "code": "monitor_verify_timeout",
+                    "count": timed_out,
+                }
+            return jsonify(payload)
         if kind == "webhook":
             cfg = cfg_get(plugin.config, "alerts.komari_webhook", {}) or {}
             if not cfg_bool(cfg, "enabled", False):
@@ -911,7 +987,7 @@ class PageApi:
         # 7-day default, so "90d" meant one window on the chart and another
         # in the CSV (v2.20.20).
         range_key = _normalize_range(_query_value("range", "7d"), "7d")
-        gate = self._db_unavailable_payload()
+        gate = await self._db_unavailable_payload()
         if gate:
             return jsonify({**gate, "kind": kind, "range": range_key, "rows": []})
         seconds = RANGE_SECONDS[range_key]
@@ -1029,7 +1105,7 @@ class PageApi:
         # supported window so a hand-written link shows roughly what it asked
         # for (v2.20.5); /export shares the same helper (v2.20.20).
         key = _normalize_range(_query_value("range", "24h"), "24h")
-        gate = self._db_unavailable_payload()
+        gate = await self._db_unavailable_payload()
         if gate:
             return jsonify(
                 {
@@ -1091,9 +1167,10 @@ class PageApi:
             ]
             if from_db:
                 net_points = from_db
-                network_note = (
-                    "网络折线来自日报采样（默认 5 分钟一条），与资源趋势同一时间窗口。"
-                )
+                # The interval is sent separately (``network_sample_seconds``)
+                # so the UI can render the configured value instead of a
+                # hardcoded "5 minutes".
+                network_note = "网络折线来自日报采样，与资源趋势同一时间窗口。"
                 network_note_kind = "db"
             else:
                 net = self.plugin.state.get("net", {}) or {}
@@ -1149,6 +1226,10 @@ class PageApi:
                 "network_redacted": network_redacted,
                 "network_note": network_note,
                 "network_note_kind": network_note_kind,
+                # The dashboard sentence used to hardcode "5 minutes" while
+                # the slider allows 60–1800 seconds: the note disagreed with
+                # the data it described (v2.20.21).
+                "network_sample_seconds": sample_interval,
                 "truncated": truncated,
             }
         )
@@ -1163,7 +1244,7 @@ class PageApi:
         except (TypeError, ValueError):
             days = 7
         days = max(1, min(30, days))
-        gate = self._db_unavailable_payload()
+        gate = await self._db_unavailable_payload()
         if gate:
             return jsonify(
                 {
@@ -1276,7 +1357,7 @@ class PageApi:
 
     async def reports(self):
         plugin = self.plugin
-        gate = self._db_unavailable_payload()
+        gate = await self._db_unavailable_payload()
         if gate:
             # An explicit degraded marker instead of "empty sections": the
             # page keeps whatever it already rendered and shows a notice.
@@ -1292,11 +1373,27 @@ class PageApi:
             try:
                 parsed_day = date.fromisoformat(raw_day)
             except ValueError:
-                parsed_day = None
-            if parsed_day is not None:
-                today = now_in_timezone(plugin.config).date()
-                if self._valid_report_day(parsed_day.isoformat(), today):
-                    day_arg = parsed_day.isoformat()
+                # Silently building "yesterday" for an unparseable date made
+                # the page look like the jump worked: the header showed the
+                # default day and the user thought they had jumped to it
+                # (v2.20.21).
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error_code": "report_day_invalid",
+                        "message": f"无法识别的日期: {raw_day[:32]}",
+                    }
+                )
+            today = now_in_timezone(plugin.config).date()
+            if not self._valid_report_day(parsed_day.isoformat(), today):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error_code": "report_day_out_of_range",
+                        "message": "日期超出可查询范围（今天往前 30 年以内）",
+                    }
+                )
+            day_arg = parsed_day.isoformat()
         # The cache key carries the date, the redaction rules and the report
         # content selection: a single slot used to serve yesterday's report
         # right after midnight, an unredacted payload for a minute after

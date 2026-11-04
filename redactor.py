@@ -98,6 +98,42 @@ def _mask_ipv6(text: str) -> str:
 # monitor names, error texts and event names (v2.20.5).
 _HOSTNAME_RE = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61})\.)+[A-Za-z]{2,63}\b")
 
+# ``_HOSTNAME_RE`` also matches file names and config keys ("README.md",
+# "alerts.enabled", "module.py"). In a free-form diagnostic text those are
+# common and must stay readable, so only tokens whose last label is a known
+# host suffix are treated as a host name.
+_HOST_SUFFIXES = {
+    "arpa",
+    "biz",
+    "cloud",
+    "cn",
+    "com",
+    "corp",
+    "dev",
+    "home",
+    "internal",
+    "io",
+    "lan",
+    "local",
+    "localhost",
+    "me",
+    "net",
+    "online",
+    "org",
+    "site",
+    "tech",
+    "test",
+    "top",
+    "tv",
+    "xyz",
+}
+
+
+def _mask_bare_hostname(match: re.Match[str]) -> str:
+    token = match.group(0)
+    suffix = token.rsplit(".", 1)[-1].lower()
+    return "（已隐藏地址）" if suffix in _HOST_SUFFIXES else token
+
 
 def normalize_rules(raw: Any) -> set[str]:
     """Turn a configuration value into a set of rule names.
@@ -155,7 +191,13 @@ class Redactor:
         own = self._own_hostname
         if own and len(own) >= 3 and own.lower() in value.lower():
             return True
-        return bool(_HOSTNAME_RE.search(value))
+        # A bare dotted host name with a known suffix counts; a file name or
+        # config key ("README.md", "alerts.enabled") must not hide the whole
+        # text or name.
+        return any(
+            _mask_bare_hostname(match) != match.group(0)
+            for match in _HOSTNAME_RE.finditer(value)
+        )
 
     def __bool__(self) -> bool:
         return bool(self.rules)
@@ -307,7 +349,10 @@ class Redactor:
         value = str(text or "")
         if not value or not self.hostname:
             return value
-        masked = _ADDRESS_RE.sub("（已隐藏地址）", value)
+        # Host names first: the pattern consumes "1.2.3.4.example.com" as one
+        # token, so the IP pass below cannot leave an isolated "." behind.
+        masked = _HOSTNAME_RE.sub(_mask_bare_hostname, value)
+        masked = _ADDRESS_RE.sub("（已隐藏地址）", masked)
         # The compact IPv6 notation needs its own pass: the regex above only
         # knows the full eight-group form (v2.20.14).
         masked = _mask_ipv6(masked)

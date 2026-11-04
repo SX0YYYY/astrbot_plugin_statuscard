@@ -66,9 +66,9 @@ def test_disk_rules_cover_every_mount(tmp_path: Path, monkeypatch) -> None:
 
     asyncio.run(engine._sample_once())
     disk_calls = [key for key in calls if str(key).startswith("disk")]
-    # The first mount keeps the unqualified key so adding a second mount does
-    # not look like "old disk recovered, new disk full".
-    assert disk_calls == ["disk", "disk:/data"]
+    # v2.20.21: every mount is keyed by its path, so a config edit cannot
+    # move one mount's latch onto another disk.
+    assert disk_calls == ["disk:/", "disk:/data"]
 
 
 # ---------------------------------------------------------------------------

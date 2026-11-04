@@ -489,8 +489,10 @@ def test_disk_migration_removes_legacy_key(tmp_path: Path) -> None:
     engine = alerts_module.AlertEngine(_Plugin(), state, config, report_store=store)
     asyncio.run(engine._sample_once())
     rules = state.data["alerts"]["rules"]
-    assert "disk" in rules
-    assert "disk:/" not in rules  # migrated away in the same write
+    # v2.20.21: every mount is keyed by its path; a historical "disk" key is
+    # migrated onto the first mount, not the other way round.
+    assert "disk" not in rules
+    assert "disk:/" in rules
 
 
 def _make_monitor(tmp_path: Path, send_ok: bool):

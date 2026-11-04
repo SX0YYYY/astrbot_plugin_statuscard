@@ -149,7 +149,17 @@ def extract_receipt(payload: Any) -> OnebotReceipt:
         return OnebotReceipt(ok=True, retcode=0, message_id=message_id, attempted=True)
     # retcode=1 (async accepted) still counts as delivered-ish: the send
     # was accepted by the protocol implementation (v2.20.0).
-    ok = retcode_int in (0, 1, None) and status in ("", "ok", "async", "success")
+    #
+    # A bare status with neither a retcode nor a message_id is not proof
+    # that the send was executed. The data-dict branch above already treats
+    # an evidence-free receipt as "uncertain"; this branch used to call it a
+    # clean delivery, which silenced the alert for the whole cooldown.
+    has_proof = message_id is not None or retcode_int is not None
+    ok = (
+        has_proof
+        and retcode_int in (0, 1, None)
+        and status in ("", "ok", "async", "success")
+    )
     error = ""
     if not ok:
         error = str(
@@ -251,6 +261,7 @@ async def send_direct(
     target: str,
     segments: list[dict[str, Any]],
     timeout: float = DIRECT_SEND_TIMEOUT,
+    platform_id: str = "",
 ) -> OnebotReceipt:
     """Send raw OneBot segments to one target and return the receipt.
 
@@ -263,7 +274,10 @@ async def send_direct(
     if parsed is None:
         return OnebotReceipt(ok=False, error=f"无法解析目标: {target}")
     platform, kind, session_id = parsed
-    if str(platform or "").lower() not in ("", "default", "aiocqhttp"):
+    allowed = {"", "default", "aiocqhttp"}
+    if platform_id:
+        allowed.add(str(platform_id).lower())
+    if str(platform or "").lower() not in allowed:
         # Another platform instance (telegram/another bot): this OneBot client
         # must not send it, or the message lands in a same-numbered QQ chat.
         # Return a skipped receipt so the delivery layer uses the framework

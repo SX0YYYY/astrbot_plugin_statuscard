@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -64,13 +65,19 @@ def _br_filter(value: Any) -> Markup:
 # stays unchanged; decoding + averaging the photo each time blocks the
 # event loop twice per render (v2.19.4 regression). Cache the computed
 # overlay keyed on a cheap fingerprint of the bytes.
-_FADE_CACHE: tuple[tuple[tuple[int, int], int], str, str] | None = None
+_FADE_CACHE: tuple[tuple[str, int], str, str] | None = None
 
 
-def _fade_fingerprint(bg_bytes: bytes, card_width: int) -> tuple[tuple[int, int], int]:
+def _fade_fingerprint(bg_bytes: bytes, card_width: int) -> tuple[str, int]:
     # card_width is part of the key: the same photo must re-derive its
     # gradient when the user changes the configured output width.
-    return ((len(bg_bytes), hash(bytes(bg_bytes[:512]))), card_width)
+    #
+    # Hash the WHOLE image, not just its length and first 512 bytes: two
+    # different backgrounds exported with the same settings can share both
+    # (and the shrunk JPEG can too), so replacing a photo reused the old
+    # photo's gradient/average colour until the process restarted.
+    digest = hashlib.sha1(bg_bytes).hexdigest()
+    return digest, card_width
 
 
 def _fade_overlay(bg_bytes: bytes, card_width: int = 650) -> tuple[str, str]:

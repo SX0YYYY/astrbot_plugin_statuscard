@@ -11,7 +11,7 @@ cd astrbot_plugin_statuscard
 python -m pytest -q
 ```
 
-当前测试预期为 `692 passed`（会随版本增长，以 CI 实际输出为准）。GitHub Actions 工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在 push 和 pull request 时安装依赖并运行同一套测试，并校验 `version.py`、`metadata.yaml`、README badge 与 CHANGELOG 顶部四处的版本号一致。
+当前测试预期为 `732 passed`（会随版本增长，以 CI 实际输出为准）。GitHub Actions 工作流见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在 push 和 pull request 时安装依赖并运行同一套测试，并校验 `version.py`、`metadata.yaml`、README badge 与 CHANGELOG 顶部四处的版本号一致。
 
 ## 代码结构
 
@@ -44,7 +44,7 @@ python -m ruff format .        # 格式化
 python -m ruff check .         # 静态检查
 ```
 
-`ruff.toml` 里显式豁免了 `BLE001`（捕获 `Exception`）和 `S110`（`try-except-pass`）两条规则：**插件的多个后台循环（采样器、服务监测、告警引擎、日报采集）必须保证单次探测失败不会拖垮整个循环**，这是刻意的容错策略，不是疏忽。豁免的每处宽泛捕获都应当记录日志或由调用方检查结果；`S112`（`try-except-continue` 静默吞错）不在豁免范围内，已全部补上 `logger.debug`。
+`ruff.toml` 当前使用 ruff 的默认规则集（`E4` / `E7` / `E9` / `F`），并显式忽略 `BLE001`（捕获 `Exception`）和 `S110`（`try-except-pass`）：**插件的多个后台循环（采样器、服务监测、告警引擎、日报采集）必须保证单次探测失败不会拖垮整个循环**，这是刻意的容错策略，不是疏忽（若日后扩展 `select` 启用安全规则，这两条豁免继续保留）。`S112`（`try-except-continue` 静默吞错）当前未由 CI 强制，代码里要求每处宽泛捕获都记录日志或由调用方检查结果，靠 review 保证。
 
 ## 本地验证建议
 

@@ -177,11 +177,18 @@ class DeliveryService:
         state: Any,
         get_client: Callable[[], Any],
         build_chain: Callable[[dict[str, Any]], Any],
+        platform_id: str = "",
     ):
         self.context = context
         self.state = state
         self._get_client = get_client
         self._build_chain = build_chain
+        # A custom platform instance id (``alerts.platform_id``) is not
+        # "another platform": with it, every target used to be skipped by
+        # the OneBot direct path, silently losing retcode/message_id
+        # receipts and the "status=failed means not delivered" distinction
+        # (v2.20.21).
+        self._platform_id = str(platform_id or "").strip()
 
     # ------------------------------------------------------------------
     # sending
@@ -218,7 +225,12 @@ class DeliveryService:
         for target in targets:
             receipt = None
             if direct_ok:
-                receipt = await send_direct(client, target, self._segments(payload))
+                receipt = await send_direct(
+                    client,
+                    target,
+                    self._segments(payload),
+                    platform_id=self._platform_id,
+                )
             if receipt is not None:
                 result.receipts[target] = {
                     "ok": receipt.ok,

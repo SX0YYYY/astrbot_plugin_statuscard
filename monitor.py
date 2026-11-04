@@ -562,6 +562,32 @@ class ServiceMonitor:
                 logger.exception("服务监测轮询失败")
             await asyncio.sleep(self.interval)
 
+    def nudge_queued(self) -> None:
+        """Let alerts queued during an outage retry on the next sample.
+
+        While the Bot channel is offline a failed push keeps the alert and
+        sets ``next_attempt = now + 900`` so it does not burn its retry
+        budget. Once the channel is back, waiting the full 15 minutes made
+        the operator see "Bot 已恢复" first and the actual outage alert much
+        later (v2.20.21).
+        """
+
+        now = time.time()
+        with self.state.section("monitors") as monitors:
+            items = monitors.get("items")
+            if not isinstance(items, dict):
+                return
+            for st in items.values():
+                if not isinstance(st, dict):
+                    continue
+                if safe_float(st.get("next_attempt") or 0) > now:
+                    st["next_attempt"] = 0
+                if (
+                    st.get("pending_recovery")
+                    and safe_float(st.get("recovery_next_attempt") or 0) > now
+                ):
+                    st["recovery_next_attempt"] = 0
+
     async def check_all(self) -> None:
         if not self._targets_for("service"):
             # A missing push target means alerts could never reach anyone;
@@ -871,15 +897,12 @@ class ServiceMonitor:
                     # pushed nothing and wrote no event until the eventual
                     # recovery billed the whole window as downtime.
                     origin = started or safe_float(st.get("since") or 0) or now
-                    if not st.get("alerted"):
-                        # The alert never reached the operator; record its
-                        # beginning so the recovery below has a matching row.
-                        self._record_event(
-                            name,
-                            target_text,
-                            f"{prev_error}（维护静默期内自愈，未推送）",
-                            "alert",
-                        )
+                    # ``alerting=True`` already has a matching alert/failed
+                    # row: the latch path, the cooldown path and the
+                    # interrupted-send repair each write one. Recording a
+                    # second "alert" here made ``close_all`` stamp two rows
+                    # for ONE episode, so the daily report could show the
+                    # same fault twice (v2.20.21).
                     self._record_event(
                         name,
                         target_text,
@@ -1034,7 +1057,13 @@ class ServiceMonitor:
                     # for the resource rules.
                     st["alerting"] = True
                     st["alerted"] = False
-                    st["since"] = now
+                    # Keep an existing episode start (a fault that began in
+                    # the maintenance window, or an earlier suppressed
+                    # sample): overwriting it billed only the time since the
+                    # suppression and shrank the reported duration. The
+                    # resource path already preserves it (v2.20.21).
+                    if not safe_float(st.get("since") or 0):
+                        st["since"] = now
                     st["last_attempt"] = now
                     st["fails"] = 0
                     st["pending"] = False
@@ -1319,6 +1348,13 @@ class ServiceMonitor:
                 # an alert that was actually buffered may queue its recovery
                 # behind the summary (v2.20.17).
                 buffered = bool(st.pop("summary_buffered", None))
+                # Persist the closed episode *before* the slow send: a
+                # reload/crash during delivery used to leave "alerting=True"
+                # on disk and the next sample replayed the recovery notice
+                # (a second "已恢复"). The offline path already did this
+                # (v2.20.5); the service-monitor recovery branch did not
+                # (v2.20.21).
+                self.state.save()
                 # The event log does not depend on the notification pref: the
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
@@ -1684,7 +1720,15 @@ class ServiceMonitor:
                 # run it off the event loop like the status-card collector.
                 return await asyncio.to_thread(scan_processes)
             except Exception as exc:
-                return False, f"{exc.__class__.__name__}: {exc}", pattern
+                detail = f"{exc.__class__.__name__}: {exc}"
+                # A sandboxed/restricted account can fail the whole scan
+                # (psutil.Error / PermissionError), not just one process.
+                # The other four kinds classify that as a configuration
+                # problem (warn once, never alert); this branch used to
+                # alert forever on an environment the operator cannot fix.
+                if _looks_like_config_error(detail):
+                    detail = f"{CONFIG_ERROR_PREFIX}{detail}"
+                return False, detail, pattern
 
         if kind == "systemd":
             unit = str(item.get("unit") or "").strip()

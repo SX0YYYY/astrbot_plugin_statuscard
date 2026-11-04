@@ -58,6 +58,21 @@ def _now_text(config: Any = None) -> str:
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _disk_path_from_label(label: Any) -> str:
+    """Extract the mount path from a disk rule label, if it carries one.
+
+    ``_evaluate`` writes the label as ``磁盘使用率 (<path>)``. The value is
+    used once, to move the historical position-bound ``disk`` key onto a
+    path-bound key without losing an open episode.
+    """
+
+    text = str(label or "").strip()
+    prefix = "磁盘使用率 ("
+    if text.startswith(prefix) and text.endswith(")"):
+        return text[len(prefix) : -1]
+    return ""
+
+
 BROADCAST_TEMPLATE_DEFAULT = (
     "✅ Bot 已恢复上线\n"
     "掉线时间: {offline_time}\n"
@@ -209,6 +224,7 @@ class AlertEngine:
             cfg_get(config, "alerts.targets", []), self.platform_id
         )
         self._monitor_task: asyncio.Task | None = None
+        self._provider_task: asyncio.Task | None = None
         self._daily_task: asyncio.Task | None = None
         self._webhook_task: asyncio.Task | None = None
         self._running = False
@@ -495,7 +511,13 @@ class AlertEngine:
             return
         alerts_on = cfg_bool(self.config, "alerts.enabled", False)
         daily_on = cfg_bool(self.config, "alerts.daily_summary.enabled", False)
-        self._running = alerts_on or daily_on
+        # ``provider_watch`` is documented as independent from the resource
+        # on/off switch (schema and README say the master switch only covers
+        # resource + offline alerts). Its check used to run only inside the
+        # resource sampling loop, so enabling ONLY the LLM watch did nothing
+        # at all -- no check, no alert, no recovery (v2.20.21).
+        provider_on = cfg_bool(self.config, "alerts.provider_watch.enabled", False)
+        self._running = alerts_on or daily_on or provider_on
         if alerts_on:
             # A hand-edited state.json can hold a list/scalar here; replacing
             # it under the store's lock keeps start-up from crashing.
@@ -505,19 +527,28 @@ class AlertEngine:
         if alerts_on:
             self._monitor_task = asyncio.create_task(self._monitor_loop())
             self._monitor_task.add_done_callback(self._on_task_done)
+        elif provider_on:
+            # No resource loop to piggyback on: run the LLM check on its own.
+            self._provider_task = asyncio.create_task(self._provider_loop())
+            self._provider_task.add_done_callback(self._on_task_done)
         if daily_on:
             self._daily_task = asyncio.create_task(self._daily_loop())
             self._daily_task.add_done_callback(self._on_task_done)
             self._log_next_daily()
         self._start_webhook_task()
+        if not provider_on:
+            # A latch left behind by an earlier enabled watch would otherwise
+            # stay "unresolved" in the daily report forever.
+            self._close_provider_watch("LLM 服务监控已关闭")
         if not self._running:
             logger.info("状态卡主动告警与每日定时状态图均未启用")
             return
         logger.info(
-            "状态卡任务已启动：阈值告警=%s，每日定时状态图=%s，目标=%s，间隔=%ss，"
-            "阈值 CPU %.0f%% / RAM %.0f%% / SWAP %.0f%% / DISK %.0f%%",
+            "状态卡任务已启动：阈值告警=%s，每日定时状态图=%s，LLM 服务告警=%s，"
+            "目标=%s，间隔=%ss，阈值 CPU %.0f%% / RAM %.0f%% / SWAP %.0f%% / DISK %.0f%%",
             alerts_on,
             daily_on,
+            provider_on,
             self.targets,
             self.interval,
             self.cpu_threshold,
@@ -536,6 +567,7 @@ class AlertEngine:
         self._running = False
         tasks = (
             self._monitor_task,
+            self._provider_task,
             self._daily_task,
             self._webhook_task,
             self._broadcast_task,
@@ -548,6 +580,7 @@ class AlertEngine:
                 except asyncio.CancelledError:
                     pass
         self._monitor_task = None
+        self._provider_task = None
         self._daily_task = None
         self._webhook_task = None
         self._broadcast_task = None
@@ -930,6 +963,28 @@ class AlertEngine:
                 logger.exception("状态卡告警采样失败")
             await asyncio.sleep(self.interval)
 
+    async def _provider_loop(self) -> None:
+        """Run the LLM quality check when the resource rules are disabled."""
+
+        await asyncio.sleep(1)
+        while self._running:
+            try:
+                with self.state.section("alerts"):
+                    pass
+                if not self.provider_watch_enabled:
+                    break
+                await self._check_provider_quality()
+                # This loop is the ONLY place that persists provider state
+                # when the resource loop is off: some ``_check_provider_quality``
+                # branches pop queued copies after their last save, so the
+                # unconditional save is what makes those removals reach disk.
+                self.state.save()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("LLM 服务检查失败")
+            await asyncio.sleep(self.interval)
+
     async def _sample_once(self) -> None:
         cpu = cached_cpu_percent()
         mem = memory_stat()
@@ -988,34 +1043,45 @@ class AlertEngine:
         if not disk_paths:
             disk_paths = ["/"]
 
-        # Every configured mount gets its own rule. Watching only the first
-        # one meant a second disk could fill up silently while the card and
-        # the report showed it.
-        if len(disk_paths) > 1:
-            # Adding a second mount used to rename the single-mount key from
-            # "disk" to "disk:/" -- the old state was pruned with a fake
-            # "recovered" event and the still-full disk alerted again. Carry
-            # the first mount's latch over instead.
-            with self.state.section("alerts") as alerts:
-                rules = alerts.get("rules")
-                if isinstance(rules, dict):
-                    legacy_key = f"disk:{disk_paths[0]}"
-                    legacy = rules.get(legacy_key)
-                    if isinstance(legacy, dict) and "disk" not in rules:
-                        rules["disk"] = dict(legacy)
-                        # Drop the old key in the same write -- but only when
-                        # we actually migrated. When "disk" already exists
-                        # (the user once had this mount in first position and
-                        # reordered later), popping it used to discard a
-                        # possibly still-alerting episode without any
-                        # recovery event; pruning handles that leftover
-                        # instead.
-                        rules.pop(legacy_key, None)
+        # Every mount owns a path-based key. The first mount used to take the
+        # historical "disk" key, which bound a latch to a POSITION rather
+        # than to a mount: editing display.disk_paths (dropping the first
+        # entry, reordering) moved one mount's alerting/alerted/cooldown onto
+        # another disk -- a fake recovery carrying the old mount's duration,
+        # and silence for a disk that was still full (v2.20.21).
+        #
+        # Migrate the historical "disk" key once. Its label carries the mount
+        # path, so an open episode can move to "disk:<path>" without writing
+        # a bogus "rule removed" recovery.
+        with self.state.section("alerts") as alerts:
+            rules = alerts.get("rules")
+            if isinstance(rules, dict):
+                legacy = rules.get("disk")
+                if isinstance(legacy, dict):
+                    legacy_path = _disk_path_from_label(legacy.get("label"))
+                    if not legacy_path:
+                        # No path in the label (very old or hand-edited
+                        # state). Attaching it to disk_paths[0] would move
+                        # the latch onto a DIFFERENT mount -- the exact bug
+                        # this change removes. Leave the key in place: the
+                        # ``_prune_rules`` pass at the end of this sample
+                        # sees "disk" as removed and closes the episode with
+                        # a proper recovery event.
+                        pass
+                    else:
+                        target_key = f"disk:{legacy_path}"
+                        existing = rules.get(target_key)
+                        if isinstance(existing, dict):
+                            # A path-keyed record from an older layout
+                            # exists. The historical "disk" entry is the
+                            # newer state of the same mount, so let it win.
+                            rules[target_key] = {**existing, **legacy}
+                        else:
+                            rules[target_key] = dict(legacy)
+                        rules.pop("disk", None)
         valid_keys = {"cpu", "ram", "swap", "load"}
-        for index, disk_path in enumerate(disk_paths):
-            # The first mount keeps the historical key whether or not extra
-            # mounts exist, so its cooldown and latch survive a config change.
-            rule_key = "disk" if index == 0 else f"disk:{disk_path}"
+        for disk_path in disk_paths:
+            rule_key = f"disk:{disk_path}"
             valid_keys.add(rule_key)
             try:
                 # One implementation shared with the card, the report and the
@@ -1069,6 +1135,10 @@ class AlertEngine:
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
                         st.pop("awaiting_summary", None)
+                        st.pop("summary_buffered", None)
+                        st.pop("summary_key", None)
+                        st.pop("summary_reason", None)
+                        st.pop("recovery_awaits_summary", None)
                         for stale_key in (
                             "pending_recovery",
                             "recovery_attempt",
@@ -1081,7 +1151,7 @@ class AlertEngine:
                             close_text = (
                                 "✅ 告警已关闭 · 磁盘挂载点不可读\n"
                                 "──────────────\n"
-                                f"挂载点: {disk_path}\n"
+                                f"挂载点: {self._display_name(disk_path)}\n"
                                 "原因: 挂载点无法读取（已拔出或掉线），"
                                 "之前的告警已自动关闭。\n"
                                 f"时间: {_now_text(self.config)}"
@@ -1241,6 +1311,13 @@ class AlertEngine:
             # the next recovery would queue behind a window that no longer
             # exists (v2.20.0).
             st.pop("awaiting_summary", None)
+            # Buffered-summary markers are illegal once the rule is off:
+            # leaving ``summary_buffered`` behind let a later same-name
+            # abandon withdraw an alert that had already been delivered.
+            st.pop("summary_buffered", None)
+            st.pop("summary_key", None)
+            st.pop("summary_reason", None)
+            st.pop("recovery_awaits_summary", None)
             # A queued recovery from the disabled rule must not survive:
             # after re-enabling it would be delivered as a stale notice.
             for stale_key in (
@@ -1632,6 +1709,13 @@ class AlertEngine:
                 st["last_error"] = ""
                 duration = now - _safe_float(st.get("alert_since"), now)
                 st["alert_since"] = 0
+                # Persist the closed episode *before* the slow send: a
+                # reload/crash during delivery used to leave "alerting=True"
+                # on disk, so the next sample replayed the whole recovery
+                # (a second "已恢复" with the same duration). The offline
+                # path already does this (v2.20.5); the resource/monitor
+                # recovery branches did not (v2.20.21).
+                self.state.save()
                 # The event log is the source of truth for interruption
                 # durations and the daily report's unresolved list, so it must
                 # not depend on whether the recovery notice is enabled.
@@ -2041,7 +2125,10 @@ class AlertEngine:
                             logger.warning("Bot 连接恢复通知补发失败，等待下次重试")
             if st.get("alerting") or st.get("pending_alert_text"):
                 stale = bool(st.pop("stale", False))
-                duration = now - _safe_float(st.get("since"), now)
+                # ``since`` may be missing or 0 in a hand-edited/old state;
+                # ``_safe_float(value, now)`` would accept 0 and report an
+                # outage of ~20000 days.
+                duration = now - (_safe_float(st.get("since")) or now)
                 queued_raw = st.pop("pending_alert_text", None)
                 # A stale episode is one where the outage window is too old
                 # to push anything; delivering the hours-old alert text now
@@ -2108,6 +2195,11 @@ class AlertEngine:
                         report.notify_offline_recovery()
                 except Exception:
                     logger.debug("安排日报补发失败", exc_info=True)
+                # Alerts that failed only because the channel was down are
+                # queued with a 15-minute backoff. Waiting it out after the
+                # channel came back made the operator see "Bot 已恢复" first
+                # and the actual outage alert much later (v2.20.21).
+                self._nudge_queued_alerts()
                 if not stale and (notified or queued):
                     # A hundred-group broadcast with a 3s gap can take five
                     # minutes; running it inline stalled every later sample
@@ -2255,6 +2347,84 @@ class AlertEngine:
                     "offline", "Bot 连接", "连接离线（推送失败）", "failed"
                 )
 
+        # A sustained outage that started inside the notification cooldown
+        # used to stay silent for its whole duration: the latch branch above
+        # returns on the first sample, and later samples never re-evaluate.
+        # Mirror the resource/monitor ``cooldown_retry``: once the cooldown
+        # has elapsed and the bot is still offline, push the alert (marked as
+        # a deferred copy) so a multi-hour outage is not invisible.
+        if (
+            st.get("alerting")
+            and not st.get("alerted")
+            and not st.get("pending_alert_text")
+            and self.offline_notify
+            and not st.get("stale")
+        ):
+            last_sent = _safe_float(st.get("last_sent"))
+            if last_sent and now - last_sent >= self.cooldown:
+                text = (
+                    "🔴 Bot 连接离线\n"
+                    "──────────────\n"
+                    f"主机: {self._hostname()}\n"
+                    f"时间: {_now_text(self.config)}\n"
+                    "（本条为通知冷却结束后的补发）"
+                )
+                result = await self._send(text, kind="offline")
+                if self._delivered(result):
+                    st["alerted"] = True
+                    st["last_sent"] = now
+                    st["pending_alert"] = False
+                    logger.info("Bot 连接离线告警已在冷却结束后补发")
+                    self._record_event("offline", "Bot 连接", "连接离线", "alert")
+                else:
+                    st["pending_alert_text"] = text
+                    st["pending_alert"] = True
+                    logger.warning("Bot 连接离线告警补发失败，已排队，恢复后补发")
+                    self._record_event(
+                        "offline", "Bot 连接", "连接离线（推送失败）", "failed"
+                    )
+
+    def _nudge_queued_alerts(self) -> None:
+        """Make alerts queued during an outage retry on the next sample.
+
+        A push that failed because the channel was offline keeps the alert
+        and backs off 15 minutes. Waiting that long after the channel came
+        back made the operator see "Bot 已恢复" first and the real alert
+        much later (v2.20.21). A recovery notice queued behind the same
+        backoff is released too.
+        """
+
+        now = time.time()
+        with self.state.section("alerts") as alerts:
+            rules = alerts.get("rules")
+            if isinstance(rules, dict):
+                for st in rules.values():
+                    if not isinstance(st, dict):
+                        continue
+                    if _safe_float(st.get("next_attempt")) > now:
+                        st["next_attempt"] = 0
+                    if (
+                        st.get("pending_recovery")
+                        and _safe_float(st.get("recovery_next_attempt")) > now
+                    ):
+                        st["recovery_next_attempt"] = 0
+            watch = alerts.get("provider_watch")
+            if isinstance(watch, dict):
+                if _safe_float(watch.get("next_attempt")) > now:
+                    watch["next_attempt"] = 0
+                if (
+                    watch.get("pending_recovery")
+                    and _safe_float(watch.get("recovery_next_attempt")) > now
+                ):
+                    watch["recovery_next_attempt"] = 0
+        monitor = getattr(self.plugin, "monitor", None)
+        nudge = getattr(monitor, "nudge_queued", None)
+        if callable(nudge):
+            try:
+                nudge()
+            except Exception:
+                logger.debug("催促监测项排队告警失败", exc_info=True)
+
     def _close_provider_watch(self, reason: str) -> None:
         """Resolve a latched LLM alert when the rule stops running.
 
@@ -2284,6 +2454,7 @@ class AlertEngine:
         watch["alerting"] = False
         watch["alerted"] = False
         watch["alert_since"] = 0
+        self.state.save()
         self._record_event("provider", "LLM 服务", reason, "recovery")
         logger.info("LLM 服务告警已关闭：%s", reason)
 
@@ -2401,7 +2572,12 @@ class AlertEngine:
                     self.state.save()
                     logger.info("LLM 服务恢复通知补发成功")
                 else:
-                    retry_count = int(watch.get("recovery_retry_count") or 1) + 1
+                    # ``int()`` on a hand-edited state value raised on every
+                    # sample, which skipped the rest of the sample (including
+                    # the state save) until the field was rewritten.
+                    retry_count = (
+                        _safe_int(watch.get("recovery_retry_count")) or 1
+                    ) + 1
                     if retry_count > MAX_RECOVERY_RETRIES:
                         watch.pop("pending_recovery", None)
                         watch.pop("recovery_retry_count", None)
@@ -2545,9 +2721,11 @@ class AlertEngine:
             # A queued alert from this episode must not survive it: the retry
             # block would re-send the stale text (with the old failure count)
             # during the *next* outage and the user got two alerts for one
-            # incident (v2.20.8).
+            # incident (v2.20.8). Read it first: when the queue was never
+            # delivered, the recovery below carries it so the outage is not
+            # invisible.
+            queued_alert = str(watch.pop("pending_alert_text", None) or "")
             for stale_key in (
-                "pending_alert_text",
                 "next_attempt",
                 "alert_retry_count",
             ):
@@ -2562,10 +2740,10 @@ class AlertEngine:
                 "最近一次 LLM 调用成功",
                 "recovery",
             )
-            if self.recover_notify and notified:
+            if self.recover_notify and (notified or queued_alert):
                 last_streak = _safe_int(watch.get("last_streak"))
-                had_failed = bool(watch.pop("send_failed", False))
-                text = (
+                had_failed = bool(watch.pop("send_failed", False)) or bool(queued_alert)
+                recovery_text = (
                     "✅ 已恢复 · LLM 服务\n"
                     "──────────────\n"
                     f"主机: {self._hostname()}\n"
@@ -2574,6 +2752,15 @@ class AlertEngine:
                     + ("（异常告警此前未能送达）\n" if had_failed else "")
                     + f"时间: {_now_text(self.config)}"
                 )
+                if queued_alert and not notified:
+                    # The alert never left the queue: the channel was down
+                    # when the LLM failed and the service recovered before it
+                    # came back. Dropping the queue silently left the user
+                    # with NO message for this outage; deliver the queued
+                    # alert together with the recovery.
+                    text = queued_alert + "\n\n" + recovery_text
+                else:
+                    text = recovery_text
                 result = await self._send(text, source="provider", kind="provider")
                 if not self._delivered(result):
                     # The recovery notice is the only signal for a suppressed

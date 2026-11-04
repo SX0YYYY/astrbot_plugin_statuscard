@@ -1341,6 +1341,14 @@ async def collect_bot_info(
         pass
     if not platform_id:
         platform_id = str(cfg_get(config, "alerts.platform_id", "default") or "default")
+    if not self_id:
+        # The scheduled card / daily snapshot has no event, so ``self_id``
+        # used to stay empty and the client lookup took the FIRST aiocqhttp
+        # instance. With two bots on one platform, the scheduled card then
+        # showed the other bot's nickname/friends/groups. ``alerts.self_id``
+        # is the configured discriminator and the README already promises it
+        # selects the card's data (v2.20.21).
+        self_id = str(cfg_get(config, "alerts.self_id", "") or "")
     cache_key = f"{platform_id}:{self_id or 'default'}"
     cache = _bot_cache.setdefault(cache_key, {})
     if len(_bot_cache) > _BOT_CACHE_MAX_KEYS:
@@ -1382,6 +1390,23 @@ async def collect_bot_info(
         # uses the event's id) showed the real numbers. Fall back to any
         # aiocqhttp instance rather than leaving the block empty.
         client = _get_aiocqhttp_client(context, None, self_id)
+    if client is None and self_id:
+        # The configured self_id is not connected (stale alert setting). A
+        # strict match then leaves the whole Bot block at "--"; fall back to
+        # the first instance on the platform and say so, so the operator can
+        # correct the value instead of staring at an empty card. The platform
+        # id may be stale too (renamed instance), so the last attempt drops
+        # both filters.
+        client = _get_aiocqhttp_client(context, platform_id, None)
+        if client is None:
+            client = _get_aiocqhttp_client(context, None, None)
+        if client is not None:
+            logger.warning(
+                "未找到 self_id=%s（platform_id=%s）的 aiocqhttp 客户端，"
+                "状态卡回退到同平台第一个实例",
+                self_id,
+                platform_id or "（空）",
+            )
     data: dict[str, Any] = {
         "self_id": "",
         "nick": "",
@@ -1788,13 +1813,18 @@ def _write_avatar_cache(path: Path | None, data: bytes) -> None:
 _AVATAR_SHRINK_AT = 200_000
 
 
-def _shrink_avatar_sync(data: bytes) -> bytes:
+def _shrink_avatar_sync(data: bytes) -> bytes | None:
     """Downscale a large avatar before it becomes a data URL.
 
     The avatar is embedded in the same HTML that is POSTed to the remote T2I
     service. A 10 MB upload became a 13 MB JSON body on every render; the
     background already shrinks, the avatar did not (v2.20.17). Avatars are
     displayed small, so 512px is still sharp on high-DPI screens.
+
+    Returns ``None`` when the image is over the pixel limit: the caller then
+    falls back to the QQ avatar. Returning the original instead (the old
+    behaviour) silently defeated the documented 6000 万像素 limit and could
+    put a multi-megabyte data URL into every render (v2.20.21).
     """
 
     if not data or len(data) <= _AVATAR_SHRINK_AT:
@@ -1802,9 +1832,12 @@ def _shrink_avatar_sync(data: bytes) -> bytes:
     try:
         shrunk, _mime = shrink_image_bytes(data, target_width=512, quality=85)
         return shrunk or data
+    except ValueError:
+        logger.warning("头像超过像素或体积上限，已回退默认/QQ 头像")
+        return None
     except Exception:
-        # An undecodable/oversized image keeps its old behaviour: the render
-        # path warns about it and falls back, it must not fail here.
+        # An undecodable image keeps its old behaviour: the render path warns
+        # about it and falls back, it must not fail here.
         logger.warning("头像压缩失败，使用原图", exc_info=True)
         return data
 
@@ -1834,7 +1867,10 @@ async def fetch_avatar_bytes(
                     data = uploaded.read_bytes()
                     if data:
                         _warn_if_undecodable_image(data, "头像", uploaded)
-                        return await _prepare_avatar(data)
+                        prepared = await _prepare_avatar(data)
+                        if prepared is not None:
+                            return prepared
+                        logger.warning("上传头像超过像素/体积上限，回退 QQ 头像")
             except Exception as exc:
                 logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
         logger.warning("头像来源为自定义上传，但没有可用的上传文件，回退 QQ 头像")
@@ -1845,7 +1881,9 @@ async def fetch_avatar_bytes(
     cache_path = _avatar_cache_path(data_dir, url)
     cached = _read_avatar_cache(cache_path, AVATAR_CACHE_TTL)
     if cached is not None:
-        return await _prepare_avatar(cached)
+        prepared = await _prepare_avatar(cached)
+        if prepared is not None:
+            return prepared
 
     async def _download() -> bytes:
         # The timeout is spelled out per phase so it is obvious that the
@@ -1873,7 +1911,10 @@ async def fetch_avatar_bytes(
         # slow-drip server could park the card render (and the 20:00 daily
         # image) indefinitely. Cap the whole download.
         payload = await asyncio.wait_for(_download(), timeout=15)
-        payload = await _prepare_avatar(payload) or payload
+        prepared = await _prepare_avatar(payload)
+        if prepared is None:
+            raise ValueError("头像超过像素或体积上限")
+        payload = prepared
         _write_avatar_cache(cache_path, payload)
         return payload
     except Exception as exc:

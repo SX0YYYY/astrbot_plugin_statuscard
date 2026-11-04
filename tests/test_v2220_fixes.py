@@ -320,7 +320,7 @@ def test_framework_fallback_updates_receipt(monkeypatch) -> None:
         rejected=True,
     )
 
-    async def fake_direct(client, target, segments):
+    async def fake_direct(client, target, segments, **kwargs):
         return receipt
 
     async def fake_via(target, payload):

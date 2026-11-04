@@ -243,8 +243,9 @@ def test_disk_unreadable_closes_alerting_rule(tmp_path: Path, monkeypatch) -> No
     plugin = _AlertsPlugin()
     engine = AlertEngine(plugin, state, config)
     rules = state.setdefault("alerts", {}).setdefault("rules", {})
-    # Single-mount config: the first mount keeps the historical "disk" key.
+    # v2.20.21: the historical "disk" key is migrated onto the mount path.
     rules["disk"] = {
+        "label": "磁盘使用率 (/mnt/gone)",
         "alerting": True,
         "alerted": True,
         "alert_since": 1000.0,
@@ -252,12 +253,12 @@ def test_disk_unreadable_closes_alerting_rule(tmp_path: Path, monkeypatch) -> No
     }
     import astrbot_plugin_statuscard.alerts as alerts_mod
 
-    async def boom(paths):
+    def boom(paths):
         raise RuntimeError("挂载点不存在")
 
     monkeypatch.setattr(alerts_mod, "disk_usage_bounded", boom)
     asyncio.run(engine._sample_once())
-    st = state.get("alerts")["rules"]["disk"]
+    st = state.get("alerts")["rules"]["disk:/mnt/gone"]
     assert st["alerting"] is False
     assert st["count"] == 0
     assert not st.get("awaiting_summary")

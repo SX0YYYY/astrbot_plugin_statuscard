@@ -9,6 +9,7 @@ shown on the dashboard, instead of being discovered by silence.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -328,19 +329,10 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "掉线检测不会运行，广播也不会触发。请先打开告警总开关。",
             )
         )
-    if cfg_bool(config, "alerts.provider_watch.enabled", False) and not cfg_bool(
-        config, "alerts.enabled", False
-    ):
-        # The provider check runs inside the alert sampling loop, so enabling
-        # only "LLM 服务告警" silently does nothing (v2.20.5).
-        issues.append(
-            AuditIssue(
-                "warning",
-                "provider_watch_requires_alerts",
-                "「LLM 服务告警」已开启，但「启用资源与掉线告警」未开启："
-                "LLM 质量检查不会运行，告警也不会触发。请先打开告警总开关。",
-            )
-        )
+    # ``alerts.provider_watch`` has its own loop and no longer requires the
+    # resource/offline master switch (v2.20.21). The old warning here told the
+    # operator to turn the master switch on, which also enabled resource and
+    # offline alerts they did not ask for.
     # A hand-edited schedule like "9:00" (or "25:00") only logs a warning and
     # the task never fires, while the diagnostics still show the raw value.
     schedule_defaults = {
@@ -405,36 +397,54 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             ("alerts.load_per_core_threshold", "每核负载"),
         ):
             try:
-                if cfg_float(config, key, 1.0) <= 0:
-                    issues.append(
-                        AuditIssue(
-                            "warning",
-                            "alert_threshold_zero",
-                            f"告警阈值「{label}」为 0：该规则不生效（视为关闭）。"
-                            "如需关闭请保持 0；如需告警请设为大于 0 的值。",
-                        )
-                    )
+                value = cfg_float(config, key, 1.0)
             except (TypeError, ValueError):
                 continue
-        disk_paths = cfg_get(config, "display.disk_paths", [])
-        if isinstance(disk_paths, list):
-            for raw_path in disk_paths:
-                path_text = str(raw_path or "").strip()
-                if not path_text:
-                    continue
-                try:
-                    exists = Path(path_text).exists()
-                except OSError:
-                    continue
-                if not exists:
-                    issues.append(
-                        AuditIssue(
-                            "warning",
-                            "disk_path_missing",
-                            f"磁盘挂载点「{path_text}」不存在：磁盘使用率告警会静默跳过，"
-                            "请检查「状态卡显示 → 磁盘挂载点」。",
-                        )
+            if not math.isfinite(value):
+                # ``NaN <= 0`` is False, so the old check silently skipped a
+                # hand-edited NaN/Infinity threshold while clamp_config turns
+                # it into the lower bound (0 = the rule is off). The audit
+                # exists to make exactly that kind of silent no-op visible.
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "alert_threshold_zero",
+                        f"告警阈值「{label}」不是有效数字（NaN/Infinity），"
+                        "运行时会按 0 处理（规则关闭），请改成有效数值。",
                     )
+                )
+            elif value <= 0:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "alert_threshold_zero",
+                        f"告警阈值「{label}」为 0：该规则不生效（视为关闭）。"
+                        "如需关闭请保持 0；如需告警请设为大于 0 的值。",
+                    )
+                )
+    # The mount list drives the CARD, the report and the dashboard even when
+    # resource alerts are off, so a typo here is not an alert-only problem.
+    # This check used to sit inside ``if alerts_on`` (off by default), which
+    # is exactly when nobody would notice.
+    disk_paths = cfg_get(config, "display.disk_paths", [])
+    if isinstance(disk_paths, list):
+        for raw_path in disk_paths:
+            path_text = str(raw_path or "").strip()
+            if not path_text:
+                continue
+            try:
+                exists = Path(path_text).exists()
+            except OSError:
+                continue
+            if not exists:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "disk_path_missing",
+                        f"磁盘挂载点「{path_text}」不存在：状态卡、日报和看板会显示 --，"
+                        "请检查「状态卡显示 → 磁盘挂载点」。",
+                    )
+                )
     active_rules = notify_rules_active(config)
     if active_rules:
         # "info": the switch is on and everything works -- it must not be

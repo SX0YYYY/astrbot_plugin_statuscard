@@ -879,6 +879,14 @@ class DailyReportBuilder:
         # ``events`` but carries THIS recovery's timestamp, and the recovery
         # branch below needs that row to recover the start (v2.20.20).
         outside_stamped: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+        # Keep the row itself: an outage that spans the WHOLE window needs its
+        # name/detail to render a row, and that row lives outside ``events``.
+        outside_rows: dict[tuple[str, str, str], dict[int, dict[str, Any]]] = {}
+        # Recovery events before the window. They prove an episode actually
+        # ended before the window started, even when ``close_all`` later
+        # stamped the old alert row with an unrelated (much later) recovery
+        # -- the historical orphan rows have exactly this shape.
+        outside_recoveries: dict[tuple[str, str, str], list[int]] = {}
         for alert in sorted(
             self.store.list_events_range(
                 window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
@@ -908,6 +916,7 @@ class DailyReportBuilder:
                     resolved = safe_int(alert.get("resolved_ts") or 0)
                     if resolved:
                         outside_stamped.setdefault(key, []).append((stamp, resolved))
+                        outside_rows.setdefault(key, {})[stamp] = alert
                     open_episode.pop(key, None)
                     continue
                 current = open_episode.get(key)
@@ -923,6 +932,7 @@ class DailyReportBuilder:
                 # purposes; otherwise a later recovery could be matched with
                 # an interruption that had already ended.
                 open_episode.pop(key, None)
+                outside_recoveries.setdefault(key, []).append(stamp)
         items: list[dict[str, Any]] = []
         count = 0
         # One interruption can leave both a "failed" row (the first push did
@@ -1073,6 +1083,9 @@ class DailyReportBuilder:
         # ("已恢复 00:01:30" followed by "恢复 00:01:30"), which reads like two
         # incidents.
         emitted: dict[tuple[str, str, str], int] = {}
+        # Keys that already have a row in this section. The whole-window
+        # sweep below must not duplicate an outage that is already shown.
+        rendered_keys: set[tuple[str, str, str]] = set()
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
@@ -1200,6 +1213,7 @@ class DailyReportBuilder:
             # A weekly window spans several days, so a bare "HH:MM" cannot
             # locate the event inside it.
             time_format = "%H:%M" if span == 1 else "%m-%d %H:%M"
+            rendered_keys.add(key)
             items.append(
                 {
                     "time": datetime.fromtimestamp(
@@ -1289,6 +1303,103 @@ class DailyReportBuilder:
                     "duration_code": "ongoing",
                 }
             )
+        # An outage that covered the WHOLE window and recovered only after it
+        # has no in-window row: its alert is outside the loaded events and
+        # its recovery is after the window, so the day filter drops both and
+        # the unresolved query (resolved_ts IS NULL) skips it too. The report
+        # then claimed "no anomalies" for a day the service was down from
+        # start to finish. Emit one row covering that window (v2.20.21).
+        #
+        # Only rows whose push succeeded ("alert") are used. A "failed" row
+        # is the shape of the historical orphan (its recovery event was never
+        # written; close_all later stamped it with an unrelated recovery), so
+        # accepting it added a fake whole-window row to every earlier report
+        # in the online database. An outage whose first push also failed is
+        # not reported this way -- the unresolved list still covers outages
+        # that never recovered.
+        window_end_ts = int(
+            datetime.combine(
+                day + timedelta(days=1), datetime.min.time(), tzinfo=self.tz
+            ).timestamp()
+        )
+        covering_rows: list[dict[str, Any]] = []
+        for key, stamped in outside_stamped.items():
+            if key in rendered_keys or not key[1]:
+                continue
+            # Group by the stamping recovery: ONE recovery closes one
+            # episode. Within a batch use the latest DELIVERED ("alert") row
+            # as the start -- a "failed" row right after it belongs to the
+            # same episode and must not hide it.
+            batches: dict[int, list[int]] = {}
+            for start, resolved in stamped:
+                if resolved >= window_end_ts:
+                    batches.setdefault(resolved, []).append(start)
+            for resolved, starts in batches.items():
+                alert_starts = [
+                    ts
+                    for ts in starts
+                    if str(
+                        (outside_rows.get(key, {}).get(ts) or {}).get("status") or ""
+                    )
+                    == "alert"
+                ]
+                if not alert_starts:
+                    continue
+                start = max(alert_starts)
+                # A recovery BEFORE the window proves this episode ended
+                # before it began. Its alert row only carries a later
+                # ``resolved_ts`` because ``close_all`` stamps every
+                # historical open row of the rule.
+                if any(
+                    start < recovery_ts <= window_start_ts
+                    for recovery_ts in outside_recoveries.get(key, [])
+                ):
+                    continue
+                # Another DELIVERED alert between the window and the
+                # stamping recovery means that recovery closed a LATER
+                # episode: this old row is an orphan that close_all merely
+                # stamped (its own recovery event was lost). A "failed" row
+                # in that range is a retry of the same outage, not a new one.
+                late = self.store.list_events_range(window_end_ts, resolved, limit=5000)
+                if any(
+                    str(item.get("status") or "") == "alert"
+                    and (
+                        str(item.get("kind") or ""),
+                        str(item.get("name") or ""),
+                        str(item.get("target") or ""),
+                    )
+                    == key
+                    for item in late
+                ):
+                    continue
+                row = outside_rows.get(key, {}).get(start) or {}
+                marker = "（该窗口内持续异常）"
+                detail = self.redactor.mask_addresses(str(row.get("detail") or ""))
+                detail = (detail[: 80 - len(marker)] + marker) if detail else marker
+                covering_rows.append(
+                    {
+                        "time": datetime.fromtimestamp(
+                            window_start_ts, self.tz
+                        ).strftime("%H:%M" if span == 1 else "%m-%d %H:%M"),
+                        "kind": self._kind_text(str(row.get("kind") or "")),
+                        "kind_slug": str(row.get("kind") or ""),
+                        "name": self.redactor.mask_name(
+                            redact_url(str(row.get("name") or "--"))
+                        ),
+                        "status": "异常",
+                        "status_key": "alert",
+                        "detail": detail,
+                        "duration": "跨窗口关闭",
+                        "duration_code": "cross_window",
+                    }
+                )
+                rendered_keys.add(key)
+                count += 1
+                break
+        if covering_rows:
+            # These rows describe the start of the window; appending them
+            # after the in-window events made the table read out of order.
+            items[:0] = covering_rows
         raw_total = len(items)
         unresolved_total = len(unresolved_items)
         hidden_unresolved = 0
@@ -1303,7 +1414,12 @@ class DailyReportBuilder:
                 hidden_unresolved = len(unresolved_items) - cap
                 unresolved_items = unresolved_items[:cap]
             room = max(0, 20 - len(unresolved_items))
-            head = items[-room:] if room else []
+            # The whole-window rows describe the start of the window and must
+            # not be the first thing dropped when the table is truncated.
+            covering_ids = {id(item) for item in covering_rows}
+            kept_covering = [item for item in items if id(item) in covering_ids]
+            rest = [item for item in items if id(item) not in covering_ids]
+            head = kept_covering + rest[-max(0, room - len(kept_covering)) :]
             dropped_in_window = max(0, len(items) - len(head))
             items = unresolved_items + head
         return {
@@ -2448,7 +2564,23 @@ def build_report_text(view: dict[str, Any]) -> str:
             )
         else:
             lines.append(f"进程: {process.get('empty_reason') or '暂无数据'}")
-    lines.append(
-        "窗口: {}（{}）".format(view.get("window") or "", view.get("timezone") or "")
+    window_line = "窗口: {}（{}）".format(
+        view.get("window") or "", view.get("timezone") or ""
     )
-    return "\n".join(lines)[:2000]
+
+    # Cut on a line boundary and ALWAYS keep the window/timezone line: it is
+    # the only place that says which day the text covers. A literal
+    # ``[:2000]`` sliced mid-character and usually removed this exact line
+    # (v2.20.21).
+    text = ""
+    truncated = False
+    for line in lines:
+        candidate = f"{text}\n{line}" if text else line
+        if len(candidate) + len(window_line) + 8 > 2000:
+            truncated = True
+            break
+        text = candidate
+    if truncated:
+        text += "\n…（内容已截断）"
+    text += "\n" + window_line
+    return text
