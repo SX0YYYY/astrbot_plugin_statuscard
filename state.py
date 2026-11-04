@@ -137,7 +137,17 @@ class StateStore:
                 os.fsync(handle.fileno())
         except Exception:
             pass
-        os.replace(tmp, self.path)
+        try:
+            os.replace(tmp, self.path)
+        except BaseException:
+            # A failed replace (permissions, antivirus lock on Windows) used
+            # to leave the per-thread .tmp file behind on every save
+            # (v2.20.20).
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
         try:
             os.chmod(self.path, 0o600)
         except Exception:

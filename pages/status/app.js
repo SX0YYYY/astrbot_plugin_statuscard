@@ -147,6 +147,10 @@
     return "zh-CN";
   }
 
+  function isEnglish() {
+    return String(state.locale || "").toLowerCase().startsWith("en");
+  }
+
   // Redaction placeholders are Chinese constants produced by the backend
   // (redactor.HIDDEN). They are data, not UI copy, so the English page used
   // to show "已隐藏" for the host, monitor names and process names
@@ -866,6 +870,13 @@
     }
     tip.style.display = "none";
     container.tabIndex = 0;
+    // Keyboard/screen-reader users landed on an empty focusable box
+    // (v2.20.20).
+    container.setAttribute("role", "img");
+    container.setAttribute(
+      "aria-label",
+      t("chart_aria_label", "资源趋势图（可用方向键查看数值）"),
+    );
     const titleFor =
       ctx.titleFor || ((index) => (ctx.labels || [])[index] || "");
 
@@ -1351,7 +1362,11 @@
     let exported = 0;
     let truncated = false;
     for (const kind of kinds) {
-      const data = await bridge.apiGet("export", { kind, range });
+      // Use the module-level apiGet: it parses a JSON *string* from the
+      // bridge. Calling bridge.apiGet directly meant a string payload made
+      // every export fail with "导出在 resources 中断（已导出 0 个文件）"
+      // while the data was there (v2.20.20).
+      const data = await apiGet("export", { kind, range });
       if (data && data.db_unavailable) {
         throw new Error(
           t("db_unavailable_retry", "数据库暂时不可用，正在自动恢复，请稍后重试导出"),
@@ -1724,9 +1739,13 @@
     const blocks = [];
     // The backend computes an empty_reason per section; dropping it left a
     // blank page with no explanation for a fresh install or a disabled module.
-    const emptyReasons = ["resources", "token", "process", "website", "qq", "provider_quality"]
-      .map((key) => emptyReasonText(data[key]))
-      .filter(Boolean);
+    const emptyReasons = [
+      ...new Set(
+        ["resources", "token", "process", "website", "qq", "provider_quality"]
+          .map((key) => emptyReasonText(data[key]))
+          .filter(Boolean),
+      ),
+    ];
     if (emptyReasons.length) {
       blocks.push(
         '<div class="detail-block"><h3>' +
@@ -2375,14 +2394,16 @@
     }
     if (kind === "webhook") {
       if (!data.listening) {
+        // The backend sends a stable message_code; render its translation
+        // instead of the hard-coded Chinese sentence (v2.20.20).
+        const code = data.message_code;
+        const coded = code ? t(code, "") : "";
+        const message =
+          (coded && coded !== code ? coded : "") ||
+          data.message ||
+          t("verify_webhook_not_listening", "Webhook 未在监听");
         box.innerHTML =
-          '<ul class="verify-list">' +
-          verifyRow(
-            data.message ||
-              t("verify_webhook_not_listening", "Webhook 未在监听"),
-            true,
-          ) +
-          "</ul>";
+          '<ul class="verify-list">' + verifyRow(message, true) + "</ul>";
         return;
       }
       const good = Number(data.http_status) === 200;
@@ -2411,13 +2432,21 @@
       .map((item) => {
         if (kind === "targets") {
           const entry = VERIFY_LABEL[item.state] || VERIFY_LABEL.failed;
-          const extra = item.error ? "（" + item.error + "）" : "";
+          // Full-width punctuation is Chinese-only: the English page showed
+          // "target：delivered（error）" (v2.20.20).
+          const extra = item.error
+            ? (isEnglish() ? " (" : "（") + item.error + (isEnglish() ? ")" : "）")
+            : "";
           const retcode =
             item.retcode !== null && item.retcode !== undefined
               ? " · retcode " + item.retcode
               : "";
           return verifyRow(
-            item.target + "：" + t(entry[0], entry[1]) + retcode + extra,
+            item.target +
+              (isEnglish() ? ": " : "：") +
+              t(entry[0], entry[1]) +
+              retcode +
+              extra,
             item.state !== "ok",
           );
         }

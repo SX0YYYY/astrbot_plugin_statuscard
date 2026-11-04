@@ -91,7 +91,11 @@ def test_build_network_chart_empty() -> None:
 
 
 def test_build_network_chart_pads_to_one_hour() -> None:
-    points = [[1_700_000_000 + i * 60, 1024.0, 2048.0] for i in range(10)]
+    # Base on the current clock: the chart now drops samples outside a
+    # sane window, so a hard-coded 2023 timestamp is not a valid sample
+    # anymore (v2.20.20).
+    base = time.time() - 600
+    points = [[base + i * 60, 1024.0, 2048.0] for i in range(10)]
     chart = build_network_chart(points)
     assert chart["empty"] is False
     # 10 samples are padded with 50 zero samples so the chart keeps a full
@@ -101,7 +105,8 @@ def test_build_network_chart_pads_to_one_hour() -> None:
 
 
 def test_build_network_chart_trims_to_last_sixty_points() -> None:
-    points = [[1_700_000_000 + i * 60, float(i), float(i)] for i in range(180)]
+    base = time.time() - 180 * 60
+    points = [[base + i * 60, float(i), float(i)] for i in range(180)]
     chart = build_network_chart(points)
     assert chart["empty"] is False
     assert len(chart["up_points"].split()) == 60

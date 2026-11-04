@@ -417,7 +417,9 @@ def test_overflow_dropped_items_withdrawn_and_counted() -> None:
     # v2.20.8: the trimmed items are no longer counted as "已合并推送";
     # they get their own disclosure line instead.
     assert "4 项异常" in summary and "另有 2 项未列出" in summary
-    assert "2 项因缓冲溢出未能送达" in summary
+    # v2.20.20: the trimmed items are re-sent on the next sample, so the
+    # wording says "not merged" instead of "never delivered".
+    assert "2 项未合并，将单独补发" in summary
 
 
 # ----------------------------------------------------------------------

@@ -56,6 +56,13 @@ from .version import __version__
 
 PLUGIN_NAME: Final[str] = "astrbot_plugin_statuscard"
 
+# One short retry after a failed T2I render: the remote renderer
+# occasionally times out and succeeds right after (the 20:00 status image
+# once fell back to the simplified local card at 30.9s). A scheduled send
+# can afford a longer wait than an interactive command (v2.20.20).
+T2I_RETRY_DELAY_SCHEDULED: Final[float] = 10.0
+T2I_RETRY_DELAY_COMMAND: Final[float] = 3.0
+
 
 @register(
     PLUGIN_NAME,
@@ -505,12 +512,34 @@ class StatusCardPlugin(Star):
             "full_page": True,
             "device_scale_factor_level": "ultra",
         }
-        render_started = time.perf_counter()
-        try:
-            url = await asyncio.wait_for(
+
+        async def _attempt_status_render() -> str:
+            return await asyncio.wait_for(
                 self.html_render(html, {}, return_url=True, options=options),
                 timeout=timeout,
             )
+
+        render_started = time.perf_counter()
+        try:
+            try:
+                url = await _attempt_status_render()
+            except Exception as first_exc:
+                # One short retry: the remote renderer occasionally times out
+                # and succeeds right after. Scheduled runs can wait longer
+                # than an interactive command (v2.20.20).
+                retry_delay = (
+                    T2I_RETRY_DELAY_SCHEDULED
+                    if event is None
+                    else T2I_RETRY_DELAY_COMMAND
+                )
+                logger.warning(
+                    "T2I 状态卡渲染失败，%.0f 秒后重试一次: %s",
+                    retry_delay,
+                    first_exc,
+                )
+                await asyncio.sleep(retry_delay)
+                render_started = time.perf_counter()
+                url = await _attempt_status_render()
         except Exception:
             self._diag.update(
                 {
@@ -626,12 +655,28 @@ class StatusCardPlugin(Star):
             "full_page": True,
             "device_scale_factor_level": "ultra",
         }
-        started = time.perf_counter()
-        try:
-            result = await asyncio.wait_for(
+
+        async def _attempt_report_render() -> str:
+            return await asyncio.wait_for(
                 self.html_render(html, {}, return_url=True, options=options),
                 timeout=timeout,
             )
+
+        started = time.perf_counter()
+        try:
+            try:
+                result = await _attempt_report_render()
+            except Exception as first_exc:
+                # Same one-shot retry as the status card; reports are always
+                # scheduled, so use the longer wait (v2.20.20).
+                logger.warning(
+                    "T2I 日报渲染失败，%.0f 秒后重试一次: %s",
+                    T2I_RETRY_DELAY_SCHEDULED,
+                    first_exc,
+                )
+                await asyncio.sleep(T2I_RETRY_DELAY_SCHEDULED)
+                started = time.perf_counter()
+                result = await _attempt_report_render()
         except Exception:
             self._diag.update(
                 {
@@ -1150,6 +1195,12 @@ class StatusCardPlugin(Star):
                     else:
                         receipt_state = "失败"
                     detail = f"retcode={retcode}"
+                    if receipt.get("via") == "framework":
+                        # The direct OneBot send was rejected but the
+                        # framework path delivered it; printing the direct
+                        # retcode next to "成功" read like a contradiction
+                        # (v2.20.20).
+                        detail = "经框架发送"
                     if message_id is not None:
                         detail += f"，message_id={message_id}"
                     # 打码：诊断命令发在群里，完整 UMO 会对全部群成员可见

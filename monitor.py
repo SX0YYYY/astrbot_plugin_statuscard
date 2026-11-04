@@ -71,7 +71,13 @@ _CONFIG_ERROR_HINTS = (
     # ``systemctl`` reports "Unit x.service not found." / "Failed to get
     # properties" for a wrong unit name; without these the monitor raised a
     # fake outage every cooldown forever.
-    "not found",
+    #
+    # The bare "not found" was too wide: any service whose own stderr said
+    # "... not found in /etc/app.conf" was classified as a configuration
+    # error and never alerted. systemctl terminates that sentence with a
+    # period, so anchor on it; the "could not be found" form is covered by
+    # the hint above (v2.20.20).
+    " not found.",
     "failed to get properties",
     # A URL without a scheme ("internal:8080/health") and an unresolvable
     # host are configuration typos, not outages. Reporting them as faults
@@ -569,6 +575,11 @@ class ServiceMonitor:
                     "不会探测也不会告警；请在配置页填写推送目标"
                 )
                 self._targets_warned = True
+            # Still record that a round ran: the dashboard shows ``last_run``
+            # as "when the monitor last checked", and leaving the old value
+            # made a silently disabled monitor look fresh (v2.20.20).
+            with self.state.section("monitors") as monitors:
+                monitors["last_run"] = time.time()
             return
         # Dozens of targets used to be probed at once; a hung docker daemon or
         # a slow endpoint then produced a burst of subprocesses/connections.
@@ -1205,6 +1216,14 @@ class ServiceMonitor:
             st["last_checked"] = now
             st["last_ok"] = now
             st["last_error"] = ""
+            # A fault that began inside the maintenance window and cleared
+            # BEFORE reaching the threshold left its start in ``since``. The
+            # next real outage then inherited that stale start and its
+            # recovery notice reported "中断时长: 04:06:00" for a 2-minute
+            # fault (v2.20.20). The recovery branch above already resets it;
+            # this covers the never-alerted case.
+            if not alerting:
+                st["since"] = 0
             # The abandoned-summary marker belongs to the episode that just
             # ended. Keeping it made the NEXT failure bypass the cooldown and
             # push immediately, while the resource rules clear it here
@@ -1333,7 +1352,19 @@ class ServiceMonitor:
                         if self._aggregator is not None
                         else 0.0
                     )
-                    if awaiting and buffered and remaining > 0:
+                    # ``window_remaining`` hits zero the moment the window
+                    # closes, but the summary may still be buffered, in
+                    # flight, or waiting for its retry backoff. Posting the
+                    # recovery in that gap tells the user about an outage
+                    # whose alert summary has not arrived yet (v2.20.20,
+                    # same gap the resource side had; ``summary_pending`` is
+                    # the criterion the send path already uses).
+                    summary_pending = (
+                        self._aggregator.summary_pending("service")
+                        if self._aggregator is not None
+                        else False
+                    )
+                    if awaiting and buffered and (remaining > 0 or summary_pending):
                         # This item's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat; queue it so the summary is
@@ -1622,7 +1653,15 @@ class ServiceMonitor:
                     container,
                 )
             except Exception as exc:
-                return False, f"{exc.__class__.__name__}: {exc}", container
+                # A missing docker executable is a deployment/configuration
+                # problem, not an outage. Without the classifier the item
+                # stayed red forever and every report kept an "unresolved"
+                # row; the hint list already contained "[winerror 2]" but
+                # this branch never consulted it (v2.20.20).
+                detail = f"{exc.__class__.__name__}: {exc}"
+                if _looks_like_config_error(detail):
+                    detail = CONFIG_ERROR_PREFIX + detail
+                return False, detail, container
 
         if kind == "process":
             pattern = str(item.get("pattern") or "").strip().lower()
@@ -1705,7 +1744,12 @@ class ServiceMonitor:
                     unit,
                 )
             except Exception as exc:
-                return False, f"{exc.__class__.__name__}: {exc}", unit
+                # Same as the docker branch: a missing systemctl is a
+                # configuration problem, not an outage (v2.20.20).
+                detail = f"{exc.__class__.__name__}: {exc}"
+                if _looks_like_config_error(detail):
+                    detail = CONFIG_ERROR_PREFIX + detail
+                return False, detail, unit
 
         return False, f"未知监测类型: {kind}", "-"
 
@@ -1935,10 +1979,12 @@ class ServiceMonitor:
     def _on_summary_abandoned(self, items: list[tuple[str, str]]) -> None:
         """Withdraw "alerted" for monitors whose summary never arrived.
 
-        ``last_sent`` goes with it: it was recorded when the alert was
-        buffered ("the summary did reach the chat"), and keeping it would
-        silence a new episode inside the cooldown for half an hour after the
-        summary was given up on.
+        ``last_sent`` is KEPT: ``cooldown_retry`` needs it as the "this
+        episode was announced" reference. Clearing it (the docstring used to
+        claim it goes with the withdrawal) left the latched item with no path
+        back to a push, so the whole outage stayed silent (v2.20.8).
+        ``summary_abandoned`` marks the withdrawn state and lets the next
+        tick retry immediately.
         """
 
         parts = [summary_item_parts(item) for item in items]

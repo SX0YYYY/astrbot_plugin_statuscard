@@ -38,6 +38,7 @@ from .collectors import (
     resolve_targets,
     swap_stat,
 )
+from .i18n import tr
 from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
@@ -139,6 +140,27 @@ RANGE_SECONDS = {
 }
 
 
+def _normalize_range(raw: Any, default: str) -> str:
+    """Map a requested range to a supported key.
+
+    ``/history`` mapped "90d" to the closest window while ``/export`` fell
+    back to the 7-day default: the same link produced different windows on
+    the chart and in the CSV (v2.20.20).
+    """
+
+    key = str(raw or "").lower()
+    if key in RANGE_SECONDS:
+        return key
+    match = re.match(r"^(\d+)\s*([hd])$", key)
+    if match:
+        seconds = int(match.group(1)) * (86400 if match.group(2) == "d" else 3600)
+        return min(
+            RANGE_SECONDS,
+            key=lambda item: abs(RANGE_SECONDS[item] - seconds),
+        )
+    return default
+
+
 def _mask_umo(target: Any) -> str:
     """Thin wrapper over the shared :func:."""
 
@@ -157,7 +179,10 @@ class PageApi:
         self.plugin = plugin
         self._reports_cache: tuple[float, dict[str, Any], tuple] | None = None
         self._reports_cache_seconds = 60.0
-        self._reports_build_inflight = False
+        # One entry per cache key currently being built: a plain boolean was
+        # cleared by whichever concurrent build finished first, so two
+        # different days being opened at once each built again (v2.20.20).
+        self._reports_build_inflight: set[tuple] = set()
         # Per-kind verify cooldown: the dashboard buttons used to be able to
         # send a real message every click, so a stuck retry loop in the page
         # could spam the chat (v2.20.5).
@@ -513,10 +538,8 @@ class PageApi:
                 }
             )
 
-        # status() runs a SQLite read (latest report run); like the disk and
-        # provider queries below it must not run on the event loop -- a busy
-        # store lock stalled every message for up to 5 seconds.
-        daily_status = await asyncio.to_thread(plugin.daily_report.status)
+        # The overview used to run one more SQLite read (daily_report.status)
+        # and ship a field the page never rendered; both are gone (v2.20.20).
         try:
             provider_quality = await asyncio.to_thread(today_overview, plugin.config)
         except Exception:
@@ -586,12 +609,6 @@ class PageApi:
                         ),
                     )
                 ),
-                "daily_report": {
-                    "enabled": daily_status.get("enabled"),
-                    "time": daily_status.get("time"),
-                    "sections": daily_status.get("sections"),
-                    "last_run": daily_status.get("last_run"),
-                },
                 "provider_quality": provider_quality,
                 "audit": self._mask_audit(plugin.audit_issues()),
             }
@@ -678,10 +695,10 @@ class PageApi:
                     }
                 )
             self._verify_last[kind] = now
-            text = (
-                "🔔 状态卡验证消息：这是从看板触发的推送目标验证，"
-                "收到即说明该目标配置正确。"
-            )
+            # The message lands in QQ, so it follows display.language like
+            # every other chat text; it used to be hard-coded Chinese
+            # (v2.20.20).
+            text = tr(plugin.config, "verify_targets_message")
             result = await plugin.send_text(merged, text, source="verify_targets")
             per_target = []
             for target in merged:
@@ -782,6 +799,7 @@ class PageApi:
                         "kind": kind,
                         "listening": False,
                         "message": "Komari Webhook 未启用",
+                        "message_code": "webhook_disabled",
                     }
                 )
             running = getattr(plugin.alerts, "_webhook_runner", None) is not None
@@ -792,6 +810,7 @@ class PageApi:
                         "kind": kind,
                         "listening": False,
                         "message": "Webhook 未在监听（可能启动失败，详见日志）",
+                        "message_code": "webhook_not_running",
                     }
                 )
             self._verify_last[kind] = now
@@ -888,11 +907,10 @@ class PageApi:
         """
 
         kind = str(_query_value("kind", "resources")).lower()
-        range_key = str(_query_value("range", "7d")).lower()
-        if range_key not in RANGE_SECONDS:
-            # /history already normalises; the export echoed the raw value
-            # while silently using the 7-day window.
-            range_key = "7d"
+        # Same normalisation as /history: the export used to fall back to the
+        # 7-day default, so "90d" meant one window on the chart and another
+        # in the CSV (v2.20.20).
+        range_key = _normalize_range(_query_value("range", "7d"), "7d")
         gate = self._db_unavailable_payload()
         if gate:
             return jsonify({**gate, "kind": kind, "range": range_key, "rows": []})
@@ -1006,23 +1024,11 @@ class PageApi:
     # ------------------------------------------------------------------
 
     async def history(self):
-        key = str(_query_value("range", "24h")).lower()
         # Echo the range that was actually used, never an unvalidated input.
-        if key not in RANGE_SECONDS:
-            # An unsupported but meaningful value ("90d") used to fall back to
-            # the *shortest* window; map it to the closest supported one so a
-            # hand-written link shows roughly what it asked for (v2.20.5).
-            match = re.match(r"^(\d+)\s*([hd])$", key)
-            if match:
-                seconds = int(match.group(1)) * (
-                    86400 if match.group(2) == "d" else 3600
-                )
-                key = min(
-                    RANGE_SECONDS,
-                    key=lambda item: abs(RANGE_SECONDS[item] - seconds),
-                )
-            else:
-                key = "24h"
+        # An unsupported but meaningful value ("90d") maps to the closest
+        # supported window so a hand-written link shows roughly what it asked
+        # for (v2.20.5); /export shares the same helper (v2.20.20).
+        key = _normalize_range(_query_value("range", "24h"), "24h")
         gate = self._db_unavailable_payload()
         if gate:
             return jsonify(
@@ -1321,7 +1327,11 @@ class PageApi:
             # later request would receive, so a caller mutating it in place
             # would corrupt all subsequent responses.
             return jsonify(copy.deepcopy(cached[1]))
-        if self._reports_build_inflight and cached and cached[2] == cache_key:
+        if (
+            cache_key in self._reports_build_inflight
+            and cached
+            and cached[2] == cache_key
+        ):
             # A concurrent miss is already building the same payload; serve
             # the stale copy instead of building it twice (v2.20.0). Mark it
             # so the page says "still refreshing" instead of claiming the
@@ -1330,13 +1340,13 @@ class PageApi:
             if isinstance(stale, dict):
                 stale["stale"] = True
             return jsonify(stale)
-        self._reports_build_inflight = True
+        self._reports_build_inflight.add(cache_key)
         try:
             return await self._build_reports_payload(
                 now_ts, cache_key, sections_cfg, fresh, day_arg
             )
         finally:
-            self._reports_build_inflight = False
+            self._reports_build_inflight.discard(cache_key)
 
     async def _build_reports_payload(
         self,

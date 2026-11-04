@@ -29,9 +29,12 @@ HIDDEN_NUMBER = "--"
 # hostname rule is on. Plain words and codes ("HTTP 500", "ReadTimeout") stay
 # readable: hiding every non-empty error text made the monitor cards useless.
 _ADDRESS_RE = re.compile(
-    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
+    # host:port must come first: with the IPv4 branch ahead of it,
+    # "10.1.2.3:8080" matched only the address and left the port dangling
+    # in the masked text ("（已隐藏地址）:8080", v2.20.20).
+    r"(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
+    r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
     r"|https?://[^\s'\"）)]+"  # URL
-    r"|(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
     r"|\b(?=[0-9a-f:]*[a-f])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,}\b",  # IPv6
     re.IGNORECASE,
 )

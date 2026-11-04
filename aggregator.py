@@ -363,10 +363,10 @@ class AlertAggregator:
             lines.append(f"… 另有 {extra} 项未列出")
         if dropped:
             # These were trimmed off the buffer and withdrawn as "never
-            # delivered"; counting them under "已合并推送" claimed they had
-            # been announced (v2.20.8).
+            # delivered"; they are retried as individual alerts on the next
+            # sample, so "未能送达" was wrong (v2.20.20).
             lines.append(
-                f"另有 {dropped} 项因缓冲溢出未能送达（仍可在日报事件里查看）。"
+                f"另有 {dropped} 项未合并，将单独补发（详细信息可在日报事件里查看）。"
             )
         lines.append(
             f"以上 {total} 项在 {self.window_seconds} 秒聚合窗口内集中出现，"

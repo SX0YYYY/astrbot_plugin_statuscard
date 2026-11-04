@@ -126,6 +126,20 @@ class ReportStore:
                 # a real table so a missing schema surfaces here; the next
                 # ensure_ready() then rebuilds it.
                 con.execute("SELECT MAX(ts) FROM resource_samples").fetchone()
+                # A read-only mount (or a full disk) passes the SELECT above
+                # but rejects every write: the sampler kept "succeeding" while
+                # no row landed. BEGIN IMMEDIATE takes the write lock without
+                # changing anything; a read-only database raises right here
+                # (v2.20.20).
+                try:
+                    con.execute("BEGIN IMMEDIATE")
+                    con.rollback()
+                except sqlite3.Error:
+                    logger.warning(
+                        "日报数据库可读但不可写（只读挂载或磁盘已满），本次报告将跳过"
+                    )
+                    self.available = False
+                    return False
             return True
         except Exception:
             logger.exception("日报数据库探针失败")
@@ -886,14 +900,37 @@ class ReportStore:
         )
         return dict(zip(keys, rows[0]))
 
-    def list_snapshots(self, limit: int = 30) -> list[dict[str, Any]]:
-        rows = self._query(
-            """
-            SELECT day, friends, groups, members, recv_total, complete, captured_at
-            FROM daily_snapshots ORDER BY day DESC LIMIT ?
-            """,
-            (max(1, min(365, limit)),),
+    def list_snapshots(
+        self,
+        limit: int = 30,
+        since_day: str | None = None,
+        until_day: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Snapshots, newest first.
+
+        ``since_day``/``until_day`` bound the window. ``LIMIT`` alone always
+        returned the newest N rows, so a report older than N days found no
+        snapshots and the QQ section claimed "暂无数据" while the rows sat in
+        the table (v2.20.20).
+        """
+
+        sql = (
+            "SELECT day, friends, groups, members, recv_total, complete, "
+            "captured_at FROM daily_snapshots"
         )
+        where: list[str] = []
+        params: list[Any] = []
+        if since_day:
+            where.append("day >= ?")
+            params.append(str(since_day))
+        if until_day:
+            where.append("day <= ?")
+            params.append(str(until_day))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY day DESC LIMIT ?"
+        params.append(max(1, min(365, limit)))
+        rows = self._query(sql, tuple(params))
         keys = (
             "day",
             "friends",

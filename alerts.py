@@ -286,10 +286,13 @@ class AlertEngine:
                 pending = summary.get("pending")
                 if isinstance(pending, dict):
                     # A queued image is only worth sending while it is
-                    # still today's picture. Six hours is the outer bound of
-                    # the in-loop retries (10 minutes apart, four attempts),
-                    # so a backlog older than that would push a stale image
-                    # into the chat hours after the slot (v2.20.12).
+                    # still today's picture. Six hours is the outer bound:
+                    # the in-loop retries (three attempts ten minutes
+                    # apart) are followed by the loop's own pending retry
+                    # every ten minutes up to this limit, so a sustained
+                    # failure re-renders ~36 times and then drops the
+                    # backlog instead of pushing a stale image hours after
+                    # the slot (v2.20.20, comment corrected to match).
                     queued_at = _safe_float(pending.get("queued_at"))
                     if queued_at and time.time() - queued_at > 6 * 3600:
                         logger.warning(
@@ -647,20 +650,23 @@ class AlertEngine:
             for st in rules.values():
                 if not isinstance(st, dict):
                     continue
-                label = str(st.get("label") or "")
-                if label not in labels:
-                    continue
-                # Two rules can share a name. Prefer the exact rule key
-                # carried by the aggregation batch; older/legacy batches have
-                # no key, so fall back to the buffered (name, reason).
-                # Without this one rule's delivered summary cleared the other
-                # rule's queued recovery, which then overtook its own
-                # still-pending summary (v2.20.19 reverse audit).
+                # Match by the exact rule key FIRST: the batch label may be a
+                # MASKED name (the hostname rule rewrites an address-shaped
+                # disk path to "已隐藏") while the state keeps the original
+                # label, so filtering by label before the key made every
+                # masked rule miss its own summary (v2.20.20 reverse audit).
+                # Batches without keys (legacy) still match by
+                # (name, reason), and a rule with no key keeps that fallback.
                 key = str(st.get("summary_key") or "")
-                if keys and key:
-                    if key not in keys:
+                matched_by_key = bool(keys and key and key in keys)
+                if keys and key and not matched_by_key:
+                    # The batch carries keys and this rule owns a different
+                    # one: not its summary.
+                    continue
+                if not matched_by_key:
+                    label = str(st.get("label") or "")
+                    if label not in labels:
                         continue
-                else:
                     reason = str(st.get("summary_reason") or "")
                     if reason and (label, reason) not in pairs:
                         continue
@@ -712,14 +718,18 @@ class AlertEngine:
             for st in rules.values():
                 if not isinstance(st, dict):
                     continue
-                label = str(st.get("label") or "")
-                if not label or label not in labels:
-                    continue
+                # Key first, label only as the legacy fallback: the batch
+                # label may be masked while the state keeps the original name
+                # (v2.20.20 reverse audit, same shape as the delivered
+                # callback above).
                 key = str(st.get("summary_key") or "")
-                if keys and key:
-                    if key not in keys:
+                matched_by_key = bool(keys and key and key in keys)
+                if keys and key and not matched_by_key:
+                    continue
+                if not matched_by_key:
+                    label = str(st.get("label") or "")
+                    if not label or label not in labels:
                         continue
-                else:
                     reason = str(st.get("summary_reason") or "")
                     if reason and (label, reason) not in pairs:
                         # A different rule with the same name owns this summary.
@@ -1348,8 +1358,9 @@ class AlertEngine:
                         # permanent silence for the rest of the outage
                         # (v2.20.12).
                         st.pop("recovery_awaits_summary", None)
+                    display_name = self._display_name(name)
                     text = (
-                        f"⚠️ 系统告警 · {name}\n"
+                        f"⚠️ 系统告警 · {display_name}\n"
                         "──────────────\n"
                         f"当前: {value_text}（阈值 {threshold:.1f}{unit}）\n"
                         f"主机: {self._hostname()}\n"
@@ -1370,7 +1381,7 @@ class AlertEngine:
                     is_retry = cooldown_retry or _safe_int(st.get("retry_count")) > 0
                     reason_text = f"{value_text}（阈值 {threshold:.1f}{unit}）"
                     result = await self._push_alert(
-                        name,
+                        display_name,
                         reason_text,
                         text,
                         retry=is_retry,
@@ -1644,7 +1655,7 @@ class AlertEngine:
                 awaiting = st.pop("awaiting_summary", False)
                 if self.recover_notify and not stale and notified:
                     text = (
-                        f"✅ 已恢复 · {name}\n"
+                        f"✅ 已恢复 · {self._display_name(name)}\n"
                         "──────────────\n"
                         f"当前: {value_text}\n"
                         f"主机: {self._hostname()}\n"
@@ -1658,7 +1669,19 @@ class AlertEngine:
                         if self._aggregator is not None
                         else 0.0
                     )
-                    if awaiting and buffered and remaining > 0:
+                    # ``window_remaining`` reaches zero when the window
+                    # closes, but the summary may still be buffered, in
+                    # flight, or waiting for its retry backoff. Posting the
+                    # recovery in that gap beats the summary to the chat --
+                    # the user sees a recovery for an outage they were never
+                    # told about (v2.20.20; ``summary_pending`` is what the
+                    # send path already waits on).
+                    summary_pending = (
+                        self._aggregator.summary_pending("resource")
+                        if self._aggregator is not None
+                        else False
+                    )
+                    if awaiting and buffered and (remaining > 0 or summary_pending):
                         # This rule's alert is still inside the aggregation
                         # window. Posting the recovery now would let it beat
                         # the summary to the chat (恢复先于告警到达，看起来像
@@ -2194,6 +2217,19 @@ class AlertEngine:
                         self.cooldown,
                     )
                 return
+            had_pending_recovery = bool(st.pop("pending_recovery", None))
+            if had_pending_recovery:
+                # Fold the previous episode's undelivered recovery into this
+                # alert, exactly like the resource rules. Keeping it queued
+                # and retrying it on the next online sample produced TWO
+                # "已恢复" messages in one sample: the old episode's notice
+                # followed by the new one (v2.20.20).
+                for stale_key in (
+                    "recovery_attempt",
+                    "recovery_next_attempt",
+                    "recovery_retry_count",
+                ):
+                    st.pop(stale_key, None)
             text = (
                 "🔴 Bot 连接离线\n"
                 "──────────────\n"
@@ -2201,6 +2237,8 @@ class AlertEngine:
                 f"时间: {_now_text(self.config)}\n"
                 "若本条未能送达，将在连接恢复后补发。"
             )
+            if had_pending_recovery:
+                text += "\n（上一次的恢复通知未送达，已并入本条）"
             result = await self._send(text, kind="offline")
             delivered = self._delivered(result)
             st["pending_alert"] = not delivered
@@ -2588,6 +2626,20 @@ class AlertEngine:
         except Exception:
             return os.environ.get("COMPUTERNAME", "unknown")
 
+    def _display_name(self, name: str) -> str:
+        """Mask a rule name that is itself an address or URL.
+
+        The resource rules announced the disk path as-is, so with the
+        hostname rule on a NAS mount ("//192.168.1.5/share") reached the
+        alert, the recovery notice and the aggregation summary unchanged.
+        The card, dashboard and report already used ``mask_name`` (v2.20.20).
+        """
+
+        try:
+            return Redactor(read_rules(self.config, "display.redact")).mask_name(name)
+        except Exception:
+            return str(name or "")
+
     # ------------------------------------------------------------------
     # daily status image schedule
     # ------------------------------------------------------------------
@@ -2730,6 +2782,12 @@ class AlertEngine:
         today = now_in_timezone(self.config).strftime("%Y-%m-%d")
         if self._daily_last_sent_day == today:
             logger.info("每日定时状态图 %s 已发送，跳过重复发送", today)
+            # A leftover pending record for a day that already went out
+            # (sending marks the day and clears the record in two separate
+            # saves, so a crash between them -- or a .bak restore -- can
+            # revive it) made the loop schedule the same day every second:
+            # ~3600 log lines an hour until the six-hour expiry (v2.20.20).
+            self._clear_daily_pending()
             return True
         targets = self._targets_for("daily_image")
         if not targets:
@@ -2895,24 +2953,29 @@ class AlertEngine:
                 return web.json_response({"status": "ok", "duplicate": True})
             self._webhook_inflight.add(body_key)
             try:
-                data = json.loads(raw.decode("utf-8"))
-            except Exception:
-                data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
-            text = self._format_komari(
-                data, Redactor(read_rules(self.config, "display.redact"))
-            )
-            result = await self._send(text, source="webhook", kind="service")
-            if not self._delivered(result):
-                self._webhook_inflight.discard(body_key)
-                return web.json_response(
-                    {"status": "error", "message": "delivery failed"},
-                    status=503,
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    data = {"message": raw.decode("utf-8", errors="replace")[:4000]}
+                text = self._format_komari(
+                    data, Redactor(read_rules(self.config, "display.redact"))
                 )
-            # Only remember a body that really reached the chat; a failed send
-            # must stay retryable.
-            self._webhook_last = (body_key, time.time())
-            self._webhook_inflight.discard(body_key)
-            return web.json_response({"status": "ok"})
+                result = await self._send(text, source="webhook", kind="service")
+                if not self._delivered(result):
+                    return web.json_response(
+                        {"status": "error", "message": "delivery failed"},
+                        status=503,
+                    )
+                # Only remember a body that really reached the chat; a failed
+                # send must stay retryable.
+                self._webhook_last = (body_key, time.time())
+                return web.json_response({"status": "ok"})
+            finally:
+                # An exception in _format_komari/_send used to leave the key
+                # in the in-flight set forever: every later retry of the same
+                # body answered {"duplicate": true} without sending anything
+                # (v2.20.20).
+                self._webhook_inflight.discard(body_key)
 
         app.router.add_post(path, handle)
         runner = web.AppRunner(app)

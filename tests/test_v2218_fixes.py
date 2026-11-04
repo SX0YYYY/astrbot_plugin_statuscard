@@ -182,7 +182,9 @@ def test_monitor_without_targets_does_not_probe_or_record() -> None:
     monitor._probe = probe  # type: ignore[assignment]
     asyncio.run(monitor.check_all())
     assert probed == []
-    assert (monitor.state.get("monitors", {}) or {}).get("last_run") is None
+    # v2.20.20: the round still stamps last_run so the dashboard does not
+    # show a silently disabled monitor as fresh; nothing is probed.
+    assert isinstance((monitor.state.get("monitors", {}) or {}).get("last_run"), float)
 
     issues = run_audit(_monitor_config([item], targets=[]))
     message = next(

@@ -873,6 +873,12 @@ class DailyReportBuilder:
         # Sorted by time: the query returns newest-first, so a recovery was
         # popped before its own alert was seen again and the stale start time
         # survived into the window (a 30-second blip rendered as 16 hours).
+        #
+        # Rows already stamped by ``close_all`` are remembered here: when a
+        # fault outlives the previous day, its alert row is outside
+        # ``events`` but carries THIS recovery's timestamp, and the recovery
+        # branch below needs that row to recover the start (v2.20.20).
+        outside_stamped: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
         for alert in sorted(
             self.store.list_events_range(
                 window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
@@ -899,6 +905,9 @@ class DailyReportBuilder:
                 # CLOSED episode: its own recovery has been accounted for,
                 # so it must not become the open episode (v2.20.12).
                 if alert.get("resolved_ts"):
+                    resolved = safe_int(alert.get("resolved_ts") or 0)
+                    if resolved:
+                        outside_stamped.setdefault(key, []).append((stamp, resolved))
                     open_episode.pop(key, None)
                     continue
                 current = open_episode.get(key)
@@ -969,7 +978,22 @@ class DailyReportBuilder:
             elif status == "recovery":
                 current = open_episode.pop(key, None)
                 if current is None:
-                    continue
+                    # The episode began before the loaded events (the window
+                    # plus the previous day): its alert row is outside, but
+                    # ``close_all`` stamped it with THIS recovery's
+                    # timestamp. Take the NEAREST such row as the start so
+                    # the recovery day keeps its count and duration instead
+                    # of showing "恢复 --" (v2.20.20). Nearest (max ts)
+                    # avoids reviving an orphan from days ago -- that used to
+                    # turn a 90-second outage into "3天22:27:29" (v2.20.12).
+                    candidates = [
+                        ts
+                        for ts, resolved in outside_stamped.get(key, [])
+                        if resolved == stamp
+                    ]
+                    if not candidates:
+                        continue
+                    current = (max(candidates), 0)
                 start = current[0]
                 # Every row of that episode now ends here.
                 for member, member_episode in list(episode_of.items()):
@@ -1361,9 +1385,18 @@ class DailyReportBuilder:
                 "charts": {},
                 "note": "",
             }
+        # Bound the query to the window instead of taking the newest N rows:
+        # a report older than ``history_days`` found no snapshots at all and
+        # the QQ section claimed "暂无数据" while the rows were in the table
+        # (v2.20.20). The window ends one day past ``day`` because the
+        # receive delta needs snapshot(D+1).
         snapshots = {
             str(item.get("day")): item
-            for item in self.store.list_snapshots(history_days + 2)
+            for item in self.store.list_snapshots(
+                history_days + 2,
+                since_day=(day - timedelta(days=history_days)).isoformat(),
+                until_day=(day + timedelta(days=1)).isoformat(),
+            )
         }
         days = [day - timedelta(days=i) for i in range(history_days - 1, -1, -1)]
         labels = [item.strftime("%m-%d") for item in days]

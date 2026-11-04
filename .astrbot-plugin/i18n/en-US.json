@@ -248,7 +248,10 @@
         "monitor_kind_docker": "Docker",
         "monitor_kind_process": "Process",
         "monitor_kind_systemd": "systemd",
-        "report_sections_invalid": "No valid report sections configured; check the selections on the config page."
+        "report_sections_invalid": "No valid report sections configured; check the selections on the config page.",
+        "chart_aria_label": "Resource trend chart (use the arrow keys to inspect values)",
+        "webhook_disabled": "Komari Webhook is not enabled",
+        "webhook_not_running": "Webhook is not listening (it may have failed to start; see the log)"
       }
     }
   }

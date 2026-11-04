@@ -266,6 +266,17 @@ class DeliveryService:
                     result.failed_targets.remove(target)
                 if target in result.rejected_targets:
                     result.rejected_targets.remove(target)
+                # Keep the stored receipt in sync: the direct path already
+                # stored "ok": false, and the diagnostics command printed a
+                # failed OneBot receipt right next to a successful delivery
+                # verdict (v2.20.20).
+                previous = result.receipts.get(target)
+                if isinstance(previous, dict):
+                    result.receipts[target] = {
+                        **previous,
+                        "ok": True,
+                        "via": "framework",
+                    }
             else:
                 if target not in result.failed_targets:
                     result.failed_targets.append(target)

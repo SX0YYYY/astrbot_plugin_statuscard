@@ -276,32 +276,40 @@ class ReportCollector:
             except Exception:
                 load1 = None
         net = self.state.get("net", {}) or {}
+        if not isinstance(net, dict):
+            net = {}
         disk_io = self.state.get("disk_io", {}) or {}
+        if not isinstance(disk_io, dict):
+            disk_io = {}
+        # Dirty state values (a string rate, a non-dict section) used to raise
+        # here on every tick: the sample was dropped, and with a stuck sampler
+        # or an unwritable state the trend stayed permanently empty. The card
+        # path already used safe_float for the same fields (v2.20.20).
         await asyncio.to_thread(
             self.store.add_resource,
             int(now),
-            float(cpu),
-            float(mem.percent),
-            float(swap.percent),
+            safe_float(cpu),
+            safe_float(getattr(mem, "percent", 0.0)),
+            safe_float(getattr(swap, "percent", 0.0)),
             disk_pct,
             load1,
-            float(net.get("up_rate") or 0.0),
-            float(net.get("down_rate") or 0.0),
-            float(disk_io.get("read_rate") or 0.0),
-            float(disk_io.get("write_rate") or 0.0),
+            safe_float(net.get("up_rate") or 0.0),
+            safe_float(net.get("down_rate") or 0.0),
+            safe_float(disk_io.get("read_rate") or 0.0),
+            safe_float(disk_io.get("write_rate") or 0.0),
         )
         self._cache_resource_point(
             now,
             {
-                "cpu": float(cpu),
-                "ram": float(mem.percent),
-                "swap": float(swap.percent),
+                "cpu": safe_float(cpu),
+                "ram": safe_float(getattr(mem, "percent", 0.0)),
+                "swap": safe_float(getattr(swap, "percent", 0.0)),
                 "disk": disk_pct,
                 "load1": load1,
-                "net_up": float(net.get("up_rate") or 0.0),
-                "net_down": float(net.get("down_rate") or 0.0),
-                "disk_read": float(disk_io.get("read_rate") or 0.0),
-                "disk_write": float(disk_io.get("write_rate") or 0.0),
+                "net_up": safe_float(net.get("up_rate") or 0.0),
+                "net_down": safe_float(net.get("down_rate") or 0.0),
+                "disk_read": safe_float(disk_io.get("read_rate") or 0.0),
+                "disk_write": safe_float(disk_io.get("write_rate") or 0.0),
             },
         )
 
@@ -536,10 +544,9 @@ class DailyReporter:
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._last_attempt_day: str | None = None
-        # The calendar day of the last attempt. ``_last_attempt_day`` names
-        # the *report* day, which is yesterday for a scheduled run and can be
-        # an older date for a retry; the catch-up guard needs to know whether
-        # *today* was already attempted.
+        # The calendar day of the last attempt, kept for diagnostics only.
+        # ``_last_attempt_day`` (the report day) is what the catch-up guard
+        # actually reads; the comment used to claim otherwise (v2.20.20).
         self._last_attempt_wall_day: str | None = None
         # A day whose report was given up must not restart the retry cycle.
         # Without this marker the daily loop re-armed the catch-up after
@@ -1261,6 +1268,10 @@ class DailyReporter:
                     continue
                 await asyncio.sleep(wait)
                 if not self._enabled():
+                    # A config change/reload can cancel the backfill after
+                    # the inflight flag was set; leaving it True made the
+                    # NEXT normal send take the backfill path (v2.20.20).
+                    self._daily_backfill_inflight = False
                     continue
                 if (
                     self._time_text() != time_text
@@ -1270,6 +1281,7 @@ class DailyReporter:
                     )
                     != tz_name
                 ):
+                    self._daily_backfill_inflight = False
                     continue
                 # A fresh scheduled run starts a new attempt series, so the
                 # retry counter of a previous evening must not carry over.
@@ -1287,6 +1299,7 @@ class DailyReporter:
                 raise
             except Exception:
                 logger.exception("日报定时任务失败")
+                self._daily_backfill_inflight = False
                 await asyncio.sleep(60)
 
     # ------------------------------------------------------------------
@@ -1629,7 +1642,10 @@ class DailyReporter:
         self._save_delivery_state()
         weekly_sections = self._weekly_sections()
         if weekly_sections is not None and not weekly_sections:
-            logger.warning("周报内容为空（daily_report.weekly_sections=[]），跳过发送")
+            logger.warning(
+                "周报内容为空（daily_report.weekly_sections 为空且回退后的"
+                "daily_report.sections 也没有有效项），跳过发送"
+            )
             week_key = self._week_key(self._today())
             if self._weekly_empty_recorded_week != week_key:
                 # Record the misconfiguration once per week, not once per
@@ -1866,6 +1882,11 @@ class DailyReporter:
         """Tell the operator at most once per day that report.db is unusable."""
 
         key = "weekly_db_unavailable" if weekly else "report_db_unavailable"
+        # Separate "already told" keys: a shared one let the daily notice
+        # suppress the weekly one on the same day (v2.20.20).
+        notice_key = (
+            "report_store_notice_weekly" if weekly else "report_store_notice_daily"
+        )
 
         if not targets:
             return
@@ -1873,7 +1894,7 @@ class DailyReporter:
         state = getattr(self.plugin, "state", None)
         if state is not None:
             try:
-                sent = state.get("report_store_notice", {}) or {}
+                sent = state.get(notice_key, {}) or {}
                 if isinstance(sent, dict) and sent.get("day") == today:
                     return
             except Exception:
@@ -1888,7 +1909,7 @@ class DailyReporter:
             logger.debug("发送日报数据库不可用提示失败", exc_info=True)
         if state is not None:
             try:
-                state.set("report_store_notice", {"day": today, "ts": time.time()})
+                state.set(notice_key, {"day": today, "ts": time.time()})
                 state.save()
             except Exception:
                 logger.debug("记录日报数据库不可用提示失败", exc_info=True)
@@ -2441,14 +2462,11 @@ class DailyReporter:
         # report 24 times in six hours (v2.20.17 audit). The backfill only
         # leaves the report in the recovery queue instead.
         backfill = bool(getattr(self, "_daily_backfill_inflight", False))
-        # Two separate markers, because they answer different questions:
-        # ``_last_attempt_day`` = "which report day was last attempted" and
-        # ``_last_attempt_wall_day`` = "on which calendar day was the last
-        # attempt made". The catch-up guard needs the *calendar* day: using
-        # the report day let a cross-midnight retry mark *yesterday* as
-        # attempted, which re-armed the catch-up and made the report loop
-        # re-send all night (a give-up notice was followed by another report
-        # one second later).
+        # Two markers, but only one is load-bearing:
+        # ``_last_attempt_day`` = "which report day was last attempted" (the
+        # catch-up guard reads this) and ``_last_attempt_wall_day`` = "on
+        # which calendar day" (recorded for diagnostics; nothing reads it).
+        # The wall-clock marker is kept so old state files stay valid.
         self._last_attempt_day = day or self._default_report_day()
         self._last_attempt_wall_day = self._today()
         self._save_delivery_state()
@@ -2720,6 +2738,15 @@ class DailyReporter:
             # schema before ensure_ready() rebuilds an empty database.
             return False, tr(self.config, "report_db_unavailable_preview")
         span = max(1, min(30, int(span_days or 1)))
+        if span > 1 and not day:
+            # The weekly preview used "yesterday" while the scheduled report
+            # covers the Saturday before the send slot: previewing on a
+            # Monday showed 10-26~11-01, but the Sunday report had covered
+            # 10-25~10-31 (v2.20.20). Derive the same report day the loop
+            # uses.
+            slot = self._weekly_slot_before(now_in_timezone(self.config))
+            if slot is not None:
+                day = (slot - timedelta(days=1)).date().isoformat()
         if self._report_window_lost(day, span):
             # The preview would be a page of "--" for data that a rebuild
             # destroyed; say why instead of pretending the range was empty.

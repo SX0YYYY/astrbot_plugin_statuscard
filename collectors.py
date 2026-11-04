@@ -353,7 +353,7 @@ def _short_disk_error(value: Any) -> str | None:
     # be reported as a read timeout.
     if "permission denied" in low or "errno 13" in low:
         return "无权限读取"
-    if "no such file" in low or "errno 2" in low:
+    if "no such file" in low or "errno 2]" in low:
         return "挂载点不存在"
     if "input/output error" in low or "errno 5" in low:
         return "I/O 错误"
@@ -876,15 +876,27 @@ def process_info(top_n: int = 8) -> dict[str, Any]:
             previous = dict(_PROC_CPU_PREV)
             _PROC_CPU_READY = True
 
-    for p in psutil.process_iter(
-        attrs=[
-            "pid",
-            "name",
-            "create_time",
-            "memory_info",
-            "status",
-        ]
-    ):
+    try:
+        # Materialize under try: psutil raises while iterating, not when the
+        # iterator is created. A restricted /proc (hidepid, seccomp) used to
+        # bubble out of collect_all and degraded the whole card to a text
+        # summary; an empty process table is the better failure mode
+        # (v2.20.20).
+        process_rows = list(
+            psutil.process_iter(
+                attrs=[
+                    "pid",
+                    "name",
+                    "create_time",
+                    "memory_info",
+                    "status",
+                ]
+            )
+        )
+    except Exception as exc:
+        logger.warning("进程列表读取失败，本次进程信息为空: %s", exc)
+        process_rows = []
+    for p in process_rows:
         try:
             info = p.info
             status = str(info.get("status") or "").lower()
@@ -1662,7 +1674,12 @@ def resolve_targets(config: Any, kind: str) -> list[str] | None:
         kinds = cfg_get(rule, "kinds", []) or []
         if isinstance(kinds, str):
             kinds = [kinds]
-        if kind in kinds:
+        # Normalize before comparing: audit.py strips (and validates after
+        # stripping), so a hand-edited " resource" passed the config check
+        # but matched nothing here and the rule silently never fired
+        # (v2.20.20).
+        normalized = {str(one).strip().lower() for one in kinds}
+        if str(kind).strip().lower() in normalized:
             active.append(rule)
     if not active:
         return None
@@ -1897,6 +1914,7 @@ def build_network_chart(
     points: list[tuple[float, float, float]] = []
     if isinstance(history, list):
         previous_ts: float | None = None
+        chart_now = time.time()
         for item in history[-60:]:
             try:
                 if isinstance(item, (list, tuple)) and len(item) >= 3:
@@ -1907,6 +1925,12 @@ def build_network_chart(
                         math.isfinite(ts) and math.isfinite(up) and math.isfinite(down)
                     ):
                         raise ValueError("non-finite sample")
+                    # A finite but absurd timestamp (1e30 from a corrupted
+                    # state write) stretched the axis until every real point
+                    # collapsed into a vertical line at the left edge; the
+                    # x labels already rendered "--:--" for it (v2.20.20).
+                    if ts < chart_now - 366 * 86400 or ts > chart_now + 86400:
+                        raise ValueError("timestamp out of range")
                     if previous_ts is not None and ts <= previous_ts:
                         # A clock step back used to leave an earlier point at
                         # the end of the series, collapsing the time axis.

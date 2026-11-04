@@ -182,7 +182,7 @@ def test_aggregator_dropped_items_are_disclosed_separately() -> None:
     # 4 buffered remain; 2 trimmed items are disclosed, not counted as sent.
     assert "4 项异常" in summary
     assert "另有 2 项未列出" in summary
-    assert "2 项因缓冲溢出未能送达" in summary
+    assert "2 项未合并，将单独补发" in summary
 
 
 def test_aggregator_new_window_survives_slow_summary() -> None:

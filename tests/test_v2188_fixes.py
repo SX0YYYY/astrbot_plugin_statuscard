@@ -122,8 +122,11 @@ def test_cfg_bool_accepts_numeric_flags() -> None:
 def test_network_chart_positions_by_time_and_breaks_area() -> None:
     # 60 samples so the "pad to one hour" branch does not kick in; a two hour
     # outage sits between sample 29 and 30.
-    history = [[1000.0 + 60 * index, 10.0, 5.0] for index in range(30)] + [
-        [1000.0 + 60 * 30 + 7200 + 60 * index, 10.0, 5.0] for index in range(30)
+    # Current clock: the chart drops samples outside a sane window now
+    # (v2.20.20), and the geometry assertions do not depend on the epoch.
+    base = time.time() - 6 * 3600
+    history = [[base + 60 * index, 10.0, 5.0] for index in range(30)] + [
+        [base + 60 * 30 + 7200 + 60 * index, 10.0, 5.0] for index in range(30)
     ]
     chart = collectors_module.build_network_chart(history, tz=TZ, interval=60)
     assert chart["empty"] is False

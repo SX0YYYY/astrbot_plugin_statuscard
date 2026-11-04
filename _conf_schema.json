@@ -1169,7 +1169,7 @@
                 "description": "进程名或命令行关键字",
                 "type": "string",
                 "default": "",
-                "hint": "例如 astrbot 或 python main.py。"
+                "hint": "例如 astrbot 或 python main.py（同时匹配进程名与完整命令行）。"
               },
               "enabled": {
                 "description": "启用",

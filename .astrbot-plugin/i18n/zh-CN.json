@@ -248,7 +248,10 @@
         "monitor_kind_docker": "Docker",
         "monitor_kind_process": "进程",
         "monitor_kind_systemd": "systemd",
-        "report_sections_invalid": "日报内容配置里没有有效项，请检查配置页的勾选"
+        "report_sections_invalid": "日报内容配置里没有有效项，请检查配置页的勾选",
+        "chart_aria_label": "资源趋势图（可用方向键查看数值）",
+        "webhook_disabled": "Komari Webhook 未启用",
+        "webhook_not_running": "Webhook 未在监听（可能启动失败，详见日志）"
       }
     }
   }
