@@ -141,6 +141,7 @@ class AlertAggregator:
         on_abandon: Callable[[list[tuple]], None] | None = None,
         on_delivered: Callable[[list[tuple]], None] | None = None,
         item_key: str = "",
+        display_label: str | None = None,
     ) -> Any | None:
         """Deliver ``text`` now, or buffer it for the window summary.
 
@@ -149,9 +150,10 @@ class AlertAggregator:
         returns ``None`` when the item was buffered and will be covered by
         the summary.
 
-        ``on_abandon`` is invoked with the buffered batch if the summary can
-        never be delivered, so the owning rules can stop claiming the user was
-        notified.
+        ``label`` is the raw owner identity used by the delivery callbacks.
+        ``display_label`` is optional chat-facing text: a monitor name may
+        contain an internal host or URL that the hostname redaction rule must
+        hide, while the callbacks still have to match the raw name.
         """
 
         key = str(kind or "default")
@@ -203,9 +205,13 @@ class AlertAggregator:
                 raise
             finally:
                 bucket.first_inflight = False
-        bucket.pending.append(
-            (label, reason, item_key) if item_key else (label, reason)
-        )
+        if display_label:
+            entry: tuple = (label, reason, item_key, display_label)
+        elif item_key:
+            entry = (label, reason, item_key)
+        else:
+            entry = (label, reason)
+        bucket.pending.append(entry)
         # Keep a bounded buffer (max_items are listed, the rest are counted).
         self._trim_pending(bucket, key)
         # A summary send in progress blocks _schedule_flush; without this the
@@ -357,6 +363,10 @@ class AlertAggregator:
         lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
         for item in pending[: self.max_items]:
             label, reason = item[0], item[1]
+            # Fourth element (when present) is chat-facing only; the
+            # callbacks still receive the raw label above.
+            if len(item) >= 4 and item[3]:
+                label = item[3]
             lines.append(f"• {label}: {reason}")
         extra = total - self.max_items
         if extra > 0:

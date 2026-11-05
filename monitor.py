@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -22,6 +23,7 @@ from .collectors import (
     resolve_targets,
 )
 from .delivery import DeliveryResult
+from .redactor import Redactor, read_rules
 from .state import StateStore
 from .utils import (
     clamp_config,
@@ -161,6 +163,11 @@ class ServiceMonitor:
         self.config = config
         self.report_store = report_store
         self._aggregator = aggregator
+        # The push text must obey the same hostname rule as the card, the
+        # report, the dashboard and the "立即检测" command. Event names stay
+        # raw (the local DB is not the leak surface and report/dashboard mask
+        # them on output); only operator-facing chat text is masked.
+        self._redactor = Redactor(read_rules(config, "display.redact"))
         self.enabled = cfg_bool(config, "monitors.enabled", False)
         self.interval = clamp_config(
             cfg_int(config, "monitors.interval_seconds", 60),
@@ -307,6 +314,20 @@ class ServiceMonitor:
     @staticmethod
     def _signature_suffix(signature: tuple[str, ...]) -> str:
         return hashlib.sha1(repr(signature).encode("utf-8")).hexdigest()[:8]
+
+    # Only the suffix our own key builder appends is stripped. Splitting on
+    # the first "#" was wrong: a monitor name may itself contain one
+    # ("CPU #1"), and that made two different names look like the same item
+    # during prune (v2.20.22).
+    _KEY_SUFFIX_RE = re.compile(r"#(?:q)?[0-9a-f]{8}$")
+
+    @classmethod
+    def _key_bases(cls, key: str) -> set[str]:
+        bases = {key}
+        match = cls._KEY_SUFFIX_RE.search(key)
+        if match:
+            bases.add(key[: match.start()])
+        return bases
 
     def _state_has_key(self, key: str) -> bool:
         try:
@@ -523,6 +544,25 @@ class ServiceMonitor:
                     parts = str(key).split(":", 2)
                     name = parts[1] if len(parts) > 1 and parts[1] else "服务"
                 target = str(state.get("target") or "")
+                # The event table pairs rows by (kind, name, target), not by
+                # the per-item state key. A recovery written here would also
+                # close the open alert of a surviving duplicate (same name and
+                # target, different keyword/timeout) -- the report then shows
+                # a still-failing service as "recovered". Skip the event in
+                # that case; the removed item's old row stays until retention,
+                # which is safer than a false recovery for a live fault.
+                stale_bases = self._key_bases(str(key))
+                duplicate_alive = any(
+                    stale_bases & self._key_bases(self._item_key(item))
+                    for item in self.items
+                )
+                if duplicate_alive:
+                    logger.info(
+                        "监测项 %r 已移除，但仍有同名同目标的监测项在用，"
+                        "跳过自动关闭事件以免误关幸存项",
+                        name,
+                    )
+                    continue
                 self._record_event(name, target, "监测项已移除，自动关闭", "recovery")
         self.state.save()
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
@@ -800,6 +840,7 @@ class ServiceMonitor:
         pending = bool(st.get("pending"))
         last_sent = safe_float(st.get("last_sent") or 0)
         name = str(item.get("name") or item.get("__template_key") or "服务")
+        display_name = self._redactor.mask_name(name)
         kind = KIND_LABELS.get(str(item.get("__template_key")), "服务")
         # Persisted so pruning a removed item can close its alert under the
         # right name and target even when the name contains a colon.
@@ -1094,7 +1135,7 @@ class ServiceMonitor:
                     # unrelated episode (v2.20.12).
                     st.pop("recovery_awaits_summary", None)
                     text = (
-                        f"🔴 服务异常 · {name}\n"
+                        f"🔴 服务异常 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
@@ -1111,7 +1152,12 @@ class ServiceMonitor:
                     st["send_inflight"] = True
                     self.state.save()
                     result = await self._push_alert(
-                        name, detail, text, target_text, item_key=key
+                        name,
+                        detail,
+                        text,
+                        target_text,
+                        item_key=key,
+                        display_name=display_name,
                     )
                     buffered = result is None
                     delivered = (not buffered) and self._delivered(result)
@@ -1186,7 +1232,7 @@ class ServiceMonitor:
                 next_attempt = safe_float(st.get("next_attempt") or 0)
                 if now >= next_attempt:
                     text = (
-                        f"🔴 服务异常 · {name}\n"
+                        f"🔴 服务异常 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
@@ -1375,7 +1421,7 @@ class ServiceMonitor:
                     had_failed = exhausted or bool(pending)
                     extra = "\n（异常告警此前未能送达）" if had_failed else ""
                     text = (
-                        f"✅ 服务恢复 · {name}\n"
+                        f"✅ 服务恢复 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
                         f"目标: {target_text}\n"
@@ -1489,7 +1535,7 @@ class ServiceMonitor:
             # config-error close is still a recovery notice and used to slip
             # past the silence check because it returns before it (v2.20.1).
             text = (
-                f"✅ 服务告警关闭 · {name}\n"
+                f"✅ 服务告警关闭 · {self._redactor.mask_name(name)}\n"
                 "──────────────\n"
                 f"类型: {kind}\n"
                 f"目标: {target_text}\n"
@@ -1941,11 +1987,17 @@ class ServiceMonitor:
         text: str,
         target_text: str,
         item_key: str = "",
+        display_name: str | None = None,
     ) -> Any | None:
         """Send the first alert of an episode, or buffer it in the window.
 
         Returns ``None`` when the aggregator buffered the item; the summary
         covers it and no per-item retry is needed.
+
+        ``name`` stays the raw label because the summary callbacks match the
+        owning state entry by it. ``display_name`` is what the summary text
+        shows, so a name that contains an internal host/URL is masked without
+        breaking that matching.
         """
 
         if self._aggregator is None:
@@ -1959,6 +2011,7 @@ class ServiceMonitor:
             on_abandon=self._on_summary_abandoned,
             on_delivered=self._on_summary_delivered,
             item_key=item_key,
+            display_label=display_name,
         )
 
     def _on_summary_delivered(self, items: list[tuple[str, str]]) -> None:

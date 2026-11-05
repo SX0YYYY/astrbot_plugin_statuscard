@@ -9,8 +9,11 @@ placeholder text and the rendered image) were therefore never sent.
 The user saw "状态卡正在生成" and then nothing, with the framework
 logging "after_message_sent stopped event propagation".
 
-``should_call_llm(False)`` is enough on its own: the framework only
-calls the LLM when ``event.call_llm`` is still True.
+``should_call_llm(True)`` is the framework's "do not call the default LLM"
+flag. ``False`` is the default value and does not block anything: the
+command sends the result before the LLM branch, and ``_has_send_oper`` is
+what normally skips it. The explicit True is what keeps a failed send or a
+result-clearing hook from handing the command text to the model (v2.20.22).
 
 These tests read the REAL AstrBot source (when it is available in the
 workspace) and otherwise fall back to the documented semantics, so they
@@ -112,11 +115,10 @@ def test_no_command_handler_stops_the_event_before_its_first_yield() -> None:
 def test_the_trailing_stop_event_llm_guard_is_kept() -> None:
     """The preview commands keep their trailing ``stop_event()``.
 
-    v2.5.1 ("修复预览日报进入 LLM") added it deliberately: the framework
-    enters the LLM branch whenever ``should_call_llm(False)`` is set, and
-    decides inside it with ``event.get_result() and not event.is_stopped()``.
-    Dropping the trailing call would let the preview reply reach the model
-    again -- the very problem that commit fixed.
+    v2.5.1 ("修复预览日报进入 LLM") added it deliberately. The explicit
+    ``should_call_llm(True)`` is now the primary guard; this trailing call is
+    kept as the older second line of defence. Dropping it would remove that
+    defence, so the test keeps it locked in place.
     """
 
     source = MAIN_PY.read_text(encoding="utf-8")
@@ -139,11 +141,17 @@ def test_the_trailing_stop_event_llm_guard_is_kept() -> None:
 
 
 def test_the_commands_still_block_the_llm() -> None:
-    """``should_call_llm(False)`` must stay -- it is what keeps the LLM out."""
+    """``should_call_llm(True)`` must stay -- it is what keeps the LLM out.
+
+    ``False`` is the framework default and is a no-op: ProcessStage enters
+    the LLM branch when ``not event.call_llm``. The old code passed False, so
+    the comment promised a guard that never existed (v2.20.22).
+    """
 
     source = MAIN_PY.read_text(encoding="utf-8")
     # One per command handler (6 commands).
-    assert source.count("event.should_call_llm(False)") >= 6
+    assert source.count("event.should_call_llm(True)") >= 6
+    assert "event.should_call_llm(False)" not in source
 
 
 # --------------------------------------------------------------------------
@@ -206,7 +214,9 @@ class _Event:
     def __init__(self) -> None:
         self._result = None
         self._force_stopped = False
-        self.call_llm = True
+        # The real AstrMessageEvent initialises call_llm to False; True is
+        # the "forbid the default LLM" flag passed by the commands.
+        self.call_llm = False
         self.stopped_calls = 0
 
     def set_result(self, result):
@@ -277,9 +287,10 @@ def _llm_branch_entered(event) -> bool:
             ) or not event.get_result():
                 async for _ in self.agent_sub_stage.process(event):
 
-    ``should_call_llm(False)`` only gets the pipeline INTO this branch; the
-    decision inside it is ``not event.is_stopped()``. That is why the
-    trailing ``stop_event()`` in the preview commands exists.
+    The branch is entered only when ``event.call_llm`` is False (the
+    framework default). ``should_call_llm(True)`` therefore keeps the reply
+    out before the nested result check runs; a trailing ``stop_event()`` is
+    the older second line of defence.
     """
 
     # The nested form mirrors the framework's own code; merging it into one
@@ -363,6 +374,11 @@ def test_command_handlers_do_not_stop_the_event_before_the_first_yield(
             call.func.attr == "should_call_llm"
             and isinstance(call.func.value, ast.Name)
             and call.func.value.id == "event"
+            # Only the literal True forbids the default LLM; False is the
+            # framework default and a no-op (v2.20.22).
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value is True
         ):
             llm_blocked = True
     assert not early_stop, (
@@ -389,19 +405,20 @@ def test_the_real_framework_semantics_send_the_result() -> None:
         def __init__(self):
             self._result = None
             self._force_stopped = False
-            self.call_llm = True
+            # Real framework default.
+            self.call_llm = False
 
         def should_call_llm(self, call_llm):
             self.call_llm = call_llm
 
     event = RealEvent()
-    event.should_call_llm(False)
-    assert event.call_llm is False, "the LLM must stay out"
+    event.should_call_llm(True)
+    assert event.call_llm is True, "the LLM must stay out"
     assert _framework_sends(event) is True, "the result must be sent"
 
     # And the forbidden call would break it.
     event2 = RealEvent()
-    event2.should_call_llm(False)
+    event2.should_call_llm(True)
     event2.stop_event()
     assert _framework_sends(event2) is False, (
         "stop_event() must prevent the send -- that is the bug"
@@ -409,13 +426,12 @@ def test_the_real_framework_semantics_send_the_result() -> None:
 
 
 def test_the_trailing_guard_keeps_the_reply_out_of_the_llm_branch() -> None:
-    """The trailing ``stop_event()`` is what keeps the LLM out.
+    """Both the explicit flag and the trailing guard keep the LLM out.
 
-    ``should_call_llm(False)`` only gets the pipeline INTO the LLM branch;
-    the decision inside it is ``event.get_result() and not
-    event.is_stopped()``. Without the trailing call, a command reply would
-    reach the model again -- exactly what v2.5.1 ("修复预览日报进入 LLM")
-    fixed.
+    ``should_call_llm(True)`` blocks the branch before the nested result
+    check; the trailing ``stop_event()`` is the v2.5.1 second line of
+    defence. A bare default event (``call_llm=False``) does enter the branch
+    when no reply was sent -- that is why neither guard may be removed.
     """
 
     extracted = _extract_framework_methods()
@@ -433,24 +449,30 @@ def test_the_trailing_guard_keeps_the_reply_out_of_the_llm_branch() -> None:
         def __init__(self):
             self._result = None
             self._force_stopped = False
-            self.call_llm = True
+            self.call_llm = False
             self._has_send_oper = False
             self.is_at_or_wake_command = True
 
         def should_call_llm(self, call_llm):
             self.call_llm = call_llm
 
-    # Without the trailing guard the reply would reach the LLM.
+    # Without either guard the reply would reach the LLM.
     without = RealEvent()
-    without.should_call_llm(False)
     without.set_result(_Result())
     assert _llm_branch_entered(without) is True, (
-        "without the trailing stop_event() the reply reaches the LLM branch"
+        "without a guard the reply reaches the LLM branch"
     )
 
-    # With it, the branch is skipped.
+    # The explicit flag alone already keeps it out.
+    flagged = RealEvent()
+    flagged.should_call_llm(True)
+    flagged.set_result(_Result())
+    assert _llm_branch_entered(flagged) is False, (
+        "should_call_llm(True) must keep the reply out of the LLM branch"
+    )
+
+    # The trailing stop_event() remains the second line of defence.
     with_guard = RealEvent()
-    with_guard.should_call_llm(False)
     with_guard.set_result(_Result())
     with_guard.stop_event()
     assert _llm_branch_entered(with_guard) is False, (
@@ -495,7 +517,7 @@ def test_status_card_result_reaches_the_framework() -> None:
     asyncio.run(drive())
 
     assert event.stopped_calls == 0, "cmd_status stopped the event"
-    assert event.call_llm is False, "cmd_status must keep the LLM out"
+    assert event.call_llm is True, "cmd_status must keep the LLM out"
     assert results, "cmd_status produced no result at all"
     assert any("status.jpg" in chain[0] for chain in results if chain), results
     assert _framework_sends(event) is True, "the framework would skip the result chain"

@@ -794,6 +794,12 @@ class DailyReportBuilder:
                 continue
             if not math.isfinite(number):
                 continue
+            # A finite but absurd value (1e300 from a hand-edited/external
+            # row) still overflows the SUM to inf and renders a 300-digit
+            # peak. No real CPU/RAM/disk percentage/load sample is anywhere
+            # near 1e9; treat it as invalid rather than printing "inf%".
+            if abs(number) > 1e9:
+                continue
             # A negative CPU/RAM/disk percentage can only come from a
             # hand-edited or corrupted row: drop it like any other invalid
             # sample. Including it (or clamping it to zero) pulled the day's
@@ -812,12 +818,20 @@ class DailyReportBuilder:
             }
         average = sum(values) / len(values)
         peak = max(values)
+        # A finite value close to float's maximum can still overflow the
+        # SUM (inf), and a 1e300 peak renders as a 300-digit number that
+        # breaks the card. Only hand-edited/external rows can carry these,
+        # but the report should degrade to "--", not print "inf%".
+        if not math.isfinite(average):
+            average = None
+        if not math.isfinite(peak):
+            peak = None
         digits = 2 if key == "load1" else 1
         return {
             "avg": average,
             "peak": peak,
-            "avg_text": f"{average:.{digits}f}{unit}",
-            "peak_text": f"{peak:.{digits}f}{unit}",
+            "avg_text": ("--" if average is None else f"{average:.{digits}f}{unit}"),
+            "peak_text": "--" if peak is None else f"{peak:.{digits}f}{unit}",
             "delta_text": "--",
             "count": len(values),
         }
@@ -825,6 +839,19 @@ class DailyReportBuilder:
     # ------------------------------------------------------------------
     # anomalies
     # ------------------------------------------------------------------
+
+    def _event_lookback_seconds(self) -> int:
+        """How far back to look for an episode that started before the window.
+
+        The old fixed 30 days hid a fault that had been running longer than
+        that: its only alert row was older than the lookback, so the report
+        said "no anomalies" while the service was still down. Follow the
+        configured event retention instead (default 90 days); the DB prunes
+        rows beyond it anyway, so the query cannot grow without bound.
+        """
+
+        days = cfg_int(self.config, "daily_report.event_retention_days", 90)
+        return max(1, min(365, days)) * 86400
 
     def _anomaly_section(
         self,
@@ -887,9 +914,10 @@ class DailyReportBuilder:
         # stamped the old alert row with an unrelated (much later) recovery
         # -- the historical orphan rows have exactly this shape.
         outside_recoveries: dict[tuple[str, str, str], list[int]] = {}
+        outside_lookback = self._event_lookback_seconds()
         for alert in sorted(
             self.store.list_events_range(
-                window_start_ts - 30 * 86400, window_start_ts - 1, limit=5000
+                window_start_ts - outside_lookback, window_start_ts - 1, limit=5000
             ),
             key=lambda item: (
                 safe_int(item.get("ts") or 0),
@@ -1268,8 +1296,10 @@ class DailyReportBuilder:
             if str(event.get("status") or "") == "recovery"
         }
         stale: dict[tuple[str, str, str], dict[str, Any]] = {}
+        # The query keeps the earliest 50 unresolved rows (the existing
+        # "longest-running first" semantics) and returns them ascending.
         for alert in self.store.list_unresolved_alerts(
-            window_start_ts, window_start_ts - 30 * 86400, limit=50
+            window_start_ts, window_start_ts - outside_lookback, limit=50
         ):
             key = _event_key(alert)
             if not key[1] or key in recovered_keys:

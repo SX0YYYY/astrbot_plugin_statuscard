@@ -1474,6 +1474,11 @@ class AlertEngine:
                         # alerting and the event log stays complete.
                         st["alerting"] = True
                         st["alerted"] = True
+                        # A fresh alert has reached the user, so a recovery
+                        # must not be suppressed by a stale marker left over
+                        # from a >24h sampling gap (the alert itself reset the
+                        # episode's "was the user told?" state).
+                        st.pop("stale", None)
                         if not alerting:
                             # A cooldown-retry keeps the episode's original
                             # start; only a fresh episode sets it.
@@ -1512,6 +1517,7 @@ class AlertEngine:
                     elif delivered:
                         st["alerting"] = True
                         st["alerted"] = True
+                        st.pop("stale", None)
                         if not _safe_float(st.get("alert_since")):
                             st["alert_since"] = now
                         st["count"] = 0
@@ -1556,6 +1562,10 @@ class AlertEngine:
                                 )
                                 st["alerting"] = True
                                 st["alerted"] = True
+                                # The user will be told (or the recovery will
+                                # say the alert never arrived); either way the
+                                # stale-recovery suppression no longer applies.
+                                st.pop("stale", None)
                                 # Keep the episode's original start: resetting it
                                 # here shrank the recovery notice's "告警持续" to
                                 # just the retry window. A stored 0 (set when a
@@ -2064,6 +2074,12 @@ class AlertEngine:
             st = {}
             alerts["offline"] = st
         now = time.time()
+        # Record that the detector actually ran. ``_mark_stale_rules`` uses
+        # this field to tell "alerts were disabled/stopped for a day" apart
+        # from "the bot has been offline for a day". Without it a restart
+        # during a long outage marked the episode stale and suppressed the
+        # only "connection is back" notice the operator would get.
+        st["last_seen"] = now
         count = _safe_int(st.get("count"))
         unreachable = _safe_int(st.get("unreachable"))
 
@@ -2443,6 +2459,7 @@ class AlertEngine:
         watch.pop("pending_recovery", None)
         watch.pop("recovery_retry_count", None)
         watch.pop("recovery_next_attempt", None)
+        watch.pop("pending_recovery_is_alert", None)
         watch.pop("send_failed", None)
         # Same for an alert push that never made it: re-enabling the watch
         # must not replay the previous episode's text (v2.20.8).
@@ -2543,14 +2560,21 @@ class AlertEngine:
 
         # Retries for a recovery notice whose send failed earlier.
         pending_text = str(watch.get("pending_recovery") or "")
-        if pending_text and not self.recover_notify:
+        if (
+            pending_text
+            and not self.recover_notify
+            and not watch.get("pending_recovery_is_alert")
+        ):
             # The operator turned recovery notices off after this one was
             # queued; drop the backlog like the resource/monitor rules do
-            # instead of delivering it later anyway (v2.20.0).
+            # instead of delivering it later anyway (v2.20.0). An alert-only
+            # backlog is NOT a recovery notice and must still be delivered
+            # (v2.20.22).
             for stale_key in (
                 "pending_recovery",
                 "recovery_retry_count",
                 "recovery_next_attempt",
+                "pending_recovery_is_alert",
             ):
                 watch.pop(stale_key, None)
             self.state.save()
@@ -2569,6 +2593,7 @@ class AlertEngine:
                     watch.pop("pending_recovery", None)
                     watch.pop("recovery_retry_count", None)
                     watch.pop("recovery_next_attempt", None)
+                    watch.pop("pending_recovery_is_alert", None)
                     self.state.save()
                     logger.info("LLM 服务恢复通知补发成功")
                 else:
@@ -2582,6 +2607,7 @@ class AlertEngine:
                         watch.pop("pending_recovery", None)
                         watch.pop("recovery_retry_count", None)
                         watch.pop("recovery_next_attempt", None)
+                        watch.pop("pending_recovery_is_alert", None)
                         self.state.save()
                         logger.warning(
                             "LLM 服务恢复通知连续发送失败 %d 次，放弃补发",
@@ -2646,6 +2672,7 @@ class AlertEngine:
             if had_pending_recovery:
                 watch.pop("recovery_retry_count", None)
                 watch.pop("recovery_next_attempt", None)
+                watch.pop("pending_recovery_is_alert", None)
             text = (
                 "⚠️ LLM 服务连续失败\n"
                 "──────────────\n"
@@ -2740,37 +2767,52 @@ class AlertEngine:
                 "最近一次 LLM 调用成功",
                 "recovery",
             )
-            if self.recover_notify and (notified or queued_alert):
+            # The queued alert and the recovery notice are two different
+            # messages. ``recover_notify`` only controls the notice: when it
+            # is off, an alert that never left the queue must still be sent,
+            # otherwise the whole LLM outage is invisible (v2.20.22).
+            send_queued_alert = bool(queued_alert and not notified)
+            send_recovery = bool(self.recover_notify and (notified or queued_alert))
+            if send_queued_alert or send_recovery:
                 last_streak = _safe_int(watch.get("last_streak"))
                 had_failed = bool(watch.pop("send_failed", False)) or bool(queued_alert)
-                recovery_text = (
-                    "✅ 已恢复 · LLM 服务\n"
-                    "──────────────\n"
-                    f"主机: {self._hostname()}\n"
-                    + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
-                    + "最近状态: 调用成功\n"
-                    + ("（异常告警此前未能送达）\n" if had_failed else "")
-                    + f"时间: {_now_text(self.config)}"
-                )
-                if queued_alert and not notified:
+                recovery_text = ""
+                if send_recovery:
+                    recovery_text = (
+                        "✅ 已恢复 · LLM 服务\n"
+                        "──────────────\n"
+                        f"主机: {self._hostname()}\n"
+                        + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
+                        + "最近状态: 调用成功\n"
+                        + ("（异常告警此前未能送达）\n" if had_failed else "")
+                        + f"时间: {_now_text(self.config)}"
+                    )
+                if send_queued_alert:
                     # The alert never left the queue: the channel was down
                     # when the LLM failed and the service recovered before it
-                    # came back. Dropping the queue silently left the user
-                    # with NO message for this outage; deliver the queued
-                    # alert together with the recovery.
-                    text = queued_alert + "\n\n" + recovery_text
+                    # came back. Deliver it now; append the recovery only
+                    # when the operator still wants recovery notices.
+                    text = queued_alert
+                    if recovery_text:
+                        text += "\n\n" + recovery_text
                 else:
                     text = recovery_text
                 result = await self._send(text, source="provider", kind="provider")
                 if not self._delivered(result):
-                    # The recovery notice is the only signal for a suppressed
-                    # or failed-alert episode; retry it before giving up.
+                    # Keep the text for the retry path. An alert-only retry
+                    # must survive ``recover_notify=false`` (the switch is for
+                    # recovery notices, not for the outage alert itself).
                     watch["pending_recovery"] = text
                     watch["recovery_retry_count"] = 1
                     watch["recovery_next_attempt"] = now + retry_delay(1)
+                    if send_queued_alert and not send_recovery:
+                        watch["pending_recovery_is_alert"] = True
+                    else:
+                        watch.pop("pending_recovery_is_alert", None)
                     self.state.save()
                     logger.warning("LLM 服务恢复通知发送失败，稍后补发")
                 else:
+                    watch.pop("pending_recovery_is_alert", None)
                     # A queued notice from an earlier episode must not fire a
                     # second "已恢复" after this one was delivered.
                     for stale_key in (
@@ -2795,6 +2837,7 @@ class AlertEngine:
                     "pending_recovery",
                     "recovery_retry_count",
                     "recovery_next_attempt",
+                    "pending_recovery_is_alert",
                 ):
                     watch.pop(stale_key, None)
                 self.state.save()

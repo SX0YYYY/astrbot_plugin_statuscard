@@ -45,6 +45,8 @@
         "loading": "加载中…",
         "method_build_failed": "聚合失败",
         "method_db_unavailable": "数据库不可用",
+        "method_db_rebuilt": "库重建后跳过",
+        "method_weekly_db_rebuilt": "周报库重建后跳过",
         "method_image": "图片",
         "method_image_partial": "图片（部分成功）",
         "method_image_retry_cross_day": "图片重试跨天放弃",

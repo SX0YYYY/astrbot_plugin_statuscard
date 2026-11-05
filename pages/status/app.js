@@ -342,6 +342,8 @@
       "send failed": ["method_send_failed", "发送失败"],
       "weekly send failed": ["method_weekly_send_failed", "周报发送失败"],
       "db unavailable": ["method_db_unavailable", "数据库不可用"],
+      "db rebuilt": ["method_db_rebuilt", "库重建后跳过"],
+      "weekly db rebuilt": ["method_weekly_db_rebuilt", "周报库重建后跳过"],
       "image retry cross-day": [
         "method_image_retry_cross_day",
         "图片重试跨天放弃",

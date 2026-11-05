@@ -189,8 +189,16 @@ class Redactor:
         ):
             return True
         own = self._own_hostname
-        if own and len(own) >= 3 and own.lower() in value.lower():
-            return True
+        if own and len(own) >= 3:
+            # Word-ish boundaries, not a raw substring: a 3-5 character
+            # hostname ("web", "app", "db1") used to match "Website",
+            # "Application" and "db10", hiding entire unrelated names and
+            # corrupting readable error text ("已隐藏lication"). Hyphens and
+            # dots remain separators so "web-01"/"app.example.com" still
+            # match; only an adjacent letter/digit suppresses it.
+            pattern = r"(?<![A-Za-z0-9])" + re.escape(own) + r"(?![A-Za-z0-9])"
+            if re.search(pattern, value, flags=re.IGNORECASE):
+                return True
         # A bare dotted host name with a known suffix counts; a file name or
         # config key ("README.md", "alerts.enabled") must not hide the whole
         # text or name.
@@ -251,6 +259,12 @@ class Redactor:
                 site["name"] = HIDDEN if masked != name else name
                 if site.get("error"):
                     site["error"] = self.mask_addresses(site["error"])
+            # A mount point can itself carry a host ("//nas.local/share",
+            # "/mnt/192.168.1.5/data"). The alert rules already mask it; the
+            # status card and dashboard used to print the raw path (v2.20.22).
+            for disk in view.get("disks", []) or []:
+                if isinstance(disk, dict) and disk.get("path"):
+                    disk["path"] = self.mask_address_tokens(disk["path"])
         if self.process:
             for proc in view.get("process", {}).get("top", []):
                 proc["name"] = HIDDEN
@@ -358,7 +372,14 @@ class Redactor:
         masked = _mask_ipv6(masked)
         own = self._own_hostname
         if own and len(own) >= 3:
-            masked = re.sub(re.escape(own), HIDDEN, masked, flags=re.IGNORECASE)
+            pattern = r"(?<![A-Za-z0-9])" + re.escape(own) + r"(?![A-Za-z0-9])"
+            masked = re.sub(pattern, HIDDEN, masked, flags=re.IGNORECASE)
+        # A host name that carried a port leaves the port dangling after the
+        # host is masked ("（已隐藏地址）:8080"). Drop a port directly attached
+        # to either placeholder; a bare port elsewhere is not identifying.
+        masked = re.sub(
+            rf"({re.escape(HIDDEN)}|（已隐藏地址）):\d{{2,5}}\b", r"\1", masked
+        )
         return masked
 
     def mask_name(self, name: Any) -> str:

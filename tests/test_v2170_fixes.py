@@ -459,7 +459,7 @@ def test_weekly_guard_uses_weekly_sections() -> None:
     )
     called: list[int] = []
 
-    async def fake_notify(targets, weekly=False):
+    async def fake_notify(targets, weekly=False, day=None):
         called.append(1)
 
     reporter._notify_store_unavailable = fake_notify

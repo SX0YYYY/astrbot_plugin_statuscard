@@ -55,6 +55,7 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
     total = 0
     latest: str | None = None
     seen = 0
+    valid_files = 0
     try:
         for file in base.glob("*.json"):
             seen += 1
@@ -65,12 +66,21 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
                 continue
             if not isinstance(data, dict):
                 continue
-            for user in data.get("users", []):
+            users = data.get("users", [])
+            if not isinstance(users, list):
+                # One hand-edited/old file with "users": null used to raise
+                # on the loop below and abort the ENTIRE directory scan: the
+                # receive counter went unavailable for every group, not just
+                # the malformed one (v2.20.22).
+                logger.debug("跳过 users 字段不是列表的统计文件 %s", file.name)
+                continue
+            valid_files += 1
+            for user in users:
                 if not isinstance(user, dict):
                     continue
                 try:
                     total += int(user.get("message_count", 0) or 0)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             updated = data.get("last_updated")
             if isinstance(updated, str) and (latest is None or updated > latest):
@@ -78,11 +88,13 @@ def read_message_stats_total() -> tuple[int | None, str | None]:
     except Exception as exc:
         logger.debug("读取 message_stats 数据失败: %s", exc)
         return None, None
-    if seen == 0:
+    if seen == 0 or valid_files == 0:
         # The directory exists but holds no statistics files (the plugin was
-        # removed or its data cleared). Returning 0 wrote a 0 baseline into
-        # the daily snapshot, so the next day's difference counted the whole
-        # history as one day (up to tens of thousands of messages, v2.20.5).
+        # removed or its data cleared), or every file was malformed. Returning
+        # 0 wrote a 0 baseline into the daily snapshot, so the next day's
+        # difference counted the whole history as one day (up to tens of
+        # thousands of messages, v2.20.5). A file that parsed but had no
+        # users list is not evidence of "zero messages".
         return None, None
     return total, latest
 

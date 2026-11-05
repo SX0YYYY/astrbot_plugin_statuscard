@@ -363,7 +363,7 @@ class StatusCardPlugin(Star):
     @filter.command("查看状态")
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
-        # Only ``should_call_llm(False)`` here -- never ``stop_event()``.
+        # Only ``should_call_llm(True)`` here -- never ``stop_event()``.
         #
         # ``stop_event()`` sets ``_force_stopped`` on the event, and
         # ``is_stopped()`` then returns True for the rest of the pipeline.
@@ -373,10 +373,11 @@ class StatusCardPlugin(Star):
         # nothing, with the framework logging "after_message_sent stopped
         # event propagation" (issue #1, v2.20.0 ~ v2.20.14).
         #
-        # ``should_call_llm(False)`` is already enough to keep the default
-        # LLM out of the reply: the framework only calls the LLM when
-        # ``not event.call_llm`` is False.
-        event.should_call_llm(False)
+        # ``should_call_llm(True)`` is the real "do not call the default LLM"
+        # flag: ProcessStage enters the LLM branch only when
+        # ``not event.call_llm`` is true, and ``call_llm`` defaults to False.
+        # Passing False was a no-op (v2.20.22).
+        event.should_call_llm(True)
         platform_name = ""
         try:
             platform_name = str(event.get_platform_name() or "")
@@ -911,10 +912,10 @@ class StatusCardPlugin(Star):
     async def cmd_alert_test(self, event: AstrMessageEvent):
         """发送一条测试通知到当前会话与实际推送目标，验证投递链路。"""
 
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
-        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
+        # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
         result = await self.alerts.send_test(event.unified_msg_origin)
         if result.get("ok"):
             message = tr(self.config, "test_sent")
@@ -944,10 +945,10 @@ class StatusCardPlugin(Star):
     async def cmd_monitor_test(self, event: AstrMessageEvent):
         """立即探测全部服务监测项，不影响告警状态。"""
 
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
-        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
+        # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
@@ -995,10 +996,10 @@ class StatusCardPlugin(Star):
     @filter.command("状态卡诊断")
     async def cmd_diag(self, event: AstrMessageEvent):
         """Return a compact diagnostic summary without rendering an image."""
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
-        # (issue #1). ``should_call_llm(False)`` alone keeps the LLM out.
+        # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
         lines = ["🩺 状态卡诊断", "──────────────"]
         platform = ""
         try:
@@ -1284,7 +1285,7 @@ class StatusCardPlugin(Star):
         Accepts an optional ``YYYY-MM-DD`` to re-send an older report (for
         example one that was never delivered while the bot was offline).
         """
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         # No ``stop_event()`` before the first yield: it would make the
         # framework skip the result chain, so this command's reply would
         # never be sent (issue #1). The trailing call below is a different
@@ -1346,12 +1347,13 @@ class StatusCardPlugin(Star):
             # (v2.20.19).
             detail = f"{detail}\n" + tr(self.config, "report_date_used", day=day_arg)
         yield event.plain_result(detail)
-        # The trailing ``stop_event()`` is deliberate and MUST stay: it is
-        # what keeps this reply out of the LLM branch. The framework enters
-        # that branch whenever ``should_call_llm(False)`` is set, and decides
-        # inside it with ``event.get_result() and not event.is_stopped()``.
-        # Stopping the event here is therefore the guard that stops the
-        # preview from reaching the model (v2.5.1, "修复预览日报进入 LLM").
+        # The trailing ``stop_event()`` is deliberate and MUST stay as a
+        # second line of defence. The explicit ``should_call_llm(True)`` above
+        # already keeps this reply out of the LLM branch (the framework enters
+        # it only when ``not event.call_llm``), but the trailing guard also
+        # protects deployments whose framework version behaves differently.
+        # Stopping the event here is safe because it runs AFTER every yield
+        # (v2.5.1, "修复预览日报进入 LLM").
         #
         # It is safe only because it runs AFTER every yield: the results are
         # already collected, so skipping the rest of the pipeline costs
@@ -1362,7 +1364,7 @@ class StatusCardPlugin(Star):
     @filter.command("预览周报")
     async def cmd_preview_weekly(self, event: AstrMessageEvent):
         """Build and send the last-7-days weekly report to the current chat."""
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         # No ``stop_event()`` before the first yield: it would make the
         # framework skip the result chain, so this command's reply would
         # never be sent (issue #1). The trailing call below is a different
@@ -1387,6 +1389,7 @@ class StatusCardPlugin(Star):
         finally:
             self._preview_inflight.discard(preview_key)
         yield event.plain_result(detail)
-        # See cmd_preview_report: this trailing call is the LLM guard and
-        # must stay (v2.5.1).
+        # See cmd_preview_report: the explicit flag above is the primary
+        # guard; this trailing stop_event() is kept as the v2.5.1 second line
+        # of defence and is safe only after every yield.
         event.stop_event()

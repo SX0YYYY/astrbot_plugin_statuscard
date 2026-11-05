@@ -550,6 +550,11 @@ class DailyReporter:
         self._weekly_pending: float | None = None
         self._weekly_pending_report_day: str | None = None
         self._weekly_retry_count = 0
+        # Week the retry counter belongs to. Without it a counter left over
+        # from an unfinished previous week made the FIRST failure of the new
+        # week exceed the budget: the reporter sent a "gave up after 3 tries"
+        # notice with zero retries (v2.20.22).
+        self._weekly_retry_week: str | None = None
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._last_attempt_day: str | None = None
@@ -729,6 +734,7 @@ class DailyReporter:
             else (saved.get("pending_retry_day") or None)
         )
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
+        self._weekly_retry_week = saved.get("weekly_retry_week") or None
         self._weekly_pending_report_day = saved.get("weekly_pending_report_day") or None
         self._pending_image_retry_report_day = (
             saved.get("pending_image_retry_report_day") or None
@@ -897,6 +903,7 @@ class DailyReporter:
                     "weekly_pending": self._weekly_pending,
                     "weekly_pending_report_day": self._weekly_pending_report_day,
                     "weekly_retry_count": self._weekly_retry_count,
+                    "weekly_retry_week": getattr(self, "_weekly_retry_week", None),
                     "image_retry_attempts": self._image_retry_attempts,
                     "pending_image_retry": self._pending_image_retry,
                     "pending_image_retry_report_day": (
@@ -1587,6 +1594,13 @@ class DailyReporter:
             report_day = self._default_report_day()
         self._weekly_pending_report_day = report_day
         week_key = self._week_key(report_day)
+        if getattr(self, "_weekly_retry_week", None) != week_key:
+            # A new week starts with a fresh content-retry budget. The counter
+            # used to leak across the week boundary (it was only reset on a
+            # success or a give-up), so a leftover 3 made the new week's first
+            # failure call _weekly_given_up_week with zero attempts.
+            self._weekly_retry_week = week_key
+            self._weekly_retry_count = 0
         if transport_offline:
             if (
                 getattr(self, "_weekly_pending_recovery_week", None)
@@ -1727,7 +1741,9 @@ class DailyReporter:
             # sent it and recorded the day as delivered: the real data of
             # that day could never be sent afterwards.
             logger.error("日报数据库不可用，跳过本次周报发送")
-            await self._notify_store_unavailable(self._targets("weekly"), weekly=True)
+            await self._notify_store_unavailable(
+                self._targets("weekly"), weekly=True, day=day
+            )
             # A missing/unreadable database is not going to heal within the
             # second the loop otherwise waits before re-entering this function:
             # without a pause the loop spun at 1Hz from 21:30 to midnight,
@@ -1892,7 +1908,7 @@ class DailyReporter:
                 await self._notify_give_up(targets, day, weekly=True)
 
     async def _notify_store_unavailable(
-        self, targets: list[str], weekly: bool = False
+        self, targets: list[str], weekly: bool = False, day: str | None = None
     ) -> None:
         """Tell the operator at most once per day that report.db is unusable."""
 
@@ -1917,7 +1933,10 @@ class DailyReporter:
         try:
             await self.plugin.send_text(
                 targets,
-                tr(self.config, key, day=today),
+                # The notice names the report that was skipped, not the
+                # calendar day: a multi-day DB outage used to say "today's
+                # report" while it was actually an older report day.
+                tr(self.config, key, day=day or self._default_report_day()),
                 source="report_db_unavailable",
             )
         except Exception:
@@ -2021,6 +2040,17 @@ class DailyReporter:
             # channel this heals on its own, so the content retry budget
             # stays untouched and the report is polled every 15 minutes
             # instead of being given up after three attempts (v2.20.12).
+            #
+            # Move the pin to the newest due report day. Keeping the first
+            # failed day meant a multi-day DB outage sent a report from
+            # several days ago on recovery (and skipped the newer one) --
+            # the same "only the newest report" rule the offline path uses.
+            newest = self._latest_due_report_day()
+            if newest > budget_key:
+                self._pending_recovery_day = newest
+                self._pending_recovery_since = (
+                    self._pending_recovery_since or time.time()
+                )
             self._pending_retry = (budget_key, time.time() + 900)
             self._save_delivery_state()
             logger.warning(
@@ -2288,11 +2318,13 @@ class DailyReporter:
             # deploy), the marker survives while neither a delivery nor a
             # retry plan exists -- the day used to be skipped silently.
             # Allow exactly one catch-up attempt; a failure queues the normal
-            # retry ladder and blocks this branch on the next restart.
+            # retry ladder and blocks this branch on the next restart. The
+            # ``_pending_recovery_day`` marker alone is not a live queue (a
+            # stale retry may have been dropped on restart), so only the
+            # actual pending retry blocks it (v2.20.22).
             return bool(
                 self._last_sent_day != report_day
                 and getattr(self, "_pending_retry", None) is None
-                and not getattr(self, "_pending_recovery_day", None)
             )
         return True
 
@@ -2313,8 +2345,12 @@ class DailyReporter:
             return None
         if getattr(self, "_pending_retry", None) is not None:
             return None
-        if getattr(self, "_pending_recovery_day", None):
-            return None
+        # ``_pending_recovery_day`` alone is only a report-day marker, not a
+        # live queue: the retry that owned it may have been dropped as stale
+        # on restart (its day is older than two days). Treating the orphan
+        # marker as "a report is queued" blocked the post-midnight backfill
+        # and skipped the newest due report entirely (v2.20.22). A live queue
+        # always has ``_pending_retry`` above.
         if not self._targets():
             return None
         sections = getattr(self, "_sections", None)
@@ -2564,7 +2600,9 @@ class DailyReporter:
             self._schedule_retry(
                 day or self._default_report_day(), store_unavailable=True
             )
-            await self._notify_store_unavailable(targets)
+            await self._notify_store_unavailable(
+                targets, day=day or self._default_report_day()
+            )
             return
         if self._report_window_lost(day, 1):
             logger.warning(
@@ -2590,6 +2628,19 @@ class DailyReporter:
         day = str(view.get("day") or "")
         if self._last_sent_day == day:
             logger.info("日报 %s 已发送过，跳过重复发送", day)
+            self._clear_retry()
+            return
+        if self._last_sent_day and day < self._last_sent_day:
+            # The wall clock jumped backwards (NTP step, manual change) far
+            # enough that the catch-up path recomputed an already-delivered
+            # report day. ISO dates compare lexicographically; sending it
+            # would duplicate an old report and move last_sent_day backwards,
+            # which then re-armed the next day's send too (v2.20.22).
+            logger.warning(
+                "日报 %s 早于已发送的 %s，跳过回退发送（墙钟可能被回拨）",
+                day,
+                self._last_sent_day,
+            )
             self._clear_retry()
             return
         if self._with_image():

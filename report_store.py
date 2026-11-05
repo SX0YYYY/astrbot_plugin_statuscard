@@ -34,6 +34,11 @@ class ReportStore:
         # the plugin was stopped (history exists, so the data is lost).
         self.created_new = False
         self._write_failures = 0
+        # ``ensure_ready`` is called every 60 seconds by the collector while
+        # the DB is broken. Logging every failure produced ~1450 warnings/day
+        # and could push the rest of the journal out. Log on the first
+        # failure and then at most every 30 minutes (v2.20.22).
+        self._last_ready_warn = 0.0
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,13 +76,17 @@ class ReportStore:
             self._secure_permissions()
             self.available = True
             self.init_error = None
+            self._last_ready_warn = 0.0
             if rebuilt:
                 self.repaired_at = time.time()
             logger.info("日报数据库已恢复: %s", self.path)
             return True
         except Exception as exc:
             self.init_error = f"初始化失败（{exc.__class__.__name__}）"
-            logger.warning("日报数据库仍不可用: %s", exc)
+            now = time.time()
+            if not self._last_ready_warn or now - self._last_ready_warn >= 1800:
+                self._last_ready_warn = now
+                logger.warning("日报数据库仍不可用: %s", exc)
             return False
 
     def _has_schema(self) -> bool:

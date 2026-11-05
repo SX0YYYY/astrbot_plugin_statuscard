@@ -124,7 +124,18 @@ class StateStore:
         tmp = self.path.with_name(
             f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
-        tmp.write_text(payload, encoding="utf-8")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+        except BaseException:
+            # A full disk / IO error used to leave the per-thread .tmp file
+            # behind on every save, consuming the very space that was already
+            # exhausted. The replace failure path below already cleaned up
+            # (v2.20.20); the write itself did not (v2.20.22).
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
         try:
             # Restrict the temporary file before it becomes state.json: after
             # the rename the old code had a short window where the file kept

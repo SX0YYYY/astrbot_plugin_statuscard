@@ -167,6 +167,34 @@ def _mask_umo(target: Any) -> str:
     return mask_umo(target)
 
 
+def _monitor_status(state: dict[str, Any], config_error: Any) -> str:
+    """Derive one monitor card's status.
+
+    Kept as a module-level function so the precedence (and the
+    "probe never concluded" branch) is directly testable. A PROBE_ERROR
+    round leaves ``fails`` untouched by design; without the
+    ``probe_error_at`` branch the card stayed green even though the latest
+    probe never produced a conclusion (v2.20.22).
+    """
+
+    checked = state.get("last_checked")
+    if config_error:
+        return "config_error"
+    if not checked:
+        return "unknown"
+    if bool(state.get("alerting")):
+        return "fail"
+    if state.get("fails"):
+        # Failed the latest probe but has not reached the alert threshold
+        # (or is suppressed by a dependency).
+        return "degraded"
+    if safe_float(state.get("probe_error_at") or 0) > safe_float(
+        state.get("last_ok") or 0
+    ):
+        return "unknown"
+    return "ok"
+
+
 class PageApi:
     """Dashboard page API for the statuscard plugin page.
 
@@ -318,7 +346,17 @@ class PageApi:
         return masked
 
     def _host(self) -> str:
-        return self._redactor().dashboard_host(socket.gethostname())
+        # ``socket.gethostname()`` itself can raise in restricted containers
+        # (and did take the whole /overview route down with it). The Redactor
+        # already guards the same call; mirror that here (v2.20.22).
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            # ``OSError`` is the common case; a restricted interpreter can
+            # raise other exceptions from the same call. The overview route
+            # must degrade to "--", not 500 (v2.20.22).
+            hostname = ""
+        return self._redactor().dashboard_host(hostname)
 
     @staticmethod
     def _network_view(redacted: bool, net: dict[str, Any]) -> dict[str, Any]:
@@ -371,6 +409,7 @@ class PageApi:
             usages = disk_usage_bounded(configured)
         except Exception:
             usages = []
+        redactor = self._redactor()
         mounts: list[dict[str, Any]] = []
         for usage in usages:
             # A configured mount that cannot be read stays visible with "--":
@@ -378,7 +417,7 @@ class PageApi:
             # the status card showed the failed row (v2.20.2).
             mounts.append(
                 {
-                    "path": str(usage.name or ""),
+                    "path": redactor.mask_address_tokens(str(usage.name or "")),
                     "percent": (
                         round(float(usage.percent), 1)
                         if usage.percent is not None
@@ -392,7 +431,7 @@ class PageApi:
             )
         if not mounts:
             return {
-                "path": configured[0],
+                "path": redactor.mask_address_tokens(configured[0]),
                 "percent": None,
                 "used": None,
                 "total": None,
@@ -498,26 +537,17 @@ class PageApi:
             if not isinstance(state, dict):
                 state = {}
             checked = state.get("last_checked")
-            alerting = bool(state.get("alerting"))
             config_error = item.get("config_error")
-            if config_error:
-                status = "config_error"
+            status = _monitor_status(state, config_error)
+            if status == "config_error":
                 config_error_count += 1
-            elif not checked:
-                status = "unknown"
+            elif status == "unknown":
                 unknown_count += 1
-            elif alerting:
-                status = "fail"
+            elif status == "fail":
                 fail_count += 1
-            elif state.get("fails"):
-                # Failed the latest probe but has not reached the alert
-                # threshold (or is suppressed by a dependency). Showing a
-                # green dot and hiding last_error here told the operator
-                # "everything is fine" while the service was already down.
-                status = "degraded"
+            elif status == "degraded":
                 degraded_count += 1
             else:
-                status = "ok"
                 ok_count += 1
             monitor_items.append(
                 {
@@ -824,13 +854,17 @@ class PageApi:
             # the backend kept probing. Bound the whole batch and report the
             # items that did not finish (v2.20.21).
             tasks = [asyncio.create_task(probe_one(item)) for item in items]
-            done, pending = await asyncio.wait(tasks, timeout=80)
+            _done, pending = await asyncio.wait(tasks, timeout=80)
             for task in pending:
                 task.cancel()
+            # ``asyncio.wait`` returns sets, so iterating ``done`` made the
+            # result order depend on Task object hashes: every click showed
+            # the items in a different order, unlike the overview list and the
+            # configured order (v2.20.22). Walk the original task list.
             results = [
                 task.result()
-                for task in done
-                if not task.cancelled() and task.exception() is None
+                for task in tasks
+                if task.done() and not task.cancelled() and task.exception() is None
             ]
             timed_out = len(pending)
             # The button is a manual probe, but with the monitor disabled

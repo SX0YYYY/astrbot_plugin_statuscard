@@ -524,7 +524,17 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 continue
             if not str(cfg_get(rule, "target", "") or "").strip():
                 continue
-            for kind in cfg_get(rule, "kinds", []) or []:
+            # ``kinds`` is a list in the schema, but the resolver and the
+            # validation above both accept a bare string. Iterating the string
+            # here split "service" into characters, so the audit reported the
+            # module as uncovered and printed a warning whose claim was the
+            # opposite of the truth (v2.20.22).
+            kinds = cfg_get(rule, "kinds", []) or []
+            if isinstance(kinds, str):
+                kinds = [kinds]
+            if not isinstance(kinds, (list, tuple, set)):
+                continue
+            for kind in kinds:
                 covered_kinds.add(str(kind).strip().lower())
     legacy_scopes = []
     for key, label, kinds in (
