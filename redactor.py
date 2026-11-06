@@ -103,28 +103,65 @@ _HOSTNAME_RE = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61})\.)+[A-Za-z]{2
 # common and must stay readable, so only tokens whose last label is a known
 # host suffix are treated as a host name.
 _HOST_SUFFIXES = {
+    "ai",
+    "app",
     "arpa",
     "biz",
+    "cc",
+    "club",
     "cloud",
     "cn",
+    "co",
     "com",
+    "company",
     "corp",
+    "de",
     "dev",
+    "digital",
+    "eu",
+    "example",
+    "fr",
+    "group",
+    "hk",
     "home",
+    "info",
     "internal",
     "io",
+    "jp",
+    "kr",
     "lan",
+    "life",
+    "link",
+    "live",
     "local",
     "localhost",
     "me",
+    "media",
     "net",
+    "network",
     "online",
     "org",
+    "pro",
+    "ru",
+    "sg",
+    "shop",
     "site",
+    "solutions",
+    "space",
+    "store",
+    "support",
+    "systems",
     "tech",
     "test",
+    "tools",
     "top",
     "tv",
+    "tw",
+    "uk",
+    "us",
+    "wiki",
+    "work",
+    "world",
     "xyz",
 }
 
@@ -132,7 +169,21 @@ _HOST_SUFFIXES = {
 def _mask_bare_hostname(match: re.Match[str]) -> str:
     token = match.group(0)
     suffix = token.rsplit(".", 1)[-1].lower()
-    return "（已隐藏地址）" if suffix in _HOST_SUFFIXES else token
+    if suffix not in _HOST_SUFFIXES:
+        return token
+    # A single slash before the token marks a file/dir name
+    # ("/srv/backup.store", "/Applications/Safari.app"), not a host. A UNC
+    # path ("//nas.local/share") has two slashes, so the host is still
+    # masked. Without this, adding common TLDs hid ordinary paths and made
+    # the error text unreadable (2026-11-06 reverse audit).
+    start = match.start()
+    if (
+        start > 0
+        and match.string[start - 1] == "/"
+        and (start < 2 or match.string[start - 2] != "/")
+    ):
+        return token
+    return "（已隐藏地址）"
 
 
 def normalize_rules(raw: Any) -> set[str]:

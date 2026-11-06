@@ -1348,6 +1348,13 @@ main.is-refreshing::after {
   font-size: 12px;
 }
 
+/* app.js uses .muted for hint/empty-reason lines (7 call sites) but only this
+   rule was missing, so those paragraphs rendered at body weight and colour. */
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .chart-gap {
   fill: color-mix(in srgb, var(--faint) 20%, transparent);
 }

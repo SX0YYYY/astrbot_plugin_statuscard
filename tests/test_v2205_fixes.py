@@ -13,7 +13,11 @@ from astrbot_plugin_statuscard.report_store import ReportStore
 
 def _reporter(tmp_path: Path) -> DailyReporter:
     reporter = DailyReporter(
-        object(), ReportStore(tmp_path / "report.db"), {"display": {}}
+        object(),
+        ReportStore(tmp_path / "report.db"),
+        # The offline-recovery queue only applies to an enabled report
+        # (v2.20.23); the fixture must model the real "enabled" deployment.
+        {"display": {}, "daily_report": {"enabled": True}},
     )
     reporter._save_delivery_state = lambda: None  # type: ignore[attr-defined]
     return reporter

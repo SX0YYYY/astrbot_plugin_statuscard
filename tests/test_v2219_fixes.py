@@ -277,11 +277,13 @@ def test_cross_window_alert_row_has_the_started_before_marker(tmp_path) -> None:
 
 
 # ----------------------------------------------------------------------
-# 6) HTTP keyword truncation is an inconclusive probe, not an outage
+# 6) HTTP keyword past max_response_bytes: keep reading, do not report a
+#    permanent "unknown" (v2.20.23). Only the hard 10 MiB ceiling is an
+#    inconclusive probe.
 # ----------------------------------------------------------------------
 
 
-def test_keyword_probe_truncation_is_a_probe_error() -> None:
+def test_keyword_probe_reads_past_the_soft_limit() -> None:
     async def scenario() -> tuple[bool, str, str]:
         async def handle(reader, writer):
             await reader.read(1024)
@@ -316,6 +318,57 @@ def test_keyword_probe_truncation_is_a_probe_error() -> None:
             "url": f"http://127.0.0.1:{port}/",
             "keyword": "NEEDLE",
             "timeout_seconds": 2,
+            "expected_status": 0,
+            "verify_tls": True,
+        }
+        try:
+            return await monitor._probe(item)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    ok, detail, _target = asyncio.run(scenario())
+    assert ok is True
+    assert "200" in detail
+
+
+def test_keyword_probe_beyond_hard_limit_is_a_probe_error() -> None:
+    """Only the 10 MiB hard ceiling stays inconclusive (no keyword there)."""
+
+    async def scenario() -> tuple[bool, str, str]:
+        async def handle(reader, writer):
+            await reader.read(1024)
+            body = b"<html>" + b"x" * (10 * 1024 * 1024) + b"</html>"
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/html\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monitor = ServiceMonitor(
+            ScriptedPlugin(),
+            MemoryState(),
+            {
+                "display": {"timezone": "Asia/Shanghai"},
+                "monitors": {
+                    "enabled": True,
+                    "max_response_bytes": 1024,
+                    "targets": ["123456"],
+                },
+            },
+        )
+        item = {
+            "__template_key": "http",
+            "kind": "http",
+            "name": "huge",
+            "url": f"http://127.0.0.1:{port}/",
+            "keyword": "NEEDLE",
+            "timeout_seconds": 15,
             "expected_status": 0,
             "verify_tls": True,
         }

@@ -1002,6 +1002,21 @@ def _read_os_release() -> dict[str, str]:
     return data
 
 
+def _gethostname_safe() -> str:
+    """Return the host name, or ``--`` when the platform refuses to expose it.
+
+    A restricted container can make ``socket.gethostname()`` raise. Both the
+    status card and the local fallback call this collector, so an exception
+    here dropped the whole card and left only the text summary (2026-11-06
+    audit).
+    """
+
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "--"
+
+
 def _os_name() -> str:
     rel = _read_os_release()
     if rel.get("PRETTY_NAME"):
@@ -2179,7 +2194,13 @@ def _overview_cards(
             )
     except Exception:
         pass
-    host = socket.gethostname()
+    # A container may hide the host name and make gethostname raise; the
+    # whole status card used to fail (the local fallback calls the same
+    # collector), leaving only the text summary (2026-11-06 audit).
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = "--"
     os_name = _os_name()
     cores = cpu_count() or cpu_count_logical() or 0
     return [
@@ -2242,7 +2263,7 @@ def _system_info_rows(
     ) or bot.get("adapter", "--")
     return [
         {"label": "OS", "value": _os_name()},
-        {"label": "Host", "value": socket.gethostname()},
+        {"label": "Host", "value": _gethostname_safe()},
         {"label": "Kernel", "value": platform.release()},
         {"label": "Boot", "value": boot_text},
         {"label": "Runtime", "value": runtime},

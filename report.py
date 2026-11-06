@@ -645,6 +645,33 @@ class DailyReporter:
     # persisted delivery state
     # ------------------------------------------------------------------
 
+    def _sanitize_sent_day(self, value: Any) -> str | None:
+        """Return a usable ``last_sent_day`` or ``None``.
+
+        The wall-clock guard compares ISO dates lexicographically. A
+        hand-edited value ("not-a-date") or one written while the clock had
+        jumped far ahead made every later report look older than the marker
+        and silenced the daily report forever, with no retry and no delivery
+        record (2026-11-06 audit). A marker one day ahead is kept on purpose:
+        that is what a normal NTP rollback looks like, and skipping the
+        replayed day is the guard's job.
+        """
+
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError:
+            return None
+        try:
+            today = date.fromisoformat(self._today())
+        except ValueError:
+            return text
+        if parsed > today + timedelta(days=1):
+            return None
+        return text
+
     def _restore_delivery_state(self) -> None:
         state = getattr(getattr(self, "plugin", None), "state", None)
         saved: Any = {}
@@ -667,7 +694,7 @@ class DailyReporter:
 
         migrated = _safe_int(saved.get("schema")) < 2
 
-        self._last_sent_day = saved.get("last_sent_day") or None
+        self._last_sent_day = self._sanitize_sent_day(saved.get("last_sent_day"))
         self._last_attempt_day = saved.get("last_attempt_day") or None
         self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
         self._daily_given_up_day = saved.get("daily_given_up_day") or None
@@ -1926,8 +1953,18 @@ class DailyReporter:
         if state is not None:
             try:
                 sent = state.get(notice_key, {}) or {}
-                if isinstance(sent, dict) and sent.get("day") == today:
-                    return
+                if isinstance(sent, dict):
+                    # Throttle by timestamp, not by calendar day: a database
+                    # outage that crosses midnight (23:50 and 00:05 retries)
+                    # used to send the same notice twice. Keep the documented
+                    # "at most once per day" cadence: a 6-hour window sent up
+                    # to four notices during one long outage (reverse audit).
+                    last_ts = safe_float(sent.get("ts")) or 0.0
+                    if last_ts and time.time() - last_ts < 24 * 3600:
+                        return
+                    # Legacy marker written before the timestamp existed.
+                    if not last_ts and sent.get("day") == today:
+                        return
             except Exception:
                 pass
         try:
@@ -2232,6 +2269,25 @@ class DailyReporter:
         """
 
         queued = False
+        if not self._enabled():
+            # A day pinned while the report was on must not be replayed after
+            # the user disables and later re-enables it: the reloaded loop
+            # would send an old report at an arbitrary time (2026-11-06
+            # audit). Clear the live retry queue too and persist the result;
+            # only clearing the in-memory pin left the on-disk queue intact
+            # and the old report was still sent after re-enabling (reverse
+            # audit).
+            self._pending_recovery_day = None
+            self._pending_recovery_since = 0.0
+            self._pending_retry = None
+            self._pending_retry_day = None
+            self._pending_retry_count = 0
+            self._save_delivery_state()
+        if not self._weekly_enabled():
+            self._weekly_pending_recovery_week = None
+            self._weekly_pending_recovery_since = 0.0
+            self._weekly_pending_report_day = None
+            self._save_delivery_state()
         day = self._pending_recovery_day
         if day:
             age = time.time() - float(self._pending_recovery_since or 0.0)
@@ -2507,6 +2563,14 @@ class DailyReporter:
         return self._weekly_slot_key(slot)
 
     async def _send_scheduled(self, day: str | None = None) -> None:
+        # A malformed/far-future marker silences every later day (see
+        # _sanitize_sent_day). Re-check here because the value can also be
+        # written during a clock jump while this process is running. getattr
+        # keeps the lightweight test doubles (and an older pickled state)
+        # from raising before the first send.
+        self._last_sent_day = self._sanitize_sent_day(
+            getattr(self, "_last_sent_day", None)
+        )
         # Whether this send is the post-midnight backfill. A transport outage
         # during the normal 21:00 slot keeps the historical 15-minute polling
         # (pending_retry), but doing that at 00:30 rebuilt and re-rendered the

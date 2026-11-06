@@ -30,6 +30,7 @@ from astrbot_plugin_statuscard import page_api as page_api_module
 from astrbot_plugin_statuscard import sampler as sampler_module
 from astrbot_plugin_statuscard.alerts import AlertEngine
 from astrbot_plugin_statuscard.audit import run_audit
+from astrbot_plugin_statuscard.collectors import now_in_timezone
 from astrbot_plugin_statuscard.delivery import DeliveryResult
 from astrbot_plugin_statuscard.monitor import ServiceMonitor
 from astrbot_plugin_statuscard.page_api import PageApi, _monitor_status
@@ -373,10 +374,14 @@ def test_prune_duplicate_does_not_close_surviving_alert(tmp_path) -> None:
     monitor.items = [item]
     base = monitor._item_key(item).split("#", 1)[0]
     now = int(time.time())
+    # The event day follows the configured time zone, not the machine's UTC
+    # date: a hard-coded "2026-11-05" fails as soon as the suite runs after
+    # midnight in that zone (same trap as v2.20.21's CI fix).
+    today = now_in_timezone(monitor.config).strftime("%Y-%m-%d")
     for suffix in ("aaaa1111", "bbbb2222"):
         store.add_event(
             now,
-            "2026-11-05",
+            today,
             "service",
             "API",
             "健康检查失败",
@@ -393,7 +398,7 @@ def test_prune_duplicate_does_not_close_surviving_alert(tmp_path) -> None:
 
     monitor._prune_state()
 
-    rows = store.list_events("2026-11-05")
+    rows = store.list_events(today)
     assert rows
     assert all(row.get("resolved_ts") is None for row in rows)
 
@@ -429,7 +434,7 @@ def test_prune_does_not_treat_names_with_hash_as_duplicates(tmp_path) -> None:
 
     monitor._prune_state()
 
-    rows = store.list_events("2026-11-05")
+    rows = store.list_events(now_in_timezone(monitor.config).strftime("%Y-%m-%d"))
     assert any(
         row.get("status") == "recovery" and row.get("name") == "CPU #1" for row in rows
     )

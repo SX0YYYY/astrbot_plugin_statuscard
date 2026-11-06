@@ -58,6 +58,23 @@ def _now_text(config: Any = None) -> str:
     return now_in_timezone(config).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _ram_value_text(mem: Any) -> str:
+    """Format the RAM alert value with the unit word on the available figure.
+
+    psutil's RAM percent is ``(total - available) / total``, so the pair is
+    "available / total". The old text put "可用" after the total and read as
+    "259 MB used / 3.64 GB available", contradicting the percentage beside
+    it (2026-11-06 user screenshot review).
+    """
+
+    if mem.available is not None:
+        return (
+            f"{mem.percent:.1f}% "
+            f"({format_bytes(mem.available)} 可用 / {format_bytes(mem.total)})"
+        )
+    return f"{mem.percent:.1f}% ({format_bytes(mem.used)} / {format_bytes(mem.total)})"
+
+
 def _disk_path_from_label(label: Any) -> str:
     """Extract the mount path from a disk rule label, if it carries one.
 
@@ -1003,19 +1020,7 @@ class AlertEngine:
             mem.percent,
             self.mem_threshold,
             "%",
-            # Same definition as the percentage above: psutil's RAM percent is
-            # (total - available) / total, so the text prints "available /
-            # total". The old "used / total" text read 2-4 points higher than
-            # the percentage beside it on Linux and looked miscalculated.
-            (
-                f"{mem.percent:.1f}% "
-                f"({format_bytes(mem.available)} / {format_bytes(mem.total)} 可用)"
-                if mem.available is not None
-                else (
-                    f"{mem.percent:.1f}% "
-                    f"({format_bytes(mem.used)} / {format_bytes(mem.total)})"
-                )
-            ),
+            _ram_value_text(mem),
         )
         await self._evaluate(
             "swap",
@@ -1397,7 +1402,25 @@ class AlertEngine:
                 # episode (v2.20.8).
                 if not _safe_float(st.get("alert_since")):
                     st["alert_since"] = now
-                if last_sent and now - last_sent < self.cooldown and not abandoned:
+                # A queued retry must run when it is due even inside the
+                # cooldown created by the previous alert. The branch below
+                # records one event and returns, so a retry that already
+                # failed once (retry_count/next_attempt set) used to be
+                # swallowed on every sample: the alert stayed silent for the
+                # whole cooldown (30 min by default), the event table grew one
+                # duplicate row per sample, and a fault that cleared inside
+                # the cooldown produced no recovery notice at all (2026-11-06
+                # audit, reproduced with the production retry ladder).
+                pending_retry = (
+                    _safe_int(st.get("retry_count")) > 0
+                    or _safe_float(st.get("next_attempt")) > 0
+                )
+                if (
+                    last_sent
+                    and now - last_sent < self.cooldown
+                    and not abandoned
+                    and not pending_retry
+                ):
                     # A second episode inside the cooldown used to vanish
                     # completely. Latch it and write one event (with the
                     # suppression noted); only the duplicate push is skipped.
@@ -2342,7 +2365,14 @@ class AlertEngine:
                 "🔴 Bot 连接离线\n"
                 "──────────────\n"
                 f"主机: {self._hostname()}\n"
-                f"时间: {_now_text(self.config)}\n"
+                # ``since`` is backdated by one sampling interval to estimate
+                # the real disconnect, and the recovery card already calls it
+                # "掉线时间". The alert card used to print only the detection
+                # moment under "时间", so the two cards for one outage showed
+                # timestamps 30 s apart and looked inconsistent (2026-11-06
+                # user screenshot review).
+                f"掉线时间: {_fmt_ts(_safe_float(st.get('since')) or now, self.config)}\n"
+                f"检测时间: {_now_text(self.config)}\n"
                 "若本条未能送达，将在连接恢复后补发。"
             )
             if had_pending_recovery:
@@ -2382,7 +2412,8 @@ class AlertEngine:
                     "🔴 Bot 连接离线\n"
                     "──────────────\n"
                     f"主机: {self._hostname()}\n"
-                    f"时间: {_now_text(self.config)}\n"
+                    f"掉线时间: {_fmt_ts(_safe_float(st.get('since')) or now, self.config)}\n"
+                    f"检测时间: {_now_text(self.config)}\n"
                     "（本条为通知冷却结束后的补发）"
                 )
                 result = await self._send(text, kind="offline")
@@ -2449,24 +2480,36 @@ class AlertEngine:
         "unresolved" LLM incident no later event could close.
         """
 
-        alerts_state = self.state.setdefault("alerts", {})
+        alerts_state = self.state.get("alerts")
+        if not isinstance(alerts_state, dict):
+            return
         watch = alerts_state.get("provider_watch")
         if not isinstance(watch, dict):
             return
         # Drop a queued recovery even when the rule is no longer alerting:
         # pending_recovery survives in exactly that state, and re-enabling the
         # watch used to deliver a stale "已恢复" from the previous episode.
-        watch.pop("pending_recovery", None)
-        watch.pop("recovery_retry_count", None)
-        watch.pop("recovery_next_attempt", None)
-        watch.pop("pending_recovery_is_alert", None)
-        watch.pop("send_failed", None)
-        # Same for an alert push that never made it: re-enabling the watch
-        # must not replay the previous episode's text (v2.20.8).
-        watch.pop("pending_alert_text", None)
-        watch.pop("next_attempt", None)
-        watch.pop("alert_retry_count", None)
+        # Track whether anything was removed: these pops used to be returned
+        # from without a save(), so a shutdown right after closing the rule
+        # resurrected them and re-enabling the watch replayed an old notice
+        # (2026-11-06 audit).
+        changed = False
+        for key in (
+            "pending_recovery",
+            "recovery_retry_count",
+            "recovery_next_attempt",
+            "pending_recovery_is_alert",
+            "send_failed",
+            "pending_alert_text",
+            "next_attempt",
+            "alert_retry_count",
+        ):
+            if key in watch:
+                watch.pop(key, None)
+                changed = True
         if not watch.get("alerting"):
+            if changed:
+                self.state.save()
             return
         watch["alerting"] = False
         watch["alerted"] = False
@@ -2511,10 +2554,21 @@ class AlertEngine:
         if not sampled:
             return
 
-        alerts_state = self.state.setdefault("alerts", {})
-        # setdefault (not get): the live nested dict is required, otherwise
+        alerts_state = self.state.get("alerts")
+        if not isinstance(alerts_state, dict):
+            # A hand-edited state.json can hold a list/scalar here. Calling
+            # .get on it raised inside the sampling loop, which then aborted
+            # before _prune_rules() and state.save(): every sample warned and
+            # nothing (including last_seen) reached the disk (2026-11-06
+            # audit).
+            alerts_state = {}
+            self.state.set("alerts", alerts_state)
+        # get (not setdefault): the live nested dict is required, otherwise
         # the alerting latch below would mutate a detached local dict.
-        watch = alerts_state.setdefault("provider_watch", {})
+        watch = alerts_state.get("provider_watch")
+        if not isinstance(watch, dict):
+            watch = {}
+            alerts_state["provider_watch"] = watch
         alerting = bool(watch.get("alerting"))
         last_alert_ts = _safe_float(watch.get("last_alert_ts"))
 

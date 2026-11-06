@@ -975,6 +975,12 @@ class StatusCardPlugin(Star):
             # raw probe detail (v2.20.21).
             redactor = Redactor(read_rules(self.config, "display.redact"))
             for item in failed:
+                kind_key = str(item.get("kind_key") or "")
+                kind_text = (
+                    tr(self.config, f"monitor_kind_{kind_key}") if kind_key else ""
+                )
+                if not kind_text or kind_text.startswith("monitor_kind_"):
+                    kind_text = str(item.get("kind") or "?")
                 lines.append(
                     tr(
                         self.config,
@@ -982,7 +988,7 @@ class StatusCardPlugin(Star):
                         name=redactor.mask_name(
                             redact_url(str(item.get("name") or ""))
                         ),
-                        kind=item["kind"],
+                        kind=kind_text,
                         detail=redactor.mask_addresses(
                             redact_url(str(item.get("detail") or ""))
                         ),

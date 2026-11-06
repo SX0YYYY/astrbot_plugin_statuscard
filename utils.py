@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import platform
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -201,20 +202,52 @@ def redact_url(url: Any) -> str:
     except Exception:
         return text
     if not parts.netloc:
+        # Only text that looks like a URL may be rewritten. Monitor details
+        # such as "未找到匹配进程: python #1" or "python?" used to lose
+        # everything after the #/? even though they are not URLs (2026-11-06
+        # audit). The dotted-host branch below still covers a bare
+        # "example.com/api?token=abc".
+        head = text.split("#", 1)[0].split("?", 1)[0]
+        looks_like_url = bool(
+            "://" in text
+            or text.startswith("//")
+            # The trailing "[?#]" matters: "example.com?token=x" and
+            # "internal:8080?token=x" have no path, and without it the query
+            # (and its token) survived into state keys, report.db, the
+            # dashboard and audit logs (2026-11-06 reverse audit).
+            or re.match(r"^[A-Za-z0-9_.\-]+:\d{1,5}(?:/|$|[?#])", text)
+            or re.match(
+                r"^[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+(?::\d{1,5})?(?:/|$|[?#])",
+                text,
+            )
+            # "user[:pass]@host/path" has no scheme either; the part before
+            # "@" is userinfo only when it contains no slash.
+            or ("@" in head and "/" not in head.split("@", 1)[0])
+            # A bare single-label host with a query/fragment parameter
+            # ("host#access_token=x", "host?token=x") is still a URL. Free
+            # text such as "python #1" has no "=" after the marker, so it is
+            # not rewritten.
+            or (
+                ("?" in text or "#" in text)
+                and "=" in text.split("?", 1)[-1].split("#", 1)[-1]
+            )
+        )
+        if not looks_like_url:
+            return text
         # A bare "example.com/api?token=abc" has no scheme, so urlsplit puts
         # everything in path and the query survives. Strip it explicitly --
         # and credentials too: "user[:pass]@host/api" is a legal (if
         # unusual) monitor target, and the userinfo used to survive.
-        bare = text.split("#", 1)[0].split("?", 1)[0]
+        bare = head
         if "@" in bare:
-            head, _, tail = bare.rpartition("@")
+            userinfo, _, tail = bare.rpartition("@")
             # Credentials only when the part before "@" looks like userinfo
             # (no slashes); otherwise the "@" is just part of the path. A
             # "user:" prefix is indistinguishable from a scheme here, but a
             # scheme-less URL with a netloc-less "@" is a userinfo in
             # practice -- and over-stripping a hypothetical mailto: probe
             # only mangles the display, it never leaks.
-            if head and "/" not in head:
+            if userinfo and "/" not in userinfo:
                 return tail
         return bare
     host = parts.hostname or ""

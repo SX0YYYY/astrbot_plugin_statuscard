@@ -1307,7 +1307,7 @@
         "hint": "目标恢复时补发一条「已恢复」通知；关闭后只报故障。"
       },
       "max_response_bytes": {
-        "description": "HTTP 探测最大读取字节数",
+        "description": "HTTP 探测读取字节数（软上限）",
         "type": "int",
         "default": 262144,
         "slider": {
@@ -1318,7 +1318,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "只在配置了“响应中必须包含的文字”时生效，避免误读大文件。"
+        "hint": "只在配置了“响应中必须包含的文字”时生效。前若干字节没找到关键字时会继续读取（最多 10 MiB），避免页脚关键字永远判为未知。"
       }
     }
   },

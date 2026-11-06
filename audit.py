@@ -102,6 +102,31 @@ def _monitor_config_errors(config: Any) -> list[str]:
     return problems
 
 
+def _monitor_unsupported_types(config: Any) -> list[str]:
+    """Items whose type name the probe loop does not recognise.
+
+    ``_normalize_items`` drops them with one log line. The audit used to skip
+    them too (its ``kind not in REQUIRED_FIELDS`` branch), so a typo left the
+    user with a "no problems" banner and an item that never ran.
+    """
+
+    problems: list[str] = []
+    items = cfg_get(config, "monitors.items", []) or []
+    if not isinstance(items, list):
+        return problems
+    for item in items:
+        if not isinstance(item, dict) or not cfg_bool(item, "enabled", True):
+            continue
+        kind = str(item.get("__template_key") or item.get("type") or "").lower()
+        if kind in REQUIRED_FIELDS:
+            continue
+        name = _safe_label(item.get("name") or kind or "(未命名)")
+        problems.append(
+            f"监测项「{name}」的类型「{kind or '(空)'}」不受支持，已跳过探测"
+        )
+    return problems
+
+
 def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
     """Collect configuration findings; called once at plugin start-up.
 
@@ -191,6 +216,17 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             ]
         ):
             issues.append(AuditIssue("warning", "monitor_item_config", problem))
+        # Items the probe loop dropped entirely (unknown type / exact
+        # duplicate). Without this the audit reported a clean configuration
+        # while a mistyped item never ran and never alerted (2026-11-06
+        # audit).
+        skipped = (
+            list(getattr(monitor, "skipped_items", []) or [])
+            if monitor is not None
+            else _monitor_unsupported_types(config)
+        )
+        for problem in skipped:
+            issues.append(AuditIssue("warning", "monitor_item_skipped", problem))
     if alerts_on and not resource_targets and not offline_targets:
         issues.append(
             AuditIssue(

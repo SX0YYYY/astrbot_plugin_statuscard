@@ -167,6 +167,19 @@ def _text_center(
     )
 
 
+def _percent_value(value: object) -> float:
+    """Coerce a ring percentage; the fallback card is the last resort.
+
+    A dirty value (a list, a word) used to raise in float() and take the
+    local fallback card down with the T2I render (2026-11-06 audit).
+    """
+
+    try:
+        return float(value or 0.0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _ring(
     draw: ImageDraw.ImageDraw,
     center: tuple[int, int],
@@ -174,7 +187,7 @@ def _ring(
     percent: float,
     label: str,
 ) -> None:
-    clamped = max(0.0, min(100.0, float(percent or 0.0)))
+    clamped = max(0.0, min(100.0, _percent_value(percent)))
     bbox = (
         center[0] - radius,
         center[1] - radius,
@@ -235,7 +248,7 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
             draw,
             center,
             ring_radius,
-            float(item.get("percent") or 0.0),
+            _percent_value(item.get("percent")),
             str(item.get("title") or ""),
         )
 
@@ -249,7 +262,7 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
         # disk behind a 0% empty bar (v2.20.17).
         first = next((item for item in disks if not item.get("error")), disks[0])
         failed = bool(first.get("error"))
-        percent = 0.0 if failed else float(first.get("percent") or 0.0)
+        percent = 0.0 if failed else _percent_value(first.get("percent"))
         bar_left = PADDING + 120
         bar_right = WIDTH - PADDING - 320
         draw.rounded_rectangle(

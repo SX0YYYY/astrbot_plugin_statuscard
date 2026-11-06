@@ -282,7 +282,22 @@ def aggregate(
             ttfts.append(ttft)
 
         conv = str(row[3] or "").strip()
-        conv_key = conv[:8] if conv else "未知会话"
+        if ":" in conv:
+            # AstrBot may store a UMO ("aiocqhttp:GroupMessage:123456789")
+            # instead of a UUID. The first eight characters are identical for
+            # every session of the same platform, which merged the whole
+            # "conversation" table into one row (2026-11-06 audit). Keep the
+            # platform/type prefix (so two platforms cannot collide on the
+            # same tail) and mask most of the id, like the QQ counters.
+            head, _, tail = conv.rpartition(":")
+            if not tail:
+                conv_key = "未知会话"
+            elif len(tail) > 4:
+                conv_key = f"{head}:…{tail[-4:]}"
+            else:
+                conv_key = f"{head}:…{tail}"
+        else:
+            conv_key = conv[:8] if conv else "未知会话"
         conv_stats = by_conversation.setdefault(conv_key, {"calls": 0, "errors": 0})
         conv_stats["calls"] += 1
         if status == "error":

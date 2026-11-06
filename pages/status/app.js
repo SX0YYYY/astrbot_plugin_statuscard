@@ -158,12 +158,24 @@
   const HIDDEN_PLACEHOLDERS = {
     "已隐藏": "hidden_value",
     "已隐藏（错误详情含主机或地址信息）": "error_hidden",
+    "（已隐藏地址）": "address_hidden",
   };
 
   function localizeHidden(value) {
     const text = String(value === null || value === undefined ? "" : value);
     const key = HIDDEN_PLACEHOLDERS[text];
-    return key ? t(key, text) : text;
+    if (key) return t(key, text);
+    if (!isEnglish()) return text;
+    // Partial placeholders (a masked disk mount "（已隐藏地址）/share") are
+    // not the whole value, so the map above cannot match them. Replace the
+    // longest marker first, then the short one (2026-11-06 audit).
+    return text
+      .split("已隐藏（错误详情含主机或地址信息）")
+      .join(t("error_hidden", "已隐藏（错误详情含主机或地址信息）"))
+      .split("（已隐藏地址）")
+      .join(t("address_hidden", "（已隐藏地址）"))
+      .split("已隐藏")
+      .join(t("hidden_value", "已隐藏"));
   }
 
   // KIND_LABELS is Chinese for "进程"; the stable key lets the English page
@@ -1138,7 +1150,7 @@
       ),
       metric(
         disk.path
-          ? t("metric_disk_path", "磁盘 {path}", { path: disk.path })
+          ? t("metric_disk_path", "磁盘 {path}", { path: localizeHidden(disk.path) })
           : t("metric_disk", "磁盘"),
         pctText(disk.percent),
         t("metric_used_total", "{used} / {total}", {
@@ -1186,7 +1198,7 @@
             });
             return (
               '<div class="network-item"><span>' +
-              esc(path) +
+              esc(localizeHidden(path)) +
               "</span><span>" +
               esc(value) +
               " · " +
@@ -1380,9 +1392,17 @@
               "</td><td>" +
               esc(localizeHidden(item.name)) +
               "</td><td>" +
-              esc(item.cpu.toFixed(1) + "%") +
+              esc(
+                Number.isFinite(Number(item.cpu))
+                  ? Number(item.cpu).toFixed(1) + "%"
+                  : "--",
+              ) +
               "</td><td>" +
-              esc(item.mem_mb.toFixed(0) + " MB") +
+              esc(
+                Number.isFinite(Number(item.mem_mb))
+                  ? Number(item.mem_mb).toFixed(0) + " MB"
+                  : "--",
+              ) +
               "</td></tr>",
           )
           .join("")
@@ -1731,7 +1751,9 @@
               esc(kindText(item.kind)) +
               "</span></div>" +
               (item.detail
-                ? '<div class="event-detail">' + esc(item.detail) + "</div>"
+                ? '<div class="event-detail">' +
+                  esc(localizeHidden(item.detail)) +
+                  "</div>"
                 : "") +
               "</div></div>"
             );
@@ -2569,7 +2591,7 @@
             item.state !== "ok",
           );
         }
-        const detail = String(item.detail || "");
+        const detail = localizeHidden(item.detail || "");
         // HTTP probe details already end with their own elapsed time;
         // appending it again showed the duration twice. Match either the
         // full-width or the ASCII parentheses so the English page does not

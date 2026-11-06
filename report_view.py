@@ -602,6 +602,19 @@ class DailyReportBuilder:
                 empty_reason = "暂无资源采样数据"
                 empty_reason_code = "reason_no_resource_samples"
         elif not available:
+            # Report the REAL first sample, not the oldest day inside the
+            # lookback window: that window slides every day, so the notice
+            # said "sampling starts 2026-10-30" one day and "10-31" the next
+            # (2026-11-06 audit). A dirty timestamp must not break the whole
+            # report; keep the window value in that case.
+            try:
+                first_ts = self.store.first_resource_ts()
+                if first_ts is not None:
+                    first_day = datetime.fromtimestamp(first_ts, self.tz).strftime(
+                        "%Y-%m-%d"
+                    )
+            except (OSError, OverflowError, ValueError):
+                pass
             if span == 1:
                 empty_reason = (
                     f"资源采样从 {first_day or '--'} 开始，暂无完整{day_label}数据"
@@ -944,7 +957,17 @@ class DailyReportBuilder:
                     resolved = safe_int(alert.get("resolved_ts") or 0)
                     if resolved:
                         outside_stamped.setdefault(key, []).append((stamp, resolved))
-                        outside_rows.setdefault(key, {})[stamp] = alert
+                        bucket = outside_rows.setdefault(key, {})
+                        # A "failed" row written in the same second as the
+                        # delivered "alert" row must not hide it: the covering
+                        # row is then skipped and a whole-window outage
+                        # disappears from the report (2026-11-06 audit).
+                        existing = bucket.get(stamp)
+                        if (
+                            existing is None
+                            or str(alert.get("status") or "") == "alert"
+                        ):
+                            bucket[stamp] = alert
                     open_episode.pop(key, None)
                     continue
                 current = open_episode.get(key)

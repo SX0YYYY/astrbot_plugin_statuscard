@@ -102,6 +102,12 @@ _CONFIG_ERROR_HINTS = (
     "cannot find the file specified",
     "not recognized as an internal or external command",
     "is not recognized as the name of a cmdlet",
+    # psutil.AccessDenied stringifies as "(pid=1)" -- the class name is the
+    # only hint that this is an environment/permission problem. Without it a
+    # restricted account alerted forever on a scan it cannot perform
+    # (2026-11-06 audit).
+    "accessdenied",
+    "access is denied",
 )
 
 CONFIG_ERROR_PREFIX = "配置错误: "
@@ -127,6 +133,28 @@ def _looks_like_config_error(text: str) -> bool:
         # forever; only 11001 is a config error (v2.20.19 reverse audit).
         return "11001" in lowered or "host not found" in lowered
     return any(hint in lowered for hint in _CONFIG_ERROR_HINTS)
+
+
+# Failures that look like a configuration typo on a brand-new target but mean
+# a real outage once the same target has probed successfully before. A domain
+# whose DNS record disappears and a docker daemon that goes down are not
+# configuration mistakes, yet the classifier used to close the live episode
+# and announce "配置已失效" -- the service was then never alerted again
+# (2026-11-06 audit).
+_TRANSIENT_PROBE_HINTS = (
+    "name or service not known",
+    "nodename nor servname provided",
+    "no address associated with hostname",
+    "cannot connect to the docker daemon",
+)
+
+
+def _looks_like_transient_probe_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if "getaddrinfo failed" in lowered:
+        # On a target that worked before, 11001 means the record is gone.
+        return True
+    return any(hint in lowered for hint in _TRANSIENT_PROBE_HINTS)
 
 
 def _now_text(config: Any = None) -> str:
@@ -192,6 +220,11 @@ class ServiceMonitor:
         if not targets:
             targets = cfg_get(config, "alerts.targets", [])
         self.targets = normalize_targets(targets, self.platform_id)
+        # Items dropped by _normalize_items (unknown type, exact duplicate).
+        # The audit reads this list: otherwise a typo in a monitor type was
+        # only a log line and every user-facing check said "no problems"
+        # while the item never ran (2026-11-06 audit).
+        self.skipped_items: list[str] = []
         self.items = self._normalize_items(cfg_get(config, "monitors.items", []))
         self._task: asyncio.Task | None = None
         self._running = False
@@ -214,6 +247,11 @@ class ServiceMonitor:
         for item in raw:
             if not isinstance(item, dict):
                 continue
+            # Disabled entries never probe, so a wrong type on one is not a
+            # problem worth a startup warning (and the fallback audit path
+            # already skips them; the two must agree).
+            if not cfg_bool(item, "enabled", True):
+                continue
             kind = str(item.get("__template_key") or item.get("type") or "").lower()
             if kind not in KIND_LABELS:
                 logger.warning(
@@ -222,8 +260,10 @@ class ServiceMonitor:
                     kind or "(空)",
                     "、".join(KIND_LABELS),
                 )
-                continue
-            if not cfg_bool(item, "enabled", True):
+                self.skipped_items.append(
+                    f"监测项「{self._redactor.mask_name(str(item.get('name') or kind or '(未命名)'))}」"
+                    f"的类型「{kind or '(空)'}」不受支持，已跳过探测"
+                )
                 continue
             required = REQUIRED_FIELDS[kind]
             config_error: str | None = None
@@ -267,6 +307,10 @@ class ServiceMonitor:
                     normalized["name"],
                     kind,
                 )
+                self.skipped_items.append(
+                    f"监测项「{self._redactor.mask_name(normalized['name'])}」"
+                    "与前面的条目完全重复，已忽略"
+                )
                 continue
             seen_signatures.add(signature)
             normalized_items.append((normalized, signature))
@@ -291,6 +335,18 @@ class ServiceMonitor:
                 suffix = self._signature_suffix(signature)
                 if self._state_has_key(f"{base_key}#{suffix}"):
                     normalized["__key_suffix"] = suffix
+                elif not self._state_has_key(base_key):
+                    # The item was once part of a colliding group and kept a
+                    # suffixed key; editing its probe (keyword, expected
+                    # status, timeout...) changes the suffix. Dropping the old
+                    # slot made a live fault alert a second time from scratch
+                    # and left its previous alert row unresolved for the whole
+                    # retention window (2026-11-06 audit). Treat a signature
+                    # change on the surviving item as an edit and carry the
+                    # state over.
+                    self._migrate_suffixed_state(base_key)
+                    if not self._state_has_key(base_key):
+                        self._migrate_truncated_target_state(base_key, normalized)
                 continue
             if self._state_has_key(base_key):
                 # Legacy shared state from before the keys were split (an
@@ -349,6 +405,86 @@ class ServiceMonitor:
             logger.info("监测项状态键已从旧共享键迁移：%s -> %s", old, new)
         except Exception:
             logger.debug("迁移监测项状态键失败", exc_info=True)
+
+    def _migrate_suffixed_state(self, base_key: str) -> None:
+        """Carry an old suffixed state slot over to ``base_key``.
+
+        Only called when a single-item group no longer finds the slot for its
+        current probe signature. That happens after the item was edited while
+        it had a colliding sibling and kept a ``#<hash>`` key: without this
+        the prune drops a live ``alerting`` slot (second alert from scratch)
+        and the old alert row never gets a recovery. Prefer the slot that is
+        still alerting, then the most recent one.
+        """
+
+        try:
+            monitors = self.state.get("monitors", {}) or {}
+            items = monitors.get("items") if isinstance(monitors, dict) else None
+            if not isinstance(items, dict):
+                return
+            # Only OUR 8-hex suffix may be carried over. A raw prefix match
+            # also caught the "#q<8hex>" key that _item_key builds for an HTTP
+            # query, so a new item with the same name/path (no query) stole
+            # the live state of another, still-failing item -- a fake
+            # "recovered" for a healthy item and a second alert from scratch
+            # for the real one (2026-11-06 reverse audit).
+            pattern = re.compile(rf"{re.escape(base_key)}#[0-9a-f]{{8}}")
+            candidates = [str(key) for key in items if pattern.fullmatch(str(key))]
+            # More than one old suffix means the group used to hold several
+            # entries and there is no safe way to tell which slot belonged to
+            # this one; alerting from scratch is safer than stealing a
+            # sibling's live episode.
+            if len(candidates) != 1:
+                return
+
+            def sort_key(key: str) -> tuple[int, float]:
+                state = items.get(key)
+                if not isinstance(state, dict):
+                    return (0, 0.0)
+                return (
+                    1 if state.get("alerting") else 0,
+                    safe_float(state.get("since") or 0),
+                )
+
+            self._move_state_key(max(candidates, key=sort_key), base_key)
+        except Exception:
+            logger.debug("迁移监测项后缀状态失败", exc_info=True)
+
+    def _migrate_truncated_target_state(
+        self, base_key: str, item: dict[str, Any]
+    ) -> None:
+        """Carry a state slot whose target lost its ``#``/``?`` tail.
+
+        ``redact_url`` used to cut every free-form target at the first
+        ``#``/``?``, so a process pattern "python #1" was stored under the
+        key built from "python ". The key now keeps the tail; without this
+        migration the old slot is pruned (fake "removed" event) and the item
+        alerts again from zero on upgrade (2026-11-06 reverse audit).
+        """
+
+        try:
+            current = self._probe_target(item)
+            legacy = current.split("#", 1)[0].split("?", 1)[0].rstrip()
+            if not legacy or legacy == current:
+                return
+            if self._state_has_key(base_key):
+                return
+            name = str(item.get("name") or "")
+            monitors = self.state.get("monitors", {}) or {}
+            items = monitors.get("items") if isinstance(monitors, dict) else None
+            if not isinstance(items, dict):
+                return
+            candidates = [
+                str(key)
+                for key, state in items.items()
+                if isinstance(state, dict)
+                and str(state.get("name") or "") == name
+                and str(state.get("target") or "") == legacy
+            ]
+            if len(candidates) == 1:
+                self._move_state_key(candidates[0], base_key)
+        except Exception:
+            logger.debug("迁移截断目标状态失败", exc_info=True)
 
     def _mark_stale_items(self) -> None:
         """Mark items that were alerting while the probe loop was not running.
@@ -516,10 +652,29 @@ class ServiceMonitor:
         except Exception:
             logger.exception("记录服务监测事件失败")
 
+    @staticmethod
+    def _probe_target(item: dict[str, Any]) -> str:
+        """The target string ``_probe`` returns for this item (redacted)."""
+
+        kind = str(item.get("__template_key") or "")
+        if kind == "http":
+            return redact_url(str(item.get("url") or ""))
+        if kind == "tcp":
+            host = str(item.get("host") or "127.0.0.1").strip()
+            return f"{host}:{cfg_int(item, 'port', 0)}"
+        if kind == "docker":
+            return str(item.get("container") or "").strip()
+        if kind == "process":
+            return str(item.get("pattern") or "").strip().lower()
+        if kind == "systemd":
+            return str(item.get("unit") or "").strip()
+        return ""
+
     def _prune_state(self) -> None:
         # No early return on an empty item list: clearing every monitor used
         # to leave its latched alerts open in the daily report until the
         # 30-day window rolled over.
+        pending_events: list[tuple[str, str, str, str]] = []
         with self.state.section("monitors") as monitors:
             states = monitors.setdefault("items", {})
             if not isinstance(states, dict):
@@ -552,8 +707,22 @@ class ServiceMonitor:
                 # that case; the removed item's old row stays until retention,
                 # which is safer than a false recovery for a live fault.
                 stale_bases = self._key_bases(str(key))
+                stale_target = str(state.get("target") or "")
                 duplicate_alive = any(
                     stale_bases & self._key_bases(self._item_key(item))
+                    # Keys alone miss the TCP case: an omitted host and an
+                    # explicit 127.0.0.1 now share a signature (so the second
+                    # entry is deduplicated) but still have different state
+                    # keys. Comparing the same NAME + probe target keeps the
+                    # prune from writing a fake recovery that closes the
+                    # surviving entry's open alert row (2026-11-06 reverse
+                    # audit). The name check is required: two differently
+                    # named Docker items share the container target too.
+                    or (
+                        stale_target
+                        and str(state.get("name") or "") == str(item.get("name") or "")
+                        and stale_target == self._probe_target(item)
+                    )
                     for item in self.items
                 )
                 if duplicate_alive:
@@ -563,8 +732,16 @@ class ServiceMonitor:
                         name,
                     )
                     continue
-                self._record_event(name, target, "监测项已移除，自动关闭", "recovery")
+                pending_events.append(
+                    (name, target, "监测项已移除，自动关闭", "recovery")
+                )
         self.state.save()
+        # Write the events after releasing the state lock. add_event is a
+        # synchronous sqlite INSERT with a 5 s busy timeout; holding the
+        # monitor lock across it blocked the sampler and the alert engine
+        # whenever the database was slow (2026-11-06 audit).
+        for name, target, detail, status in pending_events:
+            self._record_event(name, target, detail, status)
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
     async def stop(self) -> None:
@@ -818,7 +995,16 @@ class ServiceMonitor:
 
     async def _check_item(self, item: dict[str, Any]) -> None:
         key = self._item_key(item)
+        # Read "this target worked at least once" before probing: a DNS
+        # record that disappears or a docker daemon that goes down on a
+        # target that used to work is an outage, not a configuration typo
+        # (see the downgrade below). ``last_ok`` covers state written before
+        # ever_ok existed, so the first failure right after the upgrade is
+        # still treated as an outage.
+        peek_state = self._peek_state(key)
+        ever_ok = bool(peek_state.get("ever_ok")) or bool(peek_state.get("last_ok"))
         ok, detail, target_text = await self._probe(item)
+        detail = self._downgrade_config_error(detail, ever_ok)
         target_text = redact_url(target_text)
         now = time.time()
         monitors = self.state.setdefault("monitors", {})
@@ -918,6 +1104,7 @@ class ServiceMonitor:
                 # should describe the outage, not the successful probe.
                 prev_error = str(st.get("last_error") or "服务异常")
                 st["last_ok"] = now
+                st["ever_ok"] = True
                 st["last_error"] = ""
                 # A successful probe breaks the consecutive-failure streak
                 # even inside the maintenance window. Leaving ``fails``
@@ -1290,6 +1477,7 @@ class ServiceMonitor:
             st["fails"] = 0
             st["last_checked"] = now
             st["last_ok"] = now
+            st["ever_ok"] = True
             st["last_error"] = ""
             # A fault that began inside the maintenance window and cleared
             # BEFORE reaching the threshold left its start in ``since``. The
@@ -1572,6 +1760,36 @@ class ServiceMonitor:
             self._http_clients[key] = client
         return client
 
+    def _peek_state(self, key: str) -> dict[str, Any]:
+        """Return the persisted state of one monitor key (never raises)."""
+
+        try:
+            monitors = self.state.get("monitors")
+            if isinstance(monitors, dict):
+                items = monitors.get("items")
+                if isinstance(items, dict):
+                    state = items.get(key)
+                    if isinstance(state, dict):
+                        return state
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _downgrade_config_error(detail: str, ever_ok: bool) -> str:
+        """Turn a transient-looking config error back into a real outage.
+
+        A target that worked before is not "misconfigured" just because its
+        DNS record disappeared or the docker daemon went down. Done outside
+        ``_probe`` so the probe stays a one-argument call that the existing
+        test doubles can replace.
+        """
+
+        if not ever_ok or not detail.startswith(CONFIG_ERROR_PREFIX):
+            return detail
+        raw = detail[len(CONFIG_ERROR_PREFIX) :]
+        return raw if _looks_like_transient_probe_error(raw) else detail
+
     async def _probe(self, item: dict[str, Any]) -> tuple[bool, str, str]:
         kind = str(item.get("__template_key") or "")
         timeout = max(1, min(60, cfg_int(item, "timeout_seconds", 10)))
@@ -1581,6 +1799,12 @@ class ServiceMonitor:
                 return False, "URL 未配置", "-"
             expected = cfg_int(item, "expected_status", 0)
             keyword = str(item.get("keyword") or "").strip()
+            # Set once the soft limit is crossed: a timeout after that point
+            # means "we could not read enough to decide", not "the service is
+            # down". The old short-circuit answered PROBE_ERROR immediately;
+            # reading further must not turn a slow, large page into an outage
+            # alert (2026-11-06 reverse audit).
+            read_state: dict[str, Any] = {"soft_limit_hit": False, "soft_limit": 0}
             try:
                 started = time.perf_counter()
 
@@ -1604,7 +1828,15 @@ class ServiceMonitor:
                         if not expected and status_code >= 400:
                             return False, f"HTTP {status_code}", url
                         if keyword:
-                            limit = max(
+                            # ``max_response_bytes`` is a soft limit: it keeps
+                            # the common case small, but the probe keeps
+                            # reading (up to a hard 10 MiB ceiling) when the
+                            # keyword was not in the first slice. Cutting at
+                            # the soft limit made a keyword in the page footer
+                            # "unknown" forever; an item that had been alerting
+                            # never closed, so the daily report kept an
+                            # unresolved row (2026-11-06 audit).
+                            soft_limit = max(
                                 1024,
                                 min(
                                     10 * 1024 * 1024,
@@ -1615,31 +1847,44 @@ class ServiceMonitor:
                                     ),
                                 ),
                             )
+                            hard_limit = 10 * 1024 * 1024
+                            read_state["soft_limit"] = soft_limit
+                            encoding = resp.charset_encoding or "utf-8"
+
+                            def _decode(raw: bytearray) -> str:
+                                try:
+                                    return bytes(raw).decode(encoding, errors="replace")
+                                except LookupError:
+                                    return bytes(raw).decode("utf-8", errors="replace")
+
                             body = bytearray()
                             truncated = False
+                            found = False
+                            next_check = soft_limit
                             async for chunk in resp.aiter_bytes():
                                 body.extend(chunk)
-                                if len(body) >= limit:
-                                    body = body[:limit]
+                                if len(body) >= soft_limit:
+                                    read_state["soft_limit_hit"] = True
+                                if len(body) >= hard_limit:
+                                    del body[hard_limit:]
                                     truncated = True
-                                    break
-                            encoding = resp.charset_encoding or "utf-8"
-                            try:
-                                text = body.decode(encoding, errors="replace")
-                            except LookupError:
-                                text = body.decode("utf-8", errors="replace")
-                            if keyword not in text:
+                                if len(body) >= next_check:
+                                    if keyword in _decode(body):
+                                        found = True
+                                        break
+                                    # Re-check once per extra MiB: decoding
+                                    # the whole buffer on every 8 KiB chunk
+                                    # would be quadratic.
+                                    next_check = len(body) + 1024 * 1024
                                 if truncated:
-                                    # "Keyword not found" is a lie when the
-                                    # body was cut at max_response_bytes: the
-                                    # keyword may simply be past the cut. The
-                                    # default 256 KiB made a normal large
-                                    # page alert as down every cooldown
-                                    # (v2.20.19). Treat it as an inconclusive
-                                    # probe, not an outage.
+                                    break
+                            if not found:
+                                found = keyword in _decode(body)
+                            if not found:
+                                if truncated:
                                     return (
                                         False,
-                                        f"{PROBE_ERROR_PREFIX}响应超过 {limit} 字节，"
+                                        f"{PROBE_ERROR_PREFIX}响应超过 {hard_limit} 字节，"
                                         + "未能读取完整正文，无法确认关键字",
                                         url,
                                     )
@@ -1652,12 +1897,35 @@ class ServiceMonitor:
                 )
                 return ok, detail, target_text
             except TimeoutError:
+                if read_state["soft_limit_hit"]:
+                    # We already read past max_response_bytes and only the
+                    # extended keyword search timed out: the service answered,
+                    # the body was just too slow/large to finish. Treat it as
+                    # inconclusive (no alert), matching the old short-circuit.
+                    return (
+                        False,
+                        (
+                            f"{PROBE_ERROR_PREFIX}读取超时（响应超过 "
+                            f"{read_state['soft_limit']} 字节），无法确认关键字"
+                        ),
+                        url,
+                    )
                 return False, f"探测超时（超过 {timeout + 2} 秒）", url
             except httpx.TimeoutException:
                 # httpx raises ReadTimeout/ConnectTimeout, which are NOT the
                 # builtin TimeoutError. The generic branch stringified them as
                 # "ReadTimeout: " (empty message), so the alert body had no
-                # hint at all (v2.20.19).
+                # hint at all (v2.20.19). The same extended-read caveat as
+                # above applies: a slow large body is inconclusive.
+                if read_state["soft_limit_hit"]:
+                    return (
+                        False,
+                        (
+                            f"{PROBE_ERROR_PREFIX}读取超时（响应超过 "
+                            f"{read_state['soft_limit']} 字节），无法确认关键字"
+                        ),
+                        url,
+                    )
                 return False, f"探测超时（超过 {timeout} 秒）", url
             except Exception as exc:
                 detail = f"{exc.__class__.__name__}: {exc}"
@@ -1713,6 +1981,13 @@ class ServiceMonitor:
                     ],
                     capture_output=True,
                     text=True,
+                    # A localized docker/systemd may print bytes the current
+                    # locale cannot decode. Without errors="ignore" the reader
+                    # thread fails, stdout becomes None, and the item latched
+                    # a fake outage with an unhelpful
+                    # "'NoneType' object has no attribute 'strip'" reason
+                    # (2026-11-06 audit).
+                    errors="ignore",
                     timeout=timeout,
                 )
                 if proc.returncode != 0:
@@ -1726,7 +2001,14 @@ class ServiceMonitor:
                             container,
                         )
                     return False, detail[:200], container
-                running = proc.stdout.strip().lower() == "true"
+                raw = (proc.stdout or "").strip()
+                if not raw:
+                    return (
+                        False,
+                        f"{PROBE_ERROR_PREFIX}docker inspect 无输出",
+                        container,
+                    )
+                running = raw.lower() == "true"
                 return running, f"容器 running={running}", container
             except subprocess.TimeoutExpired:
                 return (
@@ -1786,9 +2068,19 @@ class ServiceMonitor:
                     ["systemctl", "is-active", unit],
                     capture_output=True,
                     text=True,
+                    # Same decode guard as the docker branch: a non-UTF-8
+                    # locale turned stdout into None and the item alerted
+                    # forever with "unit: unknown" (2026-11-06 audit).
+                    errors="ignore",
                     timeout=timeout,
                 )
-                state_text = (proc.stdout or proc.stderr or "unknown").strip()
+                state_text = (proc.stdout or proc.stderr or "").strip()
+                if not state_text:
+                    return (
+                        False,
+                        f"{PROBE_ERROR_PREFIX}systemctl 无输出",
+                        unit,
+                    )
                 if _looks_like_config_error(state_text):
                     return (
                         False,
@@ -1812,6 +2104,7 @@ class ServiceMonitor:
                             ],
                             capture_output=True,
                             text=True,
+                            errors="ignore",
                             timeout=timeout,
                         )
                         load_state = (show.stdout or "").strip()
@@ -1873,10 +2166,14 @@ class ServiceMonitor:
                 timeout,
             )
         if kind == "tcp":
+            # The probe defaults an omitted host to 127.0.0.1, so the
+            # signature must do the same: a copied item that spells the
+            # default out looked like a second check and alerted beside the
+            # original for the same port (2026-11-06 audit).
             return (
                 kind,
                 name,
-                str(item.get("host") or ""),
+                str(item.get("host") or "127.0.0.1"),
                 str(cfg_int(item, "port", 0)),
                 timeout,
             )
@@ -2167,14 +2464,23 @@ class ServiceMonitor:
                 return {
                     "name": str(item.get("name") or ""),
                     "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
+                    "kind_key": str(item.get("__template_key") or ""),
                     "target": "",
                     "ok": False,
                     "detail": f"配置不完整（{error}），未执行探测",
                 }
+            peek_state = self._peek_state(self._item_key(item))
+            ever_ok = bool(peek_state.get("ever_ok")) or bool(peek_state.get("last_ok"))
             ok, detail, target = await self._probe(item)
+            # The manual "check now" command must agree with the alert engine:
+            # without the same downgrade it printed "配置错误" for a target the
+            # loop was already treating as an outage (2026-11-06 reverse
+            # audit).
+            detail = self._downgrade_config_error(detail, ever_ok)
             return {
                 "name": str(item.get("name") or ""),
                 "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
+                "kind_key": str(item.get("__template_key") or ""),
                 "target": target,
                 "ok": ok,
                 "detail": detail,
