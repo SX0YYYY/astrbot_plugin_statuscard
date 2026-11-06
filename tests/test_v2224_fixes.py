@@ -15,9 +15,9 @@ Every test drives the production path that changed. The batch focuses on:
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 from contextlib import contextmanager
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
