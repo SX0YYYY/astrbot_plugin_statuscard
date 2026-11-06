@@ -47,6 +47,31 @@ def delivery_offline(result: Any) -> bool:
     return bool(getattr(result, "transport_offline", False))
 
 
+# Offline failures never consume the retry budget, so a fixed ladder keeps
+# retrying forever. The first few attempts stay at 15 minutes (a short
+# reconnect is picked up quickly), then the delay backs off to one hour: a
+# target that the direct path keeps rejecting while the framework returns
+# False produced an attempt every 15 minutes with no end and no disclosure.
+OFFLINE_RETRY_BASE_SECONDS = 900.0
+OFFLINE_RETRY_SLOW_SECONDS = 3600.0
+OFFLINE_RETRY_FAST_ATTEMPTS = 4
+
+
+def offline_retry_delay(attempt: int) -> float:
+    """Delay before the next retry after a transport-offline failure.
+
+    ``attempt`` is the 1-based count of consecutive offline failures for the
+    queued item. The queued notice itself is still delivered when the
+    connection returns; this only throttles the polling.
+    """
+
+    return (
+        OFFLINE_RETRY_BASE_SECONDS
+        if attempt <= OFFLINE_RETRY_FAST_ATTEMPTS
+        else OFFLINE_RETRY_SLOW_SECONDS
+    )
+
+
 def summary_item_parts(item: Any) -> tuple[str, str, str]:
     """Normalise one aggregation item to ``(label, reason, key)``.
 

@@ -272,6 +272,20 @@ class ReportStore:
                     ON events(day);
                 CREATE INDEX IF NOT EXISTS idx_events_ts
                     ON events(ts);
+                -- The unresolved-alert query pairs an open row with a later
+                -- recovery of the SAME rule (kind/name/target). Without this
+                -- index the NOT EXISTS subquery is a full scan per row, so
+                -- the daily report took 15 s on a 20k-row table (v2.20.24).
+                --
+                -- The column order matters: ``target`` is compared through
+                -- ``COALESCE(target,'')``, so it CANNOT be used by the index
+                -- and putting it in the middle makes the lookup stop after
+                -- (kind, name) -- which is slower than no index at all on a
+                -- flapping rule (1.5x slower at 45k rows). The index must
+                -- therefore be (kind, name, status, ts): the status filter
+                -- and the time comparison stay indexable.
+                CREATE INDEX IF NOT EXISTS idx_events_rule
+                    ON events(kind, name, status, ts);
 
                 CREATE TABLE IF NOT EXISTS report_runs (
                     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -689,22 +703,38 @@ class ReportStore:
         Those are excluded here: an alert that has a later recovery for the
         same rule is already resolved, and keeping it would show a stale
         "unresolved" line until the lookback window slides past it.
+
+        Only the EARLIEST row of each rule is returned (v2.20.24). A flapping
+        rule whose recovery event was lost can leave dozens of unclosed rows
+        in the lookback window; the old ``ORDER BY ts ASC LIMIT 50`` spent
+        the whole budget on those duplicates, so newer rules that were still
+        down silently disappeared from the report. Grouping by rule keeps the
+        "ongoing since ..." semantics while the limit now counts distinct
+        rules instead of rows.
         """
 
         rows = self._query(
             """
-            SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
-                   e.status, e.resolved_ts
-            FROM events AS e
-            WHERE e.status IN ('alert', 'failed') AND e.resolved_ts IS NULL
-              AND e.ts >= ? AND e.ts < ?
-              AND NOT EXISTS (
-                  SELECT 1 FROM events AS r
-                  WHERE r.status = 'recovery' AND r.ts > e.ts
-                    AND r.kind = e.kind AND r.name = e.name
-                    AND COALESCE(r.target, '') = COALESCE(e.target, '')
-              )
-            ORDER BY e.ts ASC LIMIT ?
+            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            FROM (
+                SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
+                       e.status, e.resolved_ts,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY e.kind, e.name, COALESCE(e.target, '')
+                           ORDER BY e.ts ASC, e.id ASC
+                       ) AS rn
+                FROM events AS e
+                WHERE e.status IN ('alert', 'failed') AND e.resolved_ts IS NULL
+                  AND e.ts >= ? AND e.ts < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM events AS r
+                      WHERE r.status = 'recovery' AND r.ts > e.ts
+                        AND r.kind = e.kind AND r.name = e.name
+                        AND COALESCE(r.target, '') = COALESCE(e.target, '')
+                  )
+            )
+            WHERE rn = 1
+            ORDER BY ts ASC, id ASC LIMIT ?
             """,
             (int(since_ts), int(before_ts), max(1, min(500, limit))),
         )

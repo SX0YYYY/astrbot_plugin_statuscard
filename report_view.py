@@ -880,6 +880,22 @@ class DailyReportBuilder:
         for offset in range(span):
             boundary = day - timedelta(days=offset)
             events += self.store.list_events(boundary.isoformat(), limit=5000)
+        # The per-day query caps at 5000 rows and drops the OLDEST rows of the
+        # day. A flapping rule can exceed that, which made the pairing below
+        # under-count interruptions (and the headline disagree with the event
+        # page). Detect the overflow and disclose it instead of silently
+        # reporting a smaller number (v2.20.24).
+        #
+        # The dropped rows are the OLDEST ones, which is exactly where the
+        # start of an interruption lives: a truncated day can lose a whole
+        # episode, and the durations of the episodes that survive can be
+        # shortened. The disclosure says so.
+        event_row_limit = 5000
+        data_truncated = 0
+        for day_text in window_days | {previous.isoformat()}:
+            total_rows = sum(self.store.count_events(day_text).values())
+            if total_rows > event_row_limit:
+                data_truncated += total_rows - event_row_limit
         events.sort(
             key=lambda item: (
                 safe_int(item.get("ts") or 0),
@@ -1319,8 +1335,10 @@ class DailyReportBuilder:
             if str(event.get("status") or "") == "recovery"
         }
         stale: dict[tuple[str, str, str], dict[str, Any]] = {}
-        # The query keeps the earliest 50 unresolved rows (the existing
-        # "longest-running first" semantics) and returns them ascending.
+        # The query keeps the earliest unclosed row of each rule (grouped by
+        # kind/name/target) and returns them ascending, so a flapping rule
+        # cannot spend the limit on duplicate rows and hide newer outages
+        # (v2.20.24). The per-key filter below is a cheap second guard.
         for alert in self.store.list_unresolved_alerts(
             window_start_ts, window_start_ts - outside_lookback, limit=50
         ):
@@ -1491,6 +1509,9 @@ class DailyReportBuilder:
             # old total became 20 and the "另有 N 条未列出" disclosure vanished.
             "total": raw_total + unresolved_total,
             "truncated": dropped_in_window + hidden_unresolved,
+            # Rows the per-day query could not read (the day exceeded the row
+            # cap), so the count above may be smaller than reality.
+            "data_truncated": data_truncated,
             "items": items[-20:],
             "normal": {
                 "monitors": self._monitor_count(),
@@ -1515,6 +1536,11 @@ class DailyReportBuilder:
         return {
             "resource": "资源",
             "offline": "掉线",
+            # The "cannot confirm the online state" episode: the connection
+            # state itself is unknown, which is neither a resource nor a
+            # service fault. It gets its own label so the report does not
+            # show it as another offline outage (v2.20.24).
+            "connection": "连接状态",
             "service": "服务",
             "provider": "LLM",
         }.get(kind, kind or "事件")
@@ -2521,6 +2547,12 @@ def build_report_text(view: dict[str, Any]) -> str:
         line = f"异常/失败({window_label}): {anomalies.get('count', 0)} 次"
         if anomalies.get("unresolved"):
             line += f"（另有 {anomalies['unresolved']} 项未恢复）"
+        if anomalies.get("data_truncated"):
+            # The per-day row cap hid the oldest events of that day: the
+            # number above is a lower bound, not the whole story (v2.20.24).
+            line += (
+                "（事件量超出单日统计上限，可能有故障未被统计，故障时长也可能不准确）"
+            )
         brief_items = anomalies.get("items") or []
         if brief_items:
             # Without the text image this is the only place the user learns

@@ -39,7 +39,12 @@ from .report_view import (
 )
 from .sampler import read_message_stats_total
 from .state import StateStore
-from .utils import normalize_targets, safe_float
+from .utils import (
+    normalize_targets,
+    offline_retry_delay,
+    safe_float,
+    safe_int,
+)
 from .version import resolve_astrbot_version
 
 
@@ -686,10 +691,14 @@ class DailyReporter:
         def _safe_int(value: Any, default: int = 0) -> int:
             # A hand-edited state.json can hold anything; a ValueError here
             # would abort plugin loading, so stay defensive like the float
-            # fields below.
+            # fields below. ``int(float('inf'))`` raises OverflowError, not
+            # ValueError, so that case needs its own branch (v2.20.24
+            # audit).
             try:
                 return int(value or 0)
             except (TypeError, ValueError):
+                return default
+            except OverflowError:
                 return default
 
         migrated = _safe_int(saved.get("schema")) < 2
@@ -762,6 +771,15 @@ class DailyReporter:
         )
         self._weekly_retry_count = _safe_int(saved.get("weekly_retry_count"))
         self._weekly_retry_week = saved.get("weekly_retry_week") or None
+        # The offline backoff counters. Without them a restart during a long
+        # outage reset the ladder to 15 minutes and the report was rebuilt
+        # every quarter hour again (v2.20.24).
+        self._offline_retry_count = _safe_int(saved.get("offline_retry_count"))
+        self._offline_retry_ts = safe_float(saved.get("offline_retry_ts"))
+        self._weekly_offline_retry_count = _safe_int(
+            saved.get("weekly_offline_retry_count")
+        )
+        self._weekly_offline_retry_ts = safe_float(saved.get("weekly_offline_retry_ts"))
         self._weekly_pending_report_day = saved.get("weekly_pending_report_day") or None
         self._pending_image_retry_report_day = (
             saved.get("pending_image_retry_report_day") or None
@@ -940,6 +958,18 @@ class DailyReporter:
                     "weekly_image_attempts": self._weekly_image_attempts,
                     "weekly_image_pending": self._weekly_image_pending,
                     "weekly_image_report_day": self._weekly_image_report_day,
+                    # The offline backoff counters. They must survive a
+                    # restart: a long outage that ends with a restart used
+                    # to reset the ladder to 15 minutes, so the report was
+                    # rebuilt every quarter hour again (v2.20.24).
+                    "offline_retry_count": getattr(self, "_offline_retry_count", 0),
+                    "offline_retry_ts": getattr(self, "_offline_retry_ts", 0.0),
+                    "weekly_offline_retry_count": getattr(
+                        self, "_weekly_offline_retry_count", 0
+                    ),
+                    "weekly_offline_retry_ts": getattr(
+                        self, "_weekly_offline_retry_ts", 0.0
+                    ),
                 },
             )
             state.save()
@@ -1643,9 +1673,30 @@ class DailyReporter:
                 self._weekly_pending_recovery_since = time.time()
             # The report day was pinned to the slot at the top of this
             # function, so the queued report keeps the window the slot
-            # announced even when the retry crosses midnight.
-            self._weekly_pending = time.time() + 900
+            # announced even when the retry crosses midnight. The poll backs
+            # off to one hour after four rounds (v2.20.24): a channel that
+            # never comes back kept rebuilding the whole report every 15
+            # minutes.
+            now_ts = time.time()
+            last_offline = safe_float(
+                getattr(self, "_weekly_offline_retry_ts", 0.0),
+            )
+            offline_attempt = (
+                1
+                if now_ts - last_offline > 2 * 3600
+                else safe_int(getattr(self, "_weekly_offline_retry_count", 0)) + 1
+            )
+            self._weekly_offline_retry_ts = now_ts
+            self._weekly_offline_retry_count = offline_attempt
+            self._weekly_pending = now_ts + offline_retry_delay(offline_attempt)
             self._save_delivery_state()
+            if offline_retry_delay(offline_attempt) != offline_retry_delay(
+                offline_attempt - 1
+            ):
+                logger.warning(
+                    "周报连续 %d 次因连接不可用未能送达，已改为每小时重试（恢复后仍会补发）",
+                    offline_attempt - 1,
+                )
             logger.warning(
                 "周报发送失败（Bot 连接不可用），已排队，恢复后补发最近这一期"
             )
@@ -1676,6 +1727,10 @@ class DailyReporter:
             # ``_pending_recovery_day`` here for exactly the same reason.
             self._weekly_pending_recovery_week = None
             self._weekly_pending_recovery_since = 0.0
+            # The channel works again: the next weekly failure must start at
+            # the fast step of the backoff (v2.20.24).
+            self._weekly_offline_retry_count = 0
+            self._weekly_offline_retry_ts = 0.0
             self._save_delivery_state()
             logger.warning("周报重试 3 次后仍失败，停止重试")
             return False
@@ -1867,6 +1922,10 @@ class DailyReporter:
                     self._weekly_image_report_day = None
                     self._weekly_pending_recovery_week = None
                     self._weekly_pending_recovery_since = 0.0
+                    # The channel works again: the next weekly failure must
+                    # start at the fast step of the backoff (v2.20.24).
+                    self._weekly_offline_retry_count = 0
+                    self._weekly_offline_retry_ts = 0.0
                     self._save_delivery_state()
                     logger.info("周报已发送（图片）：%s", targets)
                     return
@@ -1886,6 +1945,10 @@ class DailyReporter:
                     self._weekly_image_report_day = None
                     self._weekly_pending_recovery_week = None
                     self._weekly_pending_recovery_since = 0.0
+                    # The channel works again: the next weekly failure must
+                    # start at the fast step of the backoff (v2.20.24).
+                    self._weekly_offline_retry_count = 0
+                    self._weekly_offline_retry_ts = 0.0
                     self._save_delivery_state()
                     return
         result = await self.plugin.send_text(
@@ -1909,6 +1972,10 @@ class DailyReporter:
             self._weekly_image_report_day = None
             self._weekly_pending_recovery_week = None
             self._weekly_pending_recovery_since = 0.0
+            # The channel works again: the next weekly failure must start at
+            # the fast step of the backoff (v2.20.24).
+            self._weekly_offline_retry_count = 0
+            self._weekly_offline_retry_ts = 0.0
             self._save_delivery_state()
             logger.info("周报已发送（文字）：%s", targets)
         elif _uncertain(result):
@@ -1924,6 +1991,10 @@ class DailyReporter:
             self._weekly_image_report_day = None
             self._weekly_pending_recovery_week = None
             self._weekly_pending_recovery_since = 0.0
+            # The channel works again: the next weekly failure must start at
+            # the fast step of the backoff (v2.20.24).
+            self._weekly_offline_retry_count = 0
+            self._weekly_offline_retry_ts = 0.0
             self._save_delivery_state()
         else:
             self._record(day, False, "weekly send failed")
@@ -2062,11 +2133,34 @@ class DailyReporter:
             # 15 minutes as a fallback in case the reconnect hook is missed.
             # The post-midnight backfill passes poll_offline=False: it already
             # waited once and a 15-minute poll only rebuilt the report 24
-            # times before 06:00 (v2.20.17 audit).
+            # times before 06:00 (v2.20.17 audit). After four rounds the
+            # poll backs off to one hour (v2.20.24): a channel that never
+            # comes back kept rebuilding the whole report every 15 minutes.
+            now_ts = time.time()
+            last_offline = safe_float(
+                getattr(self, "_offline_retry_ts", 0.0),
+            )
+            offline_attempt = (
+                1
+                if now_ts - last_offline > 2 * 3600
+                else safe_int(getattr(self, "_offline_retry_count", 0)) + 1
+            )
+            self._offline_retry_ts = now_ts
+            self._offline_retry_count = offline_attempt
             self._pending_retry = (
-                (budget_key, time.time() + 900) if poll_offline else None
+                (budget_key, now_ts + offline_retry_delay(offline_attempt))
+                if poll_offline
+                else None
             )
             self._save_delivery_state()
+            if offline_retry_delay(offline_attempt) != offline_retry_delay(
+                offline_attempt - 1
+            ):
+                logger.warning(
+                    "日报 %s 连续 %d 次因连接不可用未能送达，已改为每小时重试（恢复后仍会补发）",
+                    budget_key,
+                    offline_attempt - 1,
+                )
             logger.warning(
                 "日报 %s 发送失败（Bot 连接不可用），已排队，恢复后补发最近这一份",
                 budget_key,
@@ -2133,6 +2227,11 @@ class DailyReporter:
             or bool(getattr(self, "_pending_recovery_since", 0.0))
             or self._pending_image_retry_report_day is not None
             or self._pending_image_retry_send_day is not None
+            # The offline backoff counters: a delivered report means the
+            # channel works again, so the next failure must start at the
+            # fast 15-minute step instead of the slow hourly one (v2.20.24).
+            or bool(getattr(self, "_offline_retry_count", 0))
+            or bool(getattr(self, "_weekly_offline_retry_count", 0))
         )
         self._pending_retry = None
         self._pending_retry_count = 0
@@ -2141,6 +2240,11 @@ class DailyReporter:
         self._pending_recovery_since = 0.0
         self._pending_image_retry_report_day = None
         self._pending_image_retry_send_day = None
+        self._offline_retry_count = 0
+        self._offline_retry_ts = 0.0
+        if clear_weekly:
+            self._weekly_offline_retry_count = 0
+            self._weekly_offline_retry_ts = 0.0
         if clear_weekly:
             # Only the disabled branch passes this: a weekly retry queued
             # while the daily report got disabled used to survive the

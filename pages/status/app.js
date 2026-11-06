@@ -1693,6 +1693,7 @@
       {
         resource: t("kind_resource", "资源"),
         offline: t("kind_offline", "掉线"),
+        connection: t("kind_connection", "连接状态"),
         service: t("kind_service", "服务"),
         provider: t("kind_provider", "LLM"),
       }[kind] ||
@@ -1891,6 +1892,23 @@
     }
     const anomalies = data.anomalies || {};
     const anomalyItems = anomalies.items || [];
+    if (anomalies.data_truncated) {
+      // The truncation notice must be visible even when the table is empty:
+      // a day whose rows all fell over the cap shows "no incidents" while
+      // real ones were dropped (v2.20.24 audit).
+      blocks.push(
+        '<div class="detail-block"><h3>' +
+          esc(t("report_anomaly_events", "异常事件")) +
+          '</h3><p class="muted">' +
+          esc(
+            t(
+              "report_anomaly_data_truncated",
+              "事件量超出单日统计上限，可能有故障未被统计，故障时长也可能不准确。",
+            ),
+          ) +
+          "</p></div>",
+      );
+    }
     if (anomalyItems.length) {
       // The image report has this table; the page used to show only the
       // count, so "4 次异常" was all an operator saw here.

@@ -210,7 +210,14 @@ class PageApi:
         # One entry per cache key currently being built: a plain boolean was
         # cleared by whichever concurrent build finished first, so two
         # different days being opened at once each built again (v2.20.20).
-        self._reports_build_inflight: set[tuple] = set()
+        # The value is an Event the late callers wait on, so a COLD cache
+        # (no stale copy to serve) builds once instead of once per caller
+        # (v2.20.24).
+        self._reports_build_inflight: dict[tuple, asyncio.Event] = {}
+        # The payload of a finished build, keyed by cache key. The shared
+        # cache slot holds only ONE payload, so a waiter that reads it may
+        # find another day's payload and rebuild (v2.20.24 audit).
+        self._reports_build_results: dict[tuple, Any] = {}
         # Per-kind verify cooldown: the dashboard buttons used to be able to
         # send a real message every click, so a stuck retry loop in the page
         # could spam the chat (v2.20.5).
@@ -1391,11 +1398,6 @@ class PageApi:
 
     async def reports(self):
         plugin = self.plugin
-        gate = await self._db_unavailable_payload()
-        if gate:
-            # An explicit degraded marker instead of "empty sections": the
-            # page keeps whatever it already rendered and shows a notice.
-            return jsonify({**gate, "day": None})
         now_ts = time.time()
         fresh = str(_query_value("fresh", "0")) == "1"
         # ``day`` lets the dashboard look at an older report (for example one
@@ -1447,6 +1449,116 @@ class PageApi:
             history_days,
             day_arg or "",
         )
+        # Claim the build BEFORE the first await. The database probe below
+        # awaits, so a claim made after it lets every concurrent caller pass
+        # this point first and build the whole report on its own (v2.20.24
+        # audit).
+        event = self._reports_build_inflight.get(cache_key)
+        # A forced refresh (``fresh=1``) always builds its own payload: the
+        # operator clicked "刷新" and must not receive the build that was
+        # already running (v2.20.24 audit).
+        is_builder = event is None or fresh
+        if is_builder:
+            event = asyncio.Event()
+            self._reports_build_inflight[cache_key] = event
+        try:
+            return await self._reports_dispatch(
+                now_ts,
+                cache_key,
+                sections_cfg,
+                fresh,
+                day_arg,
+                event,
+                is_builder,
+            )
+        finally:
+            if is_builder:
+                if self._reports_build_inflight.get(cache_key) is event:
+                    self._reports_build_inflight.pop(cache_key, None)
+                # The waiters wake up here and read the payload. The slot
+                # must survive until then, so it is NOT cleaned here; a
+                # bounded size keeps a build nobody waited for from piling
+                # up.
+                self._prune_build_results(keep=cache_key)
+                event.set()
+
+    def _prune_build_results(self, keep: tuple | None = None) -> None:
+        """Drop the oldest handoff payloads, never the one just written.
+
+        A plain "keep the last N keys" eviction removed the key that the
+        builder had just stored whenever the dictionary was already full:
+        re-assigning an existing key keeps its original position, so the
+        key the builder wrote could be the first one evicted -- and the
+        waiting caller then rebuilt the whole report (v2.20.24 audit).
+        """
+
+        results = self._reports_build_results
+        if len(results) <= 8:
+            return
+        for stale_key in list(results):
+            if len(results) <= 8:
+                break
+            if stale_key == keep:
+                continue
+            results.pop(stale_key, None)
+
+    async def _reports_dispatch(
+        self,
+        now_ts: float,
+        cache_key: tuple,
+        sections_cfg: Any,
+        fresh: bool,
+        day_arg: str | None,
+        event: asyncio.Event,
+        is_builder: bool,
+    ):
+        """Serve one /reports request, sharing one build per cache key."""
+        if not is_builder:
+            # Another caller is already building this payload. Wait for it
+            # and reuse its result. The warm-cache shortcut below is NOT
+            # used here: the builder runs the database probe first, and a
+            # cached payload must not mask a broken database (v2.20.24
+            # audit).
+            try:
+                await asyncio.wait_for(event.wait(), timeout=90)
+            except Exception:
+                # TimeoutError (or a cancellation of the wait itself). The
+                # build is taking longer than 90 s -- rebuilding here would
+                # run a SECOND full aggregation next to the running one
+                # (v2.20.24 audit). Report the timeout instead; the page
+                # offers a retry.
+                logger.warning("看板日报构建超过 90 秒未完成，本次不再重复构建")
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error_code": "report_build_timeout",
+                        "error": "日报构建超时，请稍后重试",
+                    }
+                )
+            result = self._reports_build_results.get(cache_key)
+            if result is not None:
+                # The handoff payload can be older than the 60 s cache
+                # window, so it is marked as stale: otherwise the page
+                # would claim the data was just updated (v2.20.24 audit).
+                handed = copy.deepcopy(result)
+                if isinstance(handed, dict):
+                    handed["stale"] = True
+                return jsonify(handed)
+            # The running build failed (no result): fall through and build
+            # here, so the caller still gets an error payload.
+        # The database gate comes BEFORE the cache: a warm cache must not
+        # mask a broken database, or the page would show stale data as if
+        # it were fresh and the background repair would never start
+        # (v2.20.24 audit).
+        gate = await self._db_unavailable_payload()
+        if gate:
+            # An explicit degraded marker instead of "empty sections": the
+            # page keeps whatever it already rendered and shows a notice.
+            degraded = {**gate, "day": None}
+            # The waiting callers get the same marker, so a database outage
+            # is probed once per cache key instead of once per caller.
+            self._reports_build_results[cache_key] = degraded
+            return jsonify(degraded)
         cached = self._reports_cache
         if (
             cached
@@ -1457,27 +1569,16 @@ class PageApi:
             # Hand out a copy: the cached payload is the very object every
             # later request would receive, so a caller mutating it in place
             # would corrupt all subsequent responses.
-            return jsonify(copy.deepcopy(cached[1]))
-        if (
-            cache_key in self._reports_build_inflight
-            and cached
-            and cached[2] == cache_key
-        ):
-            # A concurrent miss is already building the same payload; serve
-            # the stale copy instead of building it twice (v2.20.0). Mark it
-            # so the page says "still refreshing" instead of claiming the
-            # data was just updated (v2.20.5).
-            stale = copy.deepcopy(cached[1])
-            if isinstance(stale, dict):
-                stale["stale"] = True
-            return jsonify(stale)
-        self._reports_build_inflight.add(cache_key)
-        try:
-            return await self._build_reports_payload(
-                now_ts, cache_key, sections_cfg, fresh, day_arg
-            )
-        finally:
-            self._reports_build_inflight.discard(cache_key)
+            payload = copy.deepcopy(cached[1])
+            self._reports_build_results[cache_key] = payload
+            return jsonify(payload)
+        payload = await self._build_reports_payload(
+            now_ts, cache_key, sections_cfg, fresh, day_arg
+        )
+        # Hand the payload to the waiting callers. The shared cache slot is
+        # NOT a substitute: it only holds one key at a time.
+        self._reports_build_results[cache_key] = payload
+        return jsonify(payload)
 
     async def _build_reports_payload(
         self,
@@ -1512,13 +1613,11 @@ class PageApi:
             logger.exception("插件页面聚合日报失败")
             # An empty payload used to render as a blank report page with no
             # explanation. Tell the page explicitly so it can offer a retry.
-            return jsonify(
-                {
-                    "ok": False,
-                    "error_code": "report_build_failed",
-                    "error": "日报数据构建失败，请稍后重试",
-                }
-            )
+            return {
+                "ok": False,
+                "error_code": "report_build_failed",
+                "error": "日报数据构建失败，请稍后重试",
+            }
         payload = {
             "ok": True,
             "day": view.get("day"),
@@ -1549,4 +1648,4 @@ class PageApi:
             ),
         }
         self._reports_cache = (now_ts, payload, cache_key)
-        return jsonify(payload)
+        return payload

@@ -29,6 +29,7 @@ from .utils import (
     clamp_config,
     delivery_offline,
     normalize_targets,
+    offline_retry_delay,
     redact_url,
     retry_delay,
     safe_float,
@@ -1402,6 +1403,9 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        # The channel works again: the next failure must
+                        # start at the fast step of the backoff (v2.20.24).
+                        st.pop("offline_retry_count", None)
                         # The alert went out on its own; the buffered marker
                         # (if a previous episode ever buffered) must go or a
                         # later same-name abandon would withdraw this item's
@@ -1411,9 +1415,35 @@ class ServiceMonitor:
                         st.pop("summary_reason", None)
                         self._record_event(name, target_text, detail, "alert")
                     else:
-                        retry_count = safe_int(st.get("retry_count") or 0) + 1
-                        st["retry_count"] = retry_count
-                        st["next_attempt"] = now + retry_delay(retry_count)
+                        if self._transport_offline() or delivery_offline(result):
+                            # The channel is down, so this failure says
+                            # nothing about the monitor item: keep the alert
+                            # queued without spending the retry budget
+                            # (v2.20.5). Throttle the polling after a few
+                            # rounds (v2.20.24): the first attempt used to
+                            # retry after 30 seconds and the target the
+                            # direct path rejects while the framework
+                            # returns False was polled at that rate.
+                            offline_attempt = (
+                                safe_int(st.get("offline_retry_count") or 0) + 1
+                            )
+                            st["offline_retry_count"] = offline_attempt
+                            st["next_attempt"] = now + offline_retry_delay(
+                                offline_attempt
+                            )
+                            if offline_retry_delay(
+                                offline_attempt
+                            ) != offline_retry_delay(offline_attempt - 1):
+                                logger.warning(
+                                    "监测项 %s 告警连续 %d 次因连接不可用未能送达，已改为每小时重试（恢复后仍会补发）",
+                                    name,
+                                    offline_attempt - 1,
+                                )
+                        else:
+                            st.pop("offline_retry_count", None)
+                            retry_count = safe_int(st.get("retry_count") or 0) + 1
+                            st["retry_count"] = retry_count
+                            st["next_attempt"] = now + retry_delay(retry_count)
                         self._record_event(name, target_text, detail, "failed")
             elif alerting and pending:
                 next_attempt = safe_float(st.get("next_attempt") or 0)
@@ -1439,6 +1469,7 @@ class ServiceMonitor:
                         st["last_sent"] = now
                         st["retry_count"] = 0
                         st["next_attempt"] = 0
+                        st.pop("offline_retry_count", None)
                         st.pop("summary_buffered", None)
                         st.pop("summary_key", None)
                         st.pop("summary_reason", None)
@@ -1448,9 +1479,26 @@ class ServiceMonitor:
                             # The channel is down, so this failure says
                             # nothing about the monitor item: keep the alert
                             # queued without spending the retry budget
-                            # (v2.20.5).
-                            st["next_attempt"] = now + 900
+                            # (v2.20.5). Throttle the polling after a few
+                            # rounds (v2.20.24): a channel that never comes
+                            # back was retried every 15 minutes forever.
+                            offline_attempt = (
+                                safe_int(st.get("offline_retry_count") or 0) + 1
+                            )
+                            st["offline_retry_count"] = offline_attempt
+                            st["next_attempt"] = now + offline_retry_delay(
+                                offline_attempt
+                            )
+                            if offline_retry_delay(
+                                offline_attempt
+                            ) != offline_retry_delay(offline_attempt - 1):
+                                logger.warning(
+                                    "监测项 %s 告警连续 %d 次因连接不可用未能送达，已改为每小时重试（恢复后仍会补发）",
+                                    name,
+                                    offline_attempt - 1,
+                                )
                         else:
+                            st.pop("offline_retry_count", None)
                             retry_count = safe_int(st.get("retry_count") or 0) + 1
                             if retry_count > MAX_ALERT_RETRIES:
                                 # The operator never received this outage. Stop
@@ -1532,6 +1580,7 @@ class ServiceMonitor:
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
+                        st.pop("recovery_offline_count", None)
                         # The recovery reached the chat, so it no longer
                         # depends on a pending summary. Leaving the marker
                         # behind made the next abandon callback withdraw the
@@ -1539,8 +1588,26 @@ class ServiceMonitor:
                         st.pop("recovery_awaits_summary", None)
                     else:
                         if self._transport_offline() or delivery_offline(result):
-                            st["recovery_next_attempt"] = now + 900
+                            # Keep the notice queued without spending its
+                            # retry budget, and throttle the polling after a
+                            # few rounds (v2.20.24).
+                            offline_attempt = (
+                                safe_int(st.get("recovery_offline_count") or 0) + 1
+                            )
+                            st["recovery_offline_count"] = offline_attempt
+                            st["recovery_next_attempt"] = now + offline_retry_delay(
+                                offline_attempt
+                            )
+                            if offline_retry_delay(
+                                offline_attempt
+                            ) != offline_retry_delay(offline_attempt - 1):
+                                logger.warning(
+                                    "监测项 %s 恢复通知连续 %d 次因连接不可用未能送达，已改为每小时重试",
+                                    name,
+                                    offline_attempt - 1,
+                                )
                         else:
+                            st.pop("recovery_offline_count", None)
                             retry_count = (
                                 safe_int(st.get("recovery_retry_count") or 0) + 1
                             )
@@ -1553,6 +1620,7 @@ class ServiceMonitor:
                                     "recovery_attempt",
                                     "recovery_next_attempt",
                                     "recovery_retry_count",
+                                    "recovery_offline_count",
                                 ):
                                     st.pop(stale_key, None)
                                 logger.warning(
@@ -1576,6 +1644,10 @@ class ServiceMonitor:
                 st["since"] = 0
                 st["retry_count"] = 0
                 st["next_attempt"] = 0
+                # The episode is over: the offline backoff belongs to it.
+                # Keeping it made the next fault of this item start at the
+                # slow hourly step (v2.20.24 audit).
+                st.pop("offline_retry_count", None)
                 # Episode is over: the buffered marker must not survive into
                 # the next one, or a later same-name abandon would withdraw
                 # this item's "notified" state (v2.20.0). Read it first: only
