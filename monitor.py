@@ -524,6 +524,7 @@ class ServiceMonitor:
                     # below: the recovery is queued after the episode was
                     # closed, so ``alerting`` is already False.
                     st.pop("pending_recovery", None)
+                    st.pop("recovery_offline_count", None)
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
@@ -848,6 +849,7 @@ class ServiceMonitor:
         # Items skipped for config errors never reach _check_item; if one
         # was already alerting when its config broke, close that episode
         # here instead of freezing it in the "unresolved" list forever.
+        pending_closes: list[tuple[dict[str, Any], str, str, str, str]] = []
         for item in self.items:
             if not item.get("config_error"):
                 continue
@@ -871,13 +873,24 @@ class ServiceMonitor:
                     or item.get("pattern")
                     or name
                 )
-                self._close_episode_for_config_error(
-                    st,
-                    name,
-                    redact_url(target_text),
-                    kind,
-                    f"配置不完整（{item.get('config_error')}）",
+                pending_closes.append(
+                    (
+                        st,
+                        name,
+                        redact_url(target_text),
+                        kind,
+                        f"配置不完整（{item.get('config_error')}）",
+                    )
                 )
+        # The close writes its event (synchronous SQLite) and queues the
+        # notice; doing that while holding the monitor lock blocked the
+        # sampler and the alert engine for as long as the write took -- the
+        # same reason _prune_state runs outside the lock (v2.20.24 audit).
+        # ``st`` stays the live mapping, and check_all saves below.
+        for st, close_name, close_target, close_kind, close_detail in pending_closes:
+            self._close_episode_for_config_error(
+                st, close_name, close_target, close_kind, close_detail
+            )
         with self.state.section("monitors") as monitors:
             monitors["last_run"] = time.time()
         # A config change that does not reload the plugin (rare, but the WebUI
@@ -1007,6 +1020,13 @@ class ServiceMonitor:
         ok, detail, target_text = await self._probe(item)
         detail = self._downgrade_config_error(detail, ever_ok)
         target_text = redact_url(target_text)
+        # Push text is operator-facing chat content: with the hostname rule
+        # on it must obey the same masking as the card and the report (the
+        # comment at the Redactor construction promises exactly that). The
+        # event log keeps the raw values -- they drive the pairing, and the
+        # report/dashboard mask them on output.
+        push_target_text = self._redactor.mask_name(target_text)
+        push_detail = self._redactor.mask_addresses(detail)
         now = time.time()
         monitors = self.state.setdefault("monitors", {})
         if not isinstance(monitors, dict):
@@ -1046,7 +1066,14 @@ class ServiceMonitor:
             # allows instead of staying latched-but-silent for the whole
             # episode (v2.20.8).
             st["summary_abandoned"] = True
-            st["since"] = safe_float(st.get("last_attempt")) or now
+            # Keep the FIRST-FAILURE start written before the crash: falling
+            # back to last_attempt re-dated the outage at the push moment and
+            # under-reported the duration by (threshold-1)*interval -- exactly
+            # what the since fix below repairs on the normal path (v2.20.25
+            # reverse audit).
+            st["since"] = (
+                safe_float(st.get("since")) or safe_float(st.get("last_attempt")) or now
+            )
             st["fails"] = 0
             # Log an alert row so the episode has a start in the event log;
             # without it the later recovery had no matching beginning.
@@ -1066,6 +1093,11 @@ class ServiceMonitor:
             st["last_checked"] = now
             st["last_error"] = detail
             st["fails"] = 0
+            if not alerting:
+                # The item never latched, so a start written by earlier
+                # failed probes must not survive into the next outage
+                # (the latched episode is closed above, which clears it).
+                st["since"] = 0
             if not st.get("config_error_warned"):
                 st["config_error_warned"] = True
                 logger.warning(
@@ -1113,6 +1145,10 @@ class ServiceMonitor:
                 # threshold with a stale count and alert on a service that
                 # was healthy (v2.20.19).
                 st["fails"] = 0
+                if not alerting:
+                    # Never latched: drop a start written before the window
+                    # so the next outage does not inherit it.
+                    st["since"] = 0
                 started = safe_float(st.pop("silent_since", 0) or 0)
                 if alerting:
                     # An item that was ALREADY alerting when the window began
@@ -1249,6 +1285,13 @@ class ServiceMonitor:
                 # it grow made state.json and the dashboard show an ever
                 # increasing "fails" number during a long outage.
                 fails += 1
+                if fails == 1 and not safe_float(st.get("since") or 0):
+                    # The episode starts at the FIRST failed probe, not at
+                    # the push moment: with fail_threshold>1 the push happens
+                    # (threshold-1)*interval later, which used to under-report
+                    # the outage duration and render "故障开始: 1970-…" when
+                    # the state had no start at all (v2.20.24 audit).
+                    st["since"] = now
             # A fault latched inside the cooldown was recorded but never
             # pushed. If it is still failing when the cooldown expires the
             # operator has never seen it: push the alert now, mirroring the
@@ -1317,6 +1360,11 @@ class ServiceMonitor:
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
+                    # The folded notice is no longer a retry object of its
+                    # own: a leftover offline ladder would make the NEXT
+                    # episode's first offline retry start at the hourly step
+                    # (v2.20.25 reverse audit).
+                    st.pop("recovery_offline_count", None)
                     # The queued recovery is folded into this alert, so it
                     # no longer waits for a summary. A stale marker made the
                     # next abandon callback withdraw the recovery of an
@@ -1326,8 +1374,8 @@ class ServiceMonitor:
                         f"🔴 服务异常 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
-                        f"目标: {target_text}\n"
-                        f"原因: {detail}\n"
+                        f"目标: {push_target_text}\n"
+                        f"原因: {push_detail}\n"
                         f"时间: {_now_text(self.config)}\n"
                         f"已连续 {self.fail_threshold} 次检测失败。"
                     )
@@ -1341,9 +1389,12 @@ class ServiceMonitor:
                     self.state.save()
                     result = await self._push_alert(
                         name,
-                        detail,
+                        # The summary line ("• {label}: {reason}") is chat
+                        # content too, so the aggregated reason is masked the
+                        # same way as the per-item text.
+                        push_detail,
                         text,
-                        target_text,
+                        push_target_text,
                         item_key=key,
                         display_name=display_name,
                     )
@@ -1396,8 +1447,10 @@ class ServiceMonitor:
                         # Match the delivered summary by (name, reason): two
                         # monitors can share a name, and one item's summary
                         # must not clear the other's queued recovery
-                        # (v2.20.19).
-                        st["summary_reason"] = detail
+                        # (v2.20.19). Stores the masked reason so it always
+                        # equals the reason the summary batch was pushed with;
+                        # the key above is the primary match anyway.
+                        st["summary_reason"] = push_detail
                         self._record_event(name, target_text, detail, "alert")
                     elif delivered:
                         st["last_sent"] = now
@@ -1452,8 +1505,8 @@ class ServiceMonitor:
                         f"🔴 服务异常 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
-                        f"目标: {target_text}\n"
-                        f"原因: {detail}\n"
+                        f"目标: {push_target_text}\n"
+                        f"原因: {push_detail}\n"
                         f"时间: {_now_text(self.config)}"
                     )
                     # Persist the in-flight marker before the await so a reload
@@ -1548,6 +1601,7 @@ class ServiceMonitor:
                 # the resource alerts).
                 for stale_key in (
                     "pending_recovery",
+                    "recovery_offline_count",
                     "recovery_attempt",
                     "recovery_next_attempt",
                     "recovery_retry_count",
@@ -1684,7 +1738,7 @@ class ServiceMonitor:
                         f"✅ 服务恢复 · {display_name}\n"
                         "──────────────\n"
                         f"类型: {kind}\n"
-                        f"目标: {target_text}\n"
+                        f"目标: {push_target_text}\n"
                         f"故障开始: {_fmt_ts(now - duration, self.config)}\n"
                         f"恢复时间: {_now_text(self.config)}\n"
                         f"中断时长: {format_duration(duration)}{extra}"
@@ -1778,6 +1832,7 @@ class ServiceMonitor:
             # the operator fixed the config sent a stale "已恢复" with the
             # old timestamps (and the event log kept two recovery rows).
             "pending_recovery",
+            "recovery_offline_count",
             "recovery_attempt",
             "recovery_next_attempt",
             "recovery_retry_count",
@@ -1798,7 +1853,7 @@ class ServiceMonitor:
                 f"✅ 服务告警关闭 · {self._redactor.mask_name(name)}\n"
                 "──────────────\n"
                 f"类型: {kind}\n"
-                f"目标: {target_text}\n"
+                f"目标: {self._redactor.mask_name(target_text)}\n"
                 f"原因: 目标已不存在或配置错误\n"
                 f"故障开始: {_fmt_ts(time.time() - duration, self.config)}\n"
                 f"中断时长: {format_duration(duration)}\n"
@@ -1952,6 +2007,23 @@ class ServiceMonitor:
                                     break
                             if not found:
                                 found = keyword in _decode(body)
+                            if not found and not resp.charset_encoding:
+                                # The HTTP header carries no charset and the
+                                # page declares one only in a <meta> tag: the
+                                # UTF-8 replacement decode above mangles GBK
+                                # bytes, so a Chinese keyword can never match
+                                # and the probe reported a permanent false
+                                # outage. Try the common Chinese encodings
+                                # before giving up (both are built in).
+                                for fallback_encoding in ("gb18030", "big5"):
+                                    try:
+                                        if keyword in bytes(body).decode(
+                                            fallback_encoding, errors="replace"
+                                        ):
+                                            found = True
+                                            break
+                                    except LookupError:
+                                        break
                             if not found:
                                 if truncated:
                                     return (
@@ -2493,6 +2565,7 @@ class ServiceMonitor:
                 # recovery would survive (v2.20.12).
                 if st.get("recovery_awaits_summary"):
                     st.pop("pending_recovery", None)
+                    st.pop("recovery_offline_count", None)
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)

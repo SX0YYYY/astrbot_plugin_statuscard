@@ -518,6 +518,12 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         kinds = cfg_get(rule, "kinds", []) or []
         if isinstance(kinds, str):
             kinds = [kinds]
+        if isinstance(kinds, tuple):
+            # The resolver accepts a tuple too (hand-edited config); treating
+            # it as invalid used to report "missing target or kinds" for a
+            # rule that had both -- the opposite of the truth -- while the
+            # legacy branch below already accepts (list, tuple, set).
+            kinds = list(kinds)
         if not isinstance(kinds, list):
             kinds = []
         if not str(cfg_get(rule, "target", "") or "").strip() or not kinds:

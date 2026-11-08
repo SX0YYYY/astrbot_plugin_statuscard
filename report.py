@@ -613,10 +613,11 @@ class DailyReporter:
         # it is redundant rather than load-bearing.
         self._weekly_last_sent_slot: str | None = None
         # Week the last weekly send was ATTEMPTED in (set before any slow
-        # work): a crash/reload mid-send then leaves a marker the catch-up
-        # check accepts, exactly like the daily last_attempt_day. Without
-        # it the very first weekly run was lost silently whenever the
-        # process died inside the Sunday window (v2.20.0).
+        # work). Redundant by design: the catch-up check looks only at
+        # last_sent/given_up/db_rebuilt, and a guard test asserts exactly
+        # that this marker does NOT influence it (an attempt alone must not
+        # block a catch-up). Kept because the field is part of the persisted
+        # delivery state; do not wire it into the catch-up decision.
         self._weekly_attempt_week: str | None = None
         # A week whose weekly report was given up must not restart the
         # 10/20/30-minute retry cycle: the catch-up check only looked at
@@ -1747,8 +1748,8 @@ class DailyReporter:
     async def _send_weekly_scheduled(
         self, day: str | None = None, slot: str | None = None
     ) -> None:
-        # Mark this week as attempted before any slow work, mirroring the
-        # daily report's last_attempt_day (v2.20.0).
+        # Redundant marker (nothing reads it; see the attribute comment at
+        # __init__), recorded only for parity with the persisted state.
         self._weekly_attempt_week = self._week_key(self._today())
         self._save_delivery_state()
         weekly_sections = self._weekly_sections()

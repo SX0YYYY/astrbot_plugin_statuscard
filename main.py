@@ -916,7 +916,17 @@ class StatusCardPlugin(Star):
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
         # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
-        result = await self.alerts.send_test(event.unified_msg_origin)
+        try:
+            result = await self.alerts.send_test(event.unified_msg_origin)
+        except Exception as exc:
+            # A raising component used to propagate out of the generator: the
+            # operator got no reply at all, not even an error (the other
+            # commands answer with a fallback card or a text summary).
+            logger.exception("测试通知命令执行失败")
+            yield event.plain_result(
+                tr(self.config, "test_error", error=exc.__class__.__name__)
+            )
+            return
         if result.get("ok"):
             message = tr(self.config, "test_sent")
         elif result.get("ok_targets"):
@@ -956,7 +966,16 @@ class StatusCardPlugin(Star):
         # concurrent); the command used to stay completely silent until the
         # final summary, so the operator could not tell it was running.
         yield event.plain_result(tr(self.config, "monitor_testing"))
-        results = await self.monitor.test_all()
+        try:
+            results = await self.monitor.test_all()
+        except Exception as exc:
+            # The "正在检测" notice already went out: an exception here used
+            # to leave the operator waiting for a summary that never came.
+            logger.exception("立即检测命令执行失败")
+            yield event.plain_result(
+                tr(self.config, "monitor_test_error", error=exc.__class__.__name__)
+            )
+            return
         failed = [item for item in results if not item["ok"]]
         lines = [
             tr(self.config, "monitor_result_title"),
@@ -1007,280 +1026,292 @@ class StatusCardPlugin(Star):
         # result chain, so this command's reply would never be sent
         # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
         lines = ["🩺 状态卡诊断", "──────────────"]
-        platform = ""
         try:
-            platform = str(event.get_platform_name() or "")
-        except Exception:
-            pass
-        lines.append(f"平台: {platform or '--'}")
-        lines.append(f"插件: v{__version__}")
-        if platform and not is_supported_platform(platform):
-            lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
-
-        platform_id = str(
-            cfg_get(self.config, "alerts.platform_id", "default") or "default"
-        )
-        client = _get_aiocqhttp_client(self.context, platform_id)
-        if client is None:
-            lines.append("OneBot: 未找到 aiocqhttp 客户端")
-            if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
-                self.config, "alerts.offline_notify", True
-            ):
-                lines.append(
-                    "掉线告警: 已开启，但当前没有可用的 OneBot 连接，无法确认在线状态"
-                )
-        else:
+            # A failing component used to propagate out of the generator:
+            # the operator got no reply at all, not even an error. Every
+            # other command answers with a fallback; the diagnostic now
+            # does too (v2.20.24 audit).
+            platform = ""
             try:
-                status = _normalize_object(
-                    await _call_action(client, "get_status", timeout=3)
-                )
-                online = status.get("online")
-                lines.append(
-                    "OneBot: 客户端存在，online="
-                    + ("unknown" if online is None else str(online))
-                )
-            except Exception as exc:
-                lines.append(
-                    "OneBot: 客户端存在，get_status 失败（"
-                    + exc.__class__.__name__
-                    + "）"
-                )
-
-        # Report the targets the alert engine will actually use: a
-        # notification-center rule overrides alerts.targets per kind, so
-        # counting the legacy list alone showed "0" while alerts still went
-        # out (or the reverse).
-        resource_targets = resolve_targets(self.config, "resource")
-        effective_targets = (
-            resource_targets
-            if resource_targets is not None
-            else list(self.alerts.targets)
-        )
-        lines.append(
-            "告警: "
-            + ("开启" if cfg_bool(self.config, "alerts.enabled", False) else "关闭")
-            + f"，实际生效目标 {len(effective_targets)} 个"
-        )
-        daily_time = str(
-            cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
-        )
-        lines.append(
-            "每日定时状态图: "
-            + (
-                f"开启（{daily_time}）"
-                if cfg_bool(self.config, "alerts.daily_summary.enabled", False)
-                else "关闭"
-            )
-        )
-        active_rules = notify_rules_active(self.config)
-        lines.append(
-            "通知中心: "
-            + (
-                f"启用（{active_rules} 条有效规则，被勾选的类型改发到规则目标，"
-                "未勾选的继续用默认推送目标）"
-                if active_rules
-                else "未启用（全部使用默认推送目标）"
-            )
-        )
-        monitor_status = self.monitor.status()
-        silence = monitor_status.get("silence_until") or "无"
-        lines.append(
-            "服务监测: "
-            + ("开启" if monitor_status.get("enabled") else "关闭")
-            + f"，{len(self.monitor.items)} 项"
-            + f"，静默: {silence}"
-        )
-        if monitor_status.get("silenced"):
-            lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
-
-        cgroup_limit = cgroup_memory_limit()
-        if cgroup_limit:
-            try:
-                host_total = psutil.virtual_memory().total
+                platform = str(event.get_platform_name() or "")
             except Exception:
-                host_total = 0
-            if host_total and cgroup_limit < host_total * 0.95:
-                lines.append(
-                    "内存口径: 容器 cgroup 上限 "
-                    f"{cgroup_limit / (1024**3):.1f} GB"
-                    f"（宿主机 {host_total / (1024**3):.1f} GB；"
-                    "内存使用率按宿主机计算，可能偏高）"
-                )
+                pass
+            lines.append(f"平台: {platform or '--'}")
+            lines.append(f"插件: v{__version__}")
+            if platform and not is_supported_platform(platform):
+                lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
 
-        audit = self.audit_issues()
-        # Audit messages quote operator-provided monitor names / targets.
-        # ``audit.py`` already strips credentials and chat ids; honour the
-        # card's hostname rule here as well, or the diagnostic command prints
-        # the internal host that the card itself hides (v2.20.17).
-        audit_redactor = Redactor(read_rules(self.config, "display.redact"))
-        actionable = [item for item in audit if item.level in ("error", "warning")]
-        if actionable:
-            # Listing only a count left the administrator unable to act from
-            # QQ ("2 项待处理" -- which two?). Show the same details the info
-            # branch already prints.
-            lines.append(f"配置体检: {len(actionable)} 项待处理")
-            for issue in actionable[:4]:
-                tag = "错误" if issue.level == "error" else "提醒"
-                lines.append(
-                    f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
-                )
-            if len(actionable) > 4:
-                lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
-        elif self._audit_failed:
-            # ``initialize()`` already logs "体检未完成" when run_audit raised
-            # or timed out, but the command still claimed "未发现问题" --
-            # the most misleading all-clear (v2.20.19).
-            lines.append("配置体检: 未完成（执行失败或超时），本次未检查配置")
-        elif audit:
-            lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
-            for issue in audit[:4]:
-                tag = "错误" if issue.level == "error" else "提示"
-                lines.append(
-                    f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
-                )
-        else:
-            lines.append("配置体检: 未发现问题")
-
-        if self._diag.get("last_render_at"):
-            age = max(0, int(time.time() - safe_float(self._diag["last_render_at"])))
-            ok = "成功" if self._diag.get("last_render_ok") else "失败"
-            lines.append(
-                f"最近状态卡渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
-                f"渲染 {self._diag.get('last_render_ms', '--')}ms，{age}s 前"
+            platform_id = str(
+                cfg_get(self.config, "alerts.platform_id", "default") or "default"
             )
-        else:
-            lines.append("最近状态卡渲染: 尚未渲染")
-        if self._diag.get("last_report_render_at"):
-            age = max(
-                0,
-                int(time.time() - safe_float(self._diag["last_report_render_at"])),
-            )
-            ok = "成功" if self._diag.get("last_report_render_ok") else "失败"
-            lines.append(
-                f"最近日报渲染: {ok}；渲染 "
-                f"{self._diag.get('last_report_render_ms', '--')}ms，{age}s 前"
-            )
-        else:
-            lines.append("最近日报渲染: 尚未渲染")
-        if self._diag.get("last_error"):
-            lines.append(f"最近错误: {self._diag.get('last_error')}")
-
-        # Prefer the last real notification: a dashboard "verify" click used
-        # to overwrite the single delivery slot, so the diagnosis showed a
-        # successful verify_targets while the real alert had failed.
-        delivery = self.state.get("delivery_real") or self.state.get("delivery", {})
-        if isinstance(delivery, dict) and delivery.get("ts"):
-            age = max(0, int(time.time() - safe_float(delivery["ts"])))
-            uncertain_targets = delivery.get("uncertain_targets") or []
-            if delivery.get("ok"):
-                push_state = "部分成功" if delivery.get("partial") else "成功"
-            elif uncertain_targets:
-                push_state = "未确认（可能未送达）"
+            client = _get_aiocqhttp_client(self.context, platform_id)
+            if client is None:
+                lines.append("OneBot: 未找到 aiocqhttp 客户端")
+                if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
+                    self.config, "alerts.offline_notify", True
+                ):
+                    lines.append(
+                        "掉线告警: 已开启，但当前没有可用的 OneBot 连接，无法确认在线状态"
+                    )
             else:
-                push_state = "失败"
-            lines.append(
-                "最近主动推送: "
-                + push_state
-                + f"（{delivery.get('kind', '?')}，"
-                + f"来源 {delivery.get('source', '未知')}，{age}s 前）"
+                try:
+                    status = _normalize_object(
+                        await _call_action(client, "get_status", timeout=3)
+                    )
+                    online = status.get("online")
+                    lines.append(
+                        "OneBot: 客户端存在，online="
+                        + ("unknown" if online is None else str(online))
+                    )
+                except Exception as exc:
+                    lines.append(
+                        "OneBot: 客户端存在，get_status 失败（"
+                        + exc.__class__.__name__
+                        + "）"
+                    )
+
+            # Report the targets the alert engine will actually use: a
+            # notification-center rule overrides alerts.targets per kind, so
+            # counting the legacy list alone showed "0" while alerts still went
+            # out (or the reverse).
+            resource_targets = resolve_targets(self.config, "resource")
+            effective_targets = (
+                resource_targets
+                if resource_targets is not None
+                else list(self.alerts.targets)
             )
-            if uncertain_targets:
-                lines.append(
-                    "未确认目标: "
-                    + "、".join(mask_umo(item) for item in uncertain_targets[:3])
+            lines.append(
+                "告警: "
+                + ("开启" if cfg_bool(self.config, "alerts.enabled", False) else "关闭")
+                + f"，实际生效目标 {len(effective_targets)} 个"
+            )
+            daily_time = str(
+                cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
+            )
+            lines.append(
+                "每日定时状态图: "
+                + (
+                    f"开启（{daily_time}）"
+                    if cfg_bool(self.config, "alerts.daily_summary.enabled", False)
+                    else "关闭"
                 )
-            failed_targets = [
-                item
-                for item in (delivery.get("failed_targets") or [])
-                if item not in uncertain_targets
-            ]
-            if failed_targets:
-                lines.append(
-                    "失败目标: "
-                    + "、".join(mask_umo(item) for item in failed_targets[:3])
+            )
+            active_rules = notify_rules_active(self.config)
+            lines.append(
+                "通知中心: "
+                + (
+                    f"启用（{active_rules} 条有效规则，被勾选的类型改发到规则目标，"
+                    "未勾选的继续用默认推送目标）"
+                    if active_rules
+                    else "未启用（全部使用默认推送目标）"
                 )
-            receipts = delivery.get("receipts") or {}
-            if isinstance(receipts, dict) and receipts:
-                parts: list[str] = []
-                for target, receipt in list(receipts.items())[:3]:
-                    if not isinstance(receipt, dict):
-                        continue
-                    retcode = receipt.get("retcode")
-                    message_id = receipt.get("message_id")
-                    if receipt.get("ok"):
-                        receipt_state = "成功"
-                    elif target in uncertain_targets:
-                        receipt_state = "未确认"
-                    else:
-                        receipt_state = "失败"
-                    detail = f"retcode={retcode}"
-                    if receipt.get("via") == "framework":
-                        # The direct OneBot send was rejected but the
-                        # framework path delivered it; printing the direct
-                        # retcode next to "成功" read like a contradiction
-                        # (v2.20.20).
-                        detail = "经框架发送"
-                    if message_id is not None:
-                        detail += f"，message_id={message_id}"
-                    # 打码：诊断命令发在群里，完整 UMO 会对全部群成员可见
-                    # （与看板 verify 的 _mask_umo 同一口径）。
-                    parts.append(f"{mask_umo(target)}（{receipt_state}，{detail}）")
-                if parts:
-                    lines.append("OneBot 回执: " + "；".join(parts))
-        else:
-            lines.append("最近主动推送: 暂无记录")
-        report_status = await asyncio.to_thread(self.report.status)
-        store_stats = report_status.get("store", {})
-        if not self.report_store.available:
-            lines.append(
-                "日报数据库: 不可用（"
-                + str(getattr(self.report_store, "init_error", None) or "初始化失败")
-                + "，详见后台日志）"
             )
-        lines.append(
-            "日报数据: "
-            + ("记录中" if report_status.get("enabled") else "未记录")
-            + f"；资源 {store_stats.get('resources', 0)} 条"
-            + f" / 快照 {store_stats.get('snapshots', 0)} 天"
-            + f" / 事件 {store_stats.get('events', 0)} 条"
-        )
-        lines.append(
-            "日报扩展: "
-            + f"网站 {store_stats.get('websites', 0)} 条"
-            + f" / 进程 {store_stats.get('processes', 0)} 条"
-        )
-        daily_status = await asyncio.to_thread(self.daily_report.status)
-        lines.append(
-            "日报发送: "
-            + ("开启" if daily_status.get("enabled") else "关闭")
-            + f"，时间 {daily_status.get('time', '--')}"
-            + f"，目标 {len(daily_status.get('targets') or [])} 个"
-            + f"，内容 {','.join(daily_status.get('sections') or [])}"
-        )
-        if daily_status.get("next_run"):
-            lines.append("下次日报: " + str(daily_status.get("next_run")))
-        elif daily_status.get("enabled"):
-            lines.append("下次日报: 待排程（任务可能未启动）")
-        alarm_status = self.alerts.status()
-        if alarm_status.get("daily_summary"):
-            next_daily = alarm_status.get("daily_summary_next")
-            running = alarm_status.get("daily_summary_running")
+            monitor_status = self.monitor.status()
+            silence = monitor_status.get("silence_until") or "无"
             lines.append(
-                "下次每日状态图: "
-                + (str(next_daily) if next_daily else "--")
-                + ("（任务运行中）" if running else "（任务未运行）")
+                "服务监测: "
+                + ("开启" if monitor_status.get("enabled") else "关闭")
+                + f"，{len(self.monitor.items)} 项"
+                + f"，静默: {silence}"
             )
-        last_run = daily_status.get("last_run")
-        if isinstance(last_run, dict):
+            if monitor_status.get("silenced"):
+                lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
+
+            cgroup_limit = cgroup_memory_limit()
+            if cgroup_limit:
+                try:
+                    host_total = psutil.virtual_memory().total
+                except Exception:
+                    host_total = 0
+                if host_total and cgroup_limit < host_total * 0.95:
+                    lines.append(
+                        "内存口径: 容器 cgroup 上限 "
+                        f"{cgroup_limit / (1024**3):.1f} GB"
+                        f"（宿主机 {host_total / (1024**3):.1f} GB；"
+                        "内存使用率按宿主机计算，可能偏高）"
+                    )
+
+            audit = self.audit_issues()
+            # Audit messages quote operator-provided monitor names / targets.
+            # ``audit.py`` already strips credentials and chat ids; honour the
+            # card's hostname rule here as well, or the diagnostic command prints
+            # the internal host that the card itself hides (v2.20.17).
+            audit_redactor = Redactor(read_rules(self.config, "display.redact"))
+            actionable = [item for item in audit if item.level in ("error", "warning")]
+            if actionable:
+                # Listing only a count left the administrator unable to act from
+                # QQ ("2 项待处理" -- which two?). Show the same details the info
+                # branch already prints.
+                lines.append(f"配置体检: {len(actionable)} 项待处理")
+                for issue in actionable[:4]:
+                    tag = "错误" if issue.level == "error" else "提醒"
+                    lines.append(
+                        f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                    )
+                if len(actionable) > 4:
+                    lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
+            elif self._audit_failed:
+                # ``initialize()`` already logs "体检未完成" when run_audit raised
+                # or timed out, but the command still claimed "未发现问题" --
+                # the most misleading all-clear (v2.20.19).
+                lines.append("配置体检: 未完成（执行失败或超时），本次未检查配置")
+            elif audit:
+                lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
+                for issue in audit[:4]:
+                    tag = "错误" if issue.level == "error" else "提示"
+                    lines.append(
+                        f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                    )
+            else:
+                lines.append("配置体检: 未发现问题")
+
+            if self._diag.get("last_render_at"):
+                age = max(
+                    0, int(time.time() - safe_float(self._diag["last_render_at"]))
+                )
+                ok = "成功" if self._diag.get("last_render_ok") else "失败"
+                lines.append(
+                    f"最近状态卡渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
+                    f"渲染 {self._diag.get('last_render_ms', '--')}ms，{age}s 前"
+                )
+            else:
+                lines.append("最近状态卡渲染: 尚未渲染")
+            if self._diag.get("last_report_render_at"):
+                age = max(
+                    0,
+                    int(time.time() - safe_float(self._diag["last_report_render_at"])),
+                )
+                ok = "成功" if self._diag.get("last_report_render_ok") else "失败"
+                lines.append(
+                    f"最近日报渲染: {ok}；渲染 "
+                    f"{self._diag.get('last_report_render_ms', '--')}ms，{age}s 前"
+                )
+            else:
+                lines.append("最近日报渲染: 尚未渲染")
+            if self._diag.get("last_error"):
+                lines.append(f"最近错误: {self._diag.get('last_error')}")
+
+            # Prefer the last real notification: a dashboard "verify" click used
+            # to overwrite the single delivery slot, so the diagnosis showed a
+            # successful verify_targets while the real alert had failed.
+            delivery = self.state.get("delivery_real") or self.state.get("delivery", {})
+            if isinstance(delivery, dict) and delivery.get("ts"):
+                age = max(0, int(time.time() - safe_float(delivery["ts"])))
+                uncertain_targets = delivery.get("uncertain_targets") or []
+                if delivery.get("ok"):
+                    push_state = "部分成功" if delivery.get("partial") else "成功"
+                elif uncertain_targets:
+                    push_state = "未确认（可能未送达）"
+                else:
+                    push_state = "失败"
+                lines.append(
+                    "最近主动推送: "
+                    + push_state
+                    + f"（{delivery.get('kind', '?')}，"
+                    + f"来源 {delivery.get('source', '未知')}，{age}s 前）"
+                )
+                if uncertain_targets:
+                    lines.append(
+                        "未确认目标: "
+                        + "、".join(mask_umo(item) for item in uncertain_targets[:3])
+                    )
+                failed_targets = [
+                    item
+                    for item in (delivery.get("failed_targets") or [])
+                    if item not in uncertain_targets
+                ]
+                if failed_targets:
+                    lines.append(
+                        "失败目标: "
+                        + "、".join(mask_umo(item) for item in failed_targets[:3])
+                    )
+                receipts = delivery.get("receipts") or {}
+                if isinstance(receipts, dict) and receipts:
+                    parts: list[str] = []
+                    for target, receipt in list(receipts.items())[:3]:
+                        if not isinstance(receipt, dict):
+                            continue
+                        retcode = receipt.get("retcode")
+                        message_id = receipt.get("message_id")
+                        if receipt.get("ok"):
+                            receipt_state = "成功"
+                        elif target in uncertain_targets:
+                            receipt_state = "未确认"
+                        else:
+                            receipt_state = "失败"
+                        detail = f"retcode={retcode}"
+                        if receipt.get("via") == "framework":
+                            # The direct OneBot send was rejected but the
+                            # framework path delivered it; printing the direct
+                            # retcode next to "成功" read like a contradiction
+                            # (v2.20.20).
+                            detail = "经框架发送"
+                        if message_id is not None:
+                            detail += f"，message_id={message_id}"
+                        # 打码：诊断命令发在群里，完整 UMO 会对全部群成员可见
+                        # （与看板 verify 的 _mask_umo 同一口径）。
+                        parts.append(f"{mask_umo(target)}（{receipt_state}，{detail}）")
+                    if parts:
+                        lines.append("OneBot 回执: " + "；".join(parts))
+            else:
+                lines.append("最近主动推送: 暂无记录")
+            report_status = await asyncio.to_thread(self.report.status)
+            store_stats = report_status.get("store", {})
+            if not self.report_store.available:
+                lines.append(
+                    "日报数据库: 不可用（"
+                    + str(
+                        getattr(self.report_store, "init_error", None) or "初始化失败"
+                    )
+                    + "，详见后台日志）"
+                )
             lines.append(
-                "最近日报: "
-                + ("成功" if last_run.get("ok") else "失败")
-                + f"（{last_run.get('day') or '--'}，"
-                + f"{str(last_run.get('detail') or '无详情')[:40]}）"
+                "日报数据: "
+                + ("记录中" if report_status.get("enabled") else "未记录")
+                + f"；资源 {store_stats.get('resources', 0)} 条"
+                + f" / 快照 {store_stats.get('snapshots', 0)} 天"
+                + f" / 事件 {store_stats.get('events', 0)} 条"
             )
-        else:
-            lines.append("最近日报: 暂无发送记录")
-        lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
+            lines.append(
+                "日报扩展: "
+                + f"网站 {store_stats.get('websites', 0)} 条"
+                + f" / 进程 {store_stats.get('processes', 0)} 条"
+            )
+            daily_status = await asyncio.to_thread(self.daily_report.status)
+            lines.append(
+                "日报发送: "
+                + ("开启" if daily_status.get("enabled") else "关闭")
+                + f"，时间 {daily_status.get('time', '--')}"
+                + f"，目标 {len(daily_status.get('targets') or [])} 个"
+                + f"，内容 {','.join(daily_status.get('sections') or [])}"
+            )
+            if daily_status.get("next_run"):
+                lines.append("下次日报: " + str(daily_status.get("next_run")))
+            elif daily_status.get("enabled"):
+                lines.append("下次日报: 待排程（任务可能未启动）")
+            alarm_status = self.alerts.status()
+            if alarm_status.get("daily_summary"):
+                next_daily = alarm_status.get("daily_summary_next")
+                running = alarm_status.get("daily_summary_running")
+                lines.append(
+                    "下次每日状态图: "
+                    + (str(next_daily) if next_daily else "--")
+                    + ("（任务运行中）" if running else "（任务未运行）")
+                )
+            last_run = daily_status.get("last_run")
+            if isinstance(last_run, dict):
+                lines.append(
+                    "最近日报: "
+                    + ("成功" if last_run.get("ok") else "失败")
+                    + f"（{last_run.get('day') or '--'}，"
+                    + f"{str(last_run.get('detail') or '无详情')[:40]}）"
+                )
+            else:
+                lines.append("最近日报: 暂无发送记录")
+            lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
+        except Exception as exc:
+            logger.exception("状态卡诊断构建失败")
+            lines.append(tr(self.config, "diag_error", error=exc.__class__.__name__))
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)

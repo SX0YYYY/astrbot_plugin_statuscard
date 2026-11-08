@@ -253,7 +253,16 @@ class PageApi:
         # dashboard then showed "no data was ever recorded" instead of the
         # explicit database error. ``probe()`` is a cheap SELECT MAX(ts) and
         # also flips the flag when the file is gone (v2.20.17).
-        if store.available and await asyncio.to_thread(store.probe):
+        try:
+            probe_ok = await asyncio.to_thread(store.probe)
+        except Exception:
+            # A raising probe used to escape the gate and turn every
+            # history/events/reports/export request into a 500 -- the exact
+            # opposite of what a degraded-mode gate is for. Treat it like an
+            # unavailable database and let the recovery below run.
+            logger.exception("报表库探测失败，按数据库不可用处理")
+            probe_ok = False
+        if store.available and probe_ok:
             return None
         if any(not task.done() for task in self._recovery_tasks):
             # A recovery attempt is already running; spawning another per
@@ -268,8 +277,23 @@ class PageApi:
             task = asyncio.get_running_loop().create_task(
                 asyncio.to_thread(store.ensure_ready)
             )
-            self._recovery_tasks.add(task)
-            task.add_done_callback(self._recovery_tasks.discard)
+
+            def _consume(task: asyncio.Task) -> None:
+                # Discard still runs first (the set is the caller's bookkeeping),
+                # but the exception must be retrieved here: an unretrieved task
+                # exception logs a framework-level "Task exception was never
+                # retrieved" line for every refresh while the database is down,
+                # and the actual failure reason never reached the log (v2.20.24
+                # audit).
+                self._recovery_tasks.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "报表库后台恢复失败: %s",
+                        task.exception(),
+                        exc_info=task.exception(),
+                    )
+
+            task.add_done_callback(_consume)
         except Exception:
             logger.debug("报表库后台恢复任务创建失败", exc_info=True)
         return {
@@ -348,7 +372,12 @@ class PageApi:
         masked: list[dict[str, Any]] = []
         for issue in issues:
             item = issue.as_dict()
-            item["message"] = redactor.mask_address_tokens(item.get("message") or "")
+            # Strip URL credentials and query tokens FIRST: the token replacer
+            # stops at the first non-URL character, so "?token=…" after an
+            # already-masked host used to survive in the banner text.
+            item["message"] = redactor.mask_address_tokens(
+                redact_url(str(item.get("message") or ""))
+            )
             masked.append(item)
         return masked
 
@@ -468,16 +497,31 @@ class PageApi:
         except Exception as exc:
             logger.debug("读取实时进程快照失败: %s", exc)
             return []
+        import math
+
         redact = "process" in self._redact()
         items = []
         for index, row in enumerate(snapshot.get("top") or [], 1):
+            # A hand-edited/external snapshot row used to raise on the bare
+            # int()/float() and take the whole /overview route down; every
+            # other state/db value on this page goes through safe_*.
+            pid = safe_int(row.get("pid"), 0)
+            cpu_raw = safe_float(row.get("cpu_raw"), 0.0)
+            mem_mb = safe_float(row.get("mem_mb"), 0.0)
+            # Same 1e9 ceiling as the report's process aggregation: a huge
+            # finite value renders a 300-digit peak, no real per-process
+            # sample is anywhere near it.
+            if not math.isfinite(cpu_raw) or abs(cpu_raw) > 1e9:
+                cpu_raw = 0.0
+            if not math.isfinite(mem_mb) or abs(mem_mb) > 1e9:
+                mem_mb = 0.0
             items.append(
                 {
                     "rank": index,
                     "name": "已隐藏" if redact else str(row.get("name") or ""),
-                    "pid": None if redact else int(row.get("pid") or 0),
-                    "cpu": round(float(row.get("cpu_raw") or 0.0), 1),
-                    "mem_mb": round(float(row.get("mem_mb") or 0.0), 1),
+                    "pid": None if redact else pid,
+                    "cpu": round(cpu_raw, 1),
+                    "mem_mb": round(mem_mb, 1),
                 }
             )
         return items
@@ -761,12 +805,22 @@ class PageApi:
                         "error_code": "verify_no_targets",
                     }
                 )
-            self._verify_last[kind] = now
             # The message lands in QQ, so it follows display.language like
             # every other chat text; it used to be hard-coded Chinese
             # (v2.20.20).
             text = tr(plugin.config, "verify_targets_message")
-            result = await plugin.send_text(merged, text, source="verify_targets")
+            try:
+                result = await plugin.send_text(merged, text, source="verify_targets")
+            except Exception as exc:
+                # A raising send used to escape the route as a 500 AND keep
+                # the cooldown it had already charged, locking the operator
+                # out for 30 seconds right after fixing the environment.
+                # Charge the cooldown only after an actual send attempt.
+                logger.exception("验证推送目标发送失败")
+                return jsonify(
+                    {"ok": False, "kind": kind, "error": exc.__class__.__name__}
+                )
+            self._verify_last[kind] = now
             per_target = []
             for target in merged:
                 receipt = (result.receipts or {}).get(target) or {}

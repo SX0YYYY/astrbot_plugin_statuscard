@@ -575,8 +575,28 @@ class ReportStore:
                     excluded.recv_total, daily_snapshots.recv_total
                 ),
                 -- A backfill of a late recv_total must not downgrade a
-                -- complete snapshot back to incomplete.
-                complete = MAX(daily_snapshots.complete, excluded.complete),
+                -- complete snapshot back to incomplete. The CASE recomputes
+                -- "all four present" from the MERGED columns: two partial
+                -- writes used to cover each other's gaps (one had the QQ
+                -- counts, the other recv_total) while complete stayed
+                -- MAX(0,0)=0, so the day kept polling the OneBot lists 288
+                -- times for data it already had (v2.20.24 audit).
+                complete = MAX(
+                    daily_snapshots.complete,
+                    excluded.complete,
+                    CASE
+                        WHEN COALESCE(excluded.friends, daily_snapshots.friends)
+                                 IS NOT NULL
+                         AND COALESCE(excluded.groups, daily_snapshots.groups)
+                                 IS NOT NULL
+                         AND COALESCE(excluded.members, daily_snapshots.members)
+                                 IS NOT NULL
+                         AND COALESCE(excluded.recv_total, daily_snapshots.recv_total)
+                                 IS NOT NULL
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
                 captured_at = COALESCE(
                     excluded.captured_at, daily_snapshots.captured_at
                 )

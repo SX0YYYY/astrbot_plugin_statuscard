@@ -1320,8 +1320,7 @@ class DailyReportBuilder:
 
         # An interruption that began before the window and never got a
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
-        # would otherwise read as "no anomalies". Surface it explicitly, but
-        # skip entries that already show a recovery inside the window.
+        # would otherwise read as "no anomalies". Surface it explicitly.
         def _event_key(item: dict[str, Any]) -> tuple[str, str, str]:
             return (
                 str(item.get("kind") or ""),
@@ -1329,21 +1328,22 @@ class DailyReportBuilder:
                 str(item.get("target") or ""),
             )
 
-        recovered_keys = {
-            _event_key(event)
-            for event in events
-            if str(event.get("status") or "") == "recovery"
-        }
         stale: dict[tuple[str, str, str], dict[str, Any]] = {}
         # The query keeps the earliest unclosed row of each rule (grouped by
         # kind/name/target) and returns them ascending, so a flapping rule
         # cannot spend the limit on duplicate rows and hide newer outages
-        # (v2.20.24). The per-key filter below is a cheap second guard.
+        # (v2.20.24). Its NOT EXISTS clause already guarantees that a row
+        # returned here has NO later recovery of the same rule -- so a
+        # recovery from an EARLIER incident (yesterday's flap) must not
+        # filter it out: a rule that recovered yesterday and broke again
+        # afterwards used to vanish from the report entirely (v2.20.24
+        # audit follow-up), because this filter matched on the rule key
+        # alone. No filter is needed: the storage query is the guard.
         for alert in self.store.list_unresolved_alerts(
             window_start_ts, window_start_ts - outside_lookback, limit=50
         ):
             key = _event_key(alert)
-            if not key[1] or key in recovered_keys:
+            if not key[1]:
                 continue
             # Oldest start per rule/target wins ("ongoing since ...").
             if key not in stale:
@@ -2037,6 +2037,17 @@ class DailyReportBuilder:
                 name = str(row.get("name") or "").strip()
                 if not name:
                     continue
+                # Same guard as _metric_stats below: a hand-edited or
+                # externally written row can carry inf or an absurd finite
+                # value, and the template prints it verbatim ("inf%" and a
+                # 300-digit peak). No real per-process CPU/MEM sample is
+                # anywhere near 1e9.
+                raw_cpu = safe_float(row.get("cpu"), 0.0)
+                if not math.isfinite(raw_cpu) or abs(raw_cpu) > 1e9:
+                    raw_cpu = 0.0
+                raw_mem = safe_float(row.get("mem_mb"), 0.0)
+                if not math.isfinite(raw_mem) or abs(raw_mem) > 1e9:
+                    raw_mem = 0.0
                 item = values.setdefault(
                     name,
                     {
@@ -2046,11 +2057,8 @@ class DailyReportBuilder:
                         "samples": 0,
                     },
                 )
-                item["cpu"] = max(float(item["cpu"]), safe_float(row.get("cpu"), 0.0))
-                item["mem_mb"] = max(
-                    float(item["mem_mb"]),
-                    safe_float(row.get("mem_mb"), 0.0),
-                )
+                item["cpu"] = max(float(item["cpu"]), raw_cpu)
+                item["mem_mb"] = max(float(item["mem_mb"]), raw_mem)
                 item["samples"] += 1
             return sorted(values.values(), key=lambda item: item[key], reverse=True)[
                 :top_n
@@ -2556,9 +2564,13 @@ def build_report_text(view: dict[str, Any]) -> str:
         brief_items = anomalies.get("items") or []
         if brief_items:
             # Without the text image this is the only place the user learns
-            # which service failed and when.
+            # which service failed and when. The name used to be cut at 12
+            # characters ("New API 端口 3000" -> "New API 端口 3"), which
+            # invented a port that does not exist; the whole message already
+            # has a line-boundary 2000-character budget, so no per-name cut
+            # is needed (v2.20.24 audit).
             brief = "；".join(
-                f"{item.get('time', '')} {str(item.get('name') or '')[:12]} "
+                f"{item.get('time', '')} {item.get('name') or ''!s} "
                 f"{item.get('status', '')}"
                 for item in brief_items[:3]
             )

@@ -82,6 +82,39 @@ def _is_ipv6_literal(token: str) -> bool:
     return all(1 <= len(part) <= 4 for part in groups)
 
 
+def _address_replacement(match: re.Match[str]) -> str:
+    """Hide an address-shaped token unless it is a false positive.
+
+    The loose IPv6 branch also swallows MAC addresses ("a4:b1:c2:d3:e4:f5")
+    and similar colon-separated hex groups (RAID serials, ARP table rows),
+    which are not addresses -- hiding them replaced the whole diagnostic
+    with a placeholder. The exemption is limited to tokens that look like
+    IPv6 candidates (ONLY hex digits and colons, and at least TWO colons):
+    a bare "db:5432" host:port matches the hex shape too and used to slip
+    through the exemption, leaking the host the hostname rule must hide
+    (v2.20.25 reverse audit). A timestamp ("07:01:30") does not contain the
+    a-f letters the branch requires and is not matched in the first place.
+    """
+
+    token = match.group(0)
+    if (
+        token.count(":") >= 2
+        and re.fullmatch(r"[0-9A-Fa-f:]+", token)
+        and not _is_ipv6_literal(token)
+    ):
+        return token
+    return "（已隐藏地址）"
+
+
+def _has_real_address(text: str) -> bool:
+    """True when ``text`` contains a token the replacer would hide."""
+
+    return any(
+        _address_replacement(match) != match.group(0)
+        for match in _ADDRESS_RE.finditer(text)
+    )
+
+
 def _mask_ipv6(text: str) -> str:
     """Replace every IPv6 literal in ``text`` with a placeholder."""
 
@@ -96,7 +129,15 @@ def _mask_ipv6(text: str) -> str:
 # The hostname rule used to match only address-shaped tokens, so a machine
 # name like "PC-20260627WVRG" or a dotted internal name passed through in
 # monitor names, error texts and event names (v2.20.5).
-_HOSTNAME_RE = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61})\.)+[A-Za-z]{2,63}\b")
+#
+# The boundaries are explicit ASCII lookarounds instead of ``\b``: with
+# Unicode words, a Chinese character directly attached to the host
+# ("主机nas.local.example.com超时") creates no word boundary, so the match
+# started mid-host and leaked the first label and the TLD (v2.20.24 audit).
+_HOSTNAME_RE = re.compile(
+    r"(?<![A-Za-z0-9.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61})\.)+[A-Za-z]{2,63}"
+    r"(?![A-Za-z0-9-])"
+)
 
 # ``_HOSTNAME_RE`` also matches file names and config keys ("README.md",
 # "alerts.enabled", "module.py"). In a free-form diagnostic text those are
@@ -231,7 +272,11 @@ class Redactor:
     def _contains_host_name(self, value: str) -> bool:
         """True when the text carries an address or a host name."""
 
-        if _ADDRESS_RE.search(value):
+        # The same MAC/timestamp guard the token replacer uses: a raw
+        # ``_ADDRESS_RE.search`` treated "a4:b1:c2:d3:e4:f5" as an address
+        # and replaced the whole error text with a placeholder (v2.20.24
+        # audit).
+        if _has_real_address(value):
             return True
         # The compact IPv6 notation is not covered by _ADDRESS_RE (v2.20.14).
         if any(
@@ -417,7 +462,7 @@ class Redactor:
         # Host names first: the pattern consumes "1.2.3.4.example.com" as one
         # token, so the IP pass below cannot leave an isolated "." behind.
         masked = _HOSTNAME_RE.sub(_mask_bare_hostname, value)
-        masked = _ADDRESS_RE.sub("（已隐藏地址）", masked)
+        masked = _ADDRESS_RE.sub(_address_replacement, masked)
         # The compact IPv6 notation needs its own pass: the regex above only
         # knows the full eight-group form (v2.20.14).
         masked = _mask_ipv6(masked)

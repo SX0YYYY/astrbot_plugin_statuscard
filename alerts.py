@@ -461,6 +461,7 @@ class AlertEngine:
                     # below: the recovery is queued after the episode was
                     # closed, so ``alerting`` is already False.
                     st.pop("pending_recovery", None)
+                    st.pop("recovery_offline_count", None)
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
@@ -492,6 +493,7 @@ class AlertEngine:
                     # delivered a stale "已恢复" for an incident the user
                     # was never told about (v2.20.12).
                     st.pop("pending_recovery", None)
+                    st.pop("recovery_offline_count", None)
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
@@ -795,6 +797,7 @@ class AlertEngine:
                     # the chat gets "✅ 已恢复 · 内存使用率" for an outage the
                     # user was never told about.
                     st.pop("pending_recovery", None)
+                    st.pop("recovery_offline_count", None)
                     st.pop("recovery_attempt", None)
                     st.pop("recovery_next_attempt", None)
                     st.pop("recovery_retry_count", None)
@@ -1147,9 +1150,14 @@ class AlertEngine:
                         st.pop("recovery_awaits_summary", None)
                         for stale_key in (
                             "pending_recovery",
+                            "recovery_offline_count",
                             "recovery_attempt",
                             "recovery_next_attempt",
                             "recovery_retry_count",
+                            # The episode is closed for good (mount gone): a
+                            # leftover offline backoff would slow the first
+                            # alert after the mount returns.
+                            "offline_retry_count",
                         ):
                             st.pop(stale_key, None)
                         closed = True
@@ -1328,9 +1336,14 @@ class AlertEngine:
             # after re-enabling it would be delivered as a stale notice.
             for stale_key in (
                 "pending_recovery",
+                "recovery_offline_count",
                 "recovery_attempt",
                 "recovery_next_attempt",
                 "recovery_retry_count",
+                # A disabled rule starts clean: a leftover offline backoff
+                # would push the re-enabled rule's first alert into the
+                # hourly ladder.
+                "offline_retry_count",
             ):
                 st.pop(stale_key, None)
             if was_alerting:
@@ -1448,6 +1461,7 @@ class AlertEngine:
                     # produced two "recovered" messages, the first one quoting
                     # the previous episode's numbers (2026-10-29 审计实测).
                     had_pending = bool(st.pop("pending_recovery", None))
+                    st.pop("recovery_offline_count", None)
                     if had_pending:
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
@@ -1580,6 +1594,18 @@ class AlertEngine:
                                 _safe_int(st.get("offline_retry_count")) + 1
                             )
                             st["offline_retry_count"] = offline_attempt
+                            if offline_attempt == 1:
+                                # Give the episode a start row in the event
+                                # log: a value that cleared during the outage
+                                # used to leave a recovery event with no
+                                # matching beginning. The non-offline path
+                                # writes one at the first failure (below).
+                                self._record_event(
+                                    "resource",
+                                    name,
+                                    f"{value_text}（阈值 {threshold:.1f}{unit}）",
+                                    "failed",
+                                )
                             st["next_attempt"] = now + offline_retry_delay(
                                 offline_attempt
                             )
@@ -1683,6 +1709,7 @@ class AlertEngine:
                 # queued for retry; honouring the switch means dropping the
                 # backlog instead of delivering it later anyway.
                 st.pop("pending_recovery", None)
+                st.pop("recovery_offline_count", None)
                 st.pop("recovery_attempt", None)
                 st.pop("recovery_next_attempt", None)
                 st.pop("recovery_retry_count", None)
@@ -2184,6 +2211,7 @@ class AlertEngine:
                 # same).
                 for key in (
                     "pending_recovery",
+                    "recovery_offline_count",
                     "recovery_attempt",
                     "recovery_next_attempt",
                     "recovery_retry_count",
@@ -2193,6 +2221,7 @@ class AlertEngine:
             if not self.offline_notify:
                 for key in (
                     "pending_recovery",
+                    "recovery_offline_count",
                     "recovery_attempt",
                     "recovery_next_attempt",
                     "recovery_retry_count",
@@ -2206,6 +2235,7 @@ class AlertEngine:
                     result = await self._send(str(pending_text), kind="offline")
                     if self._delivered(result):
                         st.pop("pending_recovery", None)
+                        st.pop("recovery_offline_count", None)
                         st.pop("recovery_attempt", None)
                         st.pop("recovery_next_attempt", None)
                         st.pop("recovery_retry_count", None)
@@ -2228,6 +2258,7 @@ class AlertEngine:
                             )
                             for stale_key in (
                                 "pending_recovery",
+                                "recovery_offline_count",
                                 "recovery_attempt",
                                 "recovery_next_attempt",
                                 "recovery_retry_count",
@@ -2445,6 +2476,7 @@ class AlertEngine:
                     )
                 return
             had_pending_recovery = bool(st.pop("pending_recovery", None))
+            st.pop("recovery_offline_count", None)
             if had_pending_recovery:
                 # Fold the previous episode's undelivered recovery into this
                 # alert, exactly like the resource rules. Keeping it queued
@@ -2592,6 +2624,7 @@ class AlertEngine:
         changed = False
         for key in (
             "pending_recovery",
+            "recovery_offline_count",
             "recovery_retry_count",
             "recovery_next_attempt",
             "pending_recovery_is_alert",
@@ -2599,6 +2632,9 @@ class AlertEngine:
             "pending_alert_text",
             "next_attempt",
             "alert_retry_count",
+            # Re-enabling the watch starts a fresh episode: a leftover offline
+            # backoff would push its first alert into the hourly ladder.
+            "offline_retry_count",
         ):
             if key in watch:
                 watch.pop(key, None)
@@ -2737,6 +2773,7 @@ class AlertEngine:
             # (v2.20.22).
             for stale_key in (
                 "pending_recovery",
+                "recovery_offline_count",
                 "recovery_retry_count",
                 "recovery_next_attempt",
                 "pending_recovery_is_alert",
@@ -2758,30 +2795,58 @@ class AlertEngine:
                     watch.pop("pending_recovery", None)
                     watch.pop("recovery_retry_count", None)
                     watch.pop("recovery_next_attempt", None)
+                    watch.pop("recovery_offline_count", None)
                     watch.pop("pending_recovery_is_alert", None)
                     self.state.save()
                     logger.info("LLM 服务恢复通知补发成功")
                 else:
-                    # ``int()`` on a hand-edited state value raised on every
-                    # sample, which skipped the rest of the sample (including
-                    # the state save) until the field was rewritten.
-                    retry_count = (
-                        _safe_int(watch.get("recovery_retry_count")) or 1
-                    ) + 1
-                    if retry_count > MAX_RECOVERY_RETRIES:
-                        watch.pop("pending_recovery", None)
-                        watch.pop("recovery_retry_count", None)
-                        watch.pop("recovery_next_attempt", None)
-                        watch.pop("pending_recovery_is_alert", None)
-                        self.state.save()
-                        logger.warning(
-                            "LLM 服务恢复通知连续发送失败 %d 次，放弃补发",
-                            retry_count - 1,
+                    if self._transport_offline() or delivery_offline(result):
+                        # The channel is down, so this failure says nothing
+                        # about the notice: keep it queued without spending
+                        # the retry budget, exactly like the resource rules
+                        # do. Burning the five attempts during the outage
+                        # gave up permanently and the recovery notice never
+                        # reached the chat.
+                        offline_attempt = (
+                            _safe_int(watch.get("recovery_offline_count")) + 1
                         )
-                    else:
-                        watch["recovery_retry_count"] = retry_count
-                        watch["recovery_next_attempt"] = now + retry_delay(retry_count)
+                        watch["recovery_offline_count"] = offline_attempt
+                        watch["recovery_next_attempt"] = now + offline_retry_delay(
+                            offline_attempt
+                        )
                         self.state.save()
+                        if offline_retry_delay(offline_attempt) != offline_retry_delay(
+                            offline_attempt - 1
+                        ):
+                            logger.warning(
+                                "LLM 服务恢复通知连续 %d 次因连接不可用未能送达，已改为每小时重试",
+                                offline_attempt - 1,
+                            )
+                    else:
+                        # ``int()`` on a hand-edited state value raised on every
+                        # sample, which skipped the rest of the sample (including
+                        # the state save) until the field was rewritten.
+                        watch.pop("recovery_offline_count", None)
+                        retry_count = (
+                            _safe_int(watch.get("recovery_retry_count")) or 1
+                        ) + 1
+                        if retry_count > MAX_RECOVERY_RETRIES:
+                            watch.pop("pending_recovery", None)
+                            watch.pop("recovery_offline_count", None)
+                            watch.pop("recovery_retry_count", None)
+                            watch.pop("recovery_next_attempt", None)
+                            watch.pop("pending_recovery_is_alert", None)
+                            self.state.save()
+                            logger.warning(
+                                "LLM 服务恢复通知连续发送失败 %d 次，放弃补发",
+                                retry_count - 1,
+                            )
+                        else:
+                            watch["recovery_retry_count"] = retry_count
+                            watch["recovery_next_attempt"] = now + retry_delay(
+                                retry_count
+                            )
+                            self.state.save()
             # Fall through to the streak check: a new LLM failure arriving
             # while the old recovery notice was being retried used to be
             # silent for up to ~30 minutes (v2.20.0).
@@ -2838,6 +2903,10 @@ class AlertEngine:
                 watch.pop("recovery_retry_count", None)
                 watch.pop("recovery_next_attempt", None)
                 watch.pop("pending_recovery_is_alert", None)
+                # Same as the resource rules: the folded notice is no longer
+                # its own retry object, so its offline ladder must not leak
+                # into the next episode (v2.20.25 reverse audit).
+                watch.pop("recovery_offline_count", None)
             text = (
                 "⚠️ LLM 服务连续失败\n"
                 "──────────────\n"
@@ -2934,6 +3003,11 @@ class AlertEngine:
             for stale_key in (
                 "next_attempt",
                 "alert_retry_count",
+                # The offline backoff belongs to the episode that just ended,
+                # same as the resource rules clear theirs in the recovery
+                # branch. Keeping it made the next LLM outage start at the
+                # slow hourly step (v2.20.24 covered only the resource side).
+                "offline_retry_count",
             ):
                 watch.pop(stale_key, None)
             # Only announce a recovery for an episode that actually reached
@@ -2996,6 +3070,7 @@ class AlertEngine:
                     # second "已恢复" after this one was delivered.
                     for stale_key in (
                         "pending_recovery",
+                        "recovery_offline_count",
                         "recovery_retry_count",
                         "recovery_next_attempt",
                     ):
@@ -3014,6 +3089,7 @@ class AlertEngine:
             if overdue > 24 * 3600:
                 for stale_key in (
                     "pending_recovery",
+                    "recovery_offline_count",
                     "recovery_retry_count",
                     "recovery_next_attempt",
                     "pending_recovery_is_alert",

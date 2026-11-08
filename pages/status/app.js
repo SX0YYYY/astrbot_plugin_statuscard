@@ -2242,7 +2242,14 @@
     if (next > limit) return;
     state.reportDay = next;
     loadReports(true).catch((error) => {
-      state.reportDay = state.reportDayShown || null;
+      // Only roll back when no newer request has already moved the pointer.
+      // A quick second click starts another load; this (older, failed)
+      // request used to overwrite the pointer the newer request had set,
+      // so the next "previous day" click computed from the wrong base and
+      // requested the day AFTER the one being displayed.
+      if (state.reportDay === next) {
+        state.reportDay = state.reportDayShown || null;
+      }
       toast(error.message || t("error_load", "加载失败"));
     });
   }
