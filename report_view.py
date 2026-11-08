@@ -2219,8 +2219,8 @@ class DailyReportBuilder:
         errors = sum(
             bucket["errors"] for key, bucket in by_day.items() if key in window_set
         )
-        # Same denominator as the LLM quality section: user aborts are listed
-        # separately and do not count as failures.
+        # Same denominator as the LLM quality section: cancellations are
+        # listed separately and do not count as failures.
         attempts = completed + errors
         success_rate = (completed / attempts * 100.0) if attempts else None
         top_models = []
@@ -2267,7 +2267,7 @@ class DailyReportBuilder:
             "trend": trend,
             "note": (
                 "Token 口径：token_input_other + token_input_cached + token_output；"
-                "成功率 = 完成 / (完成 + 失败)，用户中止（aborted）单列不计入分母。"
+                "成功率 = 完成 / (完成 + 失败)，中断（aborted）单列不计入分母。"
                 + (
                     "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
                     if truncated
@@ -2412,10 +2412,16 @@ class DailyReportBuilder:
             )
 
         note = (
-            "口径：成功率 = 完成 / (完成 + 失败)；用户主动中止（aborted）单列，"
-            "不计入失败。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为未记录。"
-            "按 AstrBot provider_stats 记录统计。"
+            "口径：成功率 = 完成 / (完成 + 失败)；中断（aborted）单列，不计入失败。"
+            "中断指调用被取消，不一定是人为中止：含同会话新消息/命令接管、其他插件"
+            "停止事件、上游超时被取消等。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为"
+            "未记录。按 AstrBot provider_stats 记录统计。"
         )
+        if stats.get("aborted_long"):
+            note += (
+                f"窗口内持续 ≥60 秒的中断 {stats['aborted_long']} 次，"
+                "多为上游超时后被取消，建议关注。"
+            )
         if truncated:
             note += "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
 
@@ -2428,6 +2434,7 @@ class DailyReportBuilder:
                 "completed_text": _fmt_num(stats["completed"]),
                 "errors_text": _fmt_num(stats["errors"]),
                 "aborted_text": _fmt_num(stats["aborted"]),
+                "aborted_long_text": _fmt_num(stats.get("aborted_long") or 0),
                 "success_rate_text": (
                     f"{stats['success_rate']:.1f}%"
                     if stats["success_rate"] is not None

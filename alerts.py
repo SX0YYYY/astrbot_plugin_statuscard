@@ -118,7 +118,7 @@ UNREACHABLE_ALERT_SAMPLES = 30
 _PROVIDER_STATUS_TEXT = {
     "completed": "调用成功",
     "error": "调用失败",
-    "aborted": "已中止",
+    "aborted": "调用已中断",
 }
 
 

@@ -11,15 +11,20 @@ detector for the alert engine.
 Measurement rules (settled 2026-10-28):
 
 - ``status`` is ``completed`` / ``error`` / ``aborted``. ``aborted`` means
-  the user stopped the generation (``AgentRunner.was_aborted()``), so it is
-  reported separately and never counted as a failure.
+  the agent run was cancelled (``AgentRunner.was_aborted()``). The framework
+  records no reason and its own log line misleadingly says "by user": the
+  real triggers are same-session takeovers (a follow-up message or a
+  /reset //new //stop command), other plugins calling ``stop_event()``, and
+  long-hanging calls cancelled while retrying an upstream timeout. An
+  online review (2026-11-08, 20 aborted rows in one day, none of them user
+  stops) confirmed this. So it is reported separately as "interrupted" and
+  never counted as a failure.
 - Success rate = ``completed / (completed + error)``.
 - Latency = ``end_time - start_time`` in seconds, completed rows only.
 - TTFT = ``time_to_first_token`` in seconds; 0 means "not recorded" and is
   excluded from the percentiles.
-- The consecutive-error walk skips ``aborted`` rows: a user abort is a
-  human action, not a fault signal, so it neither counts nor breaks the
-  streak.
+- The consecutive-error walk skips ``aborted`` rows: a cancellation is not
+  a provider fault, so it neither counts nor breaks the streak.
 
 All queries run on a ``mode=ro`` SQLite connection (the same access style
 the LLM Guard review already accepted) and the callers wrap them in
@@ -39,6 +44,14 @@ PROVIDER_DB_NAME = "data_v4.db"
 # Rows whose latency or TTFT exceed this are treated as not recorded: a
 # missing/garbled timestamp or a clock jump must not poison the averages.
 MAX_USABLE_LATENCY = 86400.0
+
+# ``aborted`` rows whose whole call lasted at least this long. Seconds-long
+# aborts are mechanical takeovers (a follow-up message, another plugin
+# stopping the event); only a call that hung for minutes and then ended as
+# ``aborted`` points at the upstream (cancelled while retrying a timeout).
+# Reported separately so the "interrupted" figure stays readable
+# (2026-11-08 review: 2 of 20 aborts hung 25-36 minutes on timeouts).
+LONG_ABORT_SECONDS = 60.0
 
 
 def parse_utc_value(value: Any) -> datetime | None:
@@ -139,9 +152,11 @@ def fetch_recent(
 def error_streak(recent: list[tuple[str, str]]) -> int:
     """Consecutive ``error`` rows at the head of a newest-first list.
 
-    ``aborted`` rows are skipped without breaking the streak (a user abort
-    is not a fault); any other status - ``completed``, unknown values, empty
-    rows - ends the walk. An empty list means "no evidence", reported as 0.
+    ``aborted`` rows are skipped without breaking the streak (a cancellation
+    is not a provider fault - it is usually a same-session takeover or a
+    plugin stopping the event, not the upstream failing); any other status -
+    ``completed``, unknown values, empty rows - ends the walk. An empty list
+    means "no evidence", reported as 0.
     """
 
     streak = 0
@@ -208,7 +223,7 @@ def aggregate(
     """
 
     total = 0
-    completed = errors = aborted = other = 0
+    completed = errors = aborted = aborted_long = other = 0
     latencies: list[float] = []
     ttfts: list[float] = []
     by_model: dict[str, dict[str, float]] = {}
@@ -255,6 +270,10 @@ def aggregate(
             errors += 1
         elif status == "aborted":
             aborted += 1
+            # latency is 0.0 for rows with unusable timestamps, which can
+            # never reach the threshold - safe to count them as short.
+            if latency >= LONG_ABORT_SECONDS:
+                aborted_long += 1
         else:
             other += 1
 
@@ -314,7 +333,7 @@ def aggregate(
     for model, stats in sorted(
         by_model.items(), key=lambda pair: pair[1]["calls"], reverse=True
     ):
-        # Same denominator as the headline success rate: user aborts are
+        # Same denominator as the headline success rate: cancellations are
         # not model failures, so they stay out of the per-model rate too.
         model_attempts = stats["completed_n"] + stats["errors"]
         models_out.append(
@@ -350,6 +369,7 @@ def aggregate(
         "completed": completed,
         "errors": errors,
         "aborted": aborted,
+        "aborted_long": aborted_long,
         "other": other,
         "success_rate": success_rate,
         "avg_latency": avg_latency,
@@ -383,6 +403,7 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
         "completed": 0,
         "errors": 0,
         "aborted": 0,
+        "aborted_long": 0,
         "success_rate": None,
         "success_text": "--",
         "error_streak": 0,
@@ -429,6 +450,7 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
             "completed": stats["completed"],
             "errors": stats["errors"],
             "aborted": stats["aborted"],
+            "aborted_long": stats["aborted_long"],
             "success_rate": stats["success_rate"],
             "success_text": (
                 f"{stats['success_rate']:.1f}%"

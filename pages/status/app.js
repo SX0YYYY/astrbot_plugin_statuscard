@@ -1248,7 +1248,7 @@
       $("provider-overview").innerHTML = [
         [t("quality_today_calls", "今日调用"), String(quality.calls || 0)],
         [t("quality_success", "成功率"), quality.success_text || "--"],
-        [t("quality_failed_aborted", "失败 / 中止"), (quality.errors || 0) + " / " + (quality.aborted || 0)],
+        [t("quality_failed_aborted", "失败 · 中断"), (quality.errors || 0) + " · " + (quality.aborted || 0)],
         [t("quality_streak", "当前连续失败"), String(quality.error_streak || 0)],
       ]
         .map(
@@ -2044,7 +2044,7 @@
       const pairs = [
         [t("report_calls", "调用次数"), stats.calls_text],
         [t("quality_success", "成功率"), stats.success_rate_text],
-        [t("quality_failed_aborted", "失败 / 中止"), (stats.errors_text || "--") + " / " + (stats.aborted_text || "--")],
+        [t("quality_failed_aborted", "失败 · 中断"), (stats.errors_text || "--") + " · " + (stats.aborted_text || "--")],
         [t("quality_latency", "平均延迟"), stats.avg_latency_text, "P95 " + (stats.p95_latency_text || "--")],
         [t("quality_ttft", "首字延迟"), stats.avg_ttft_text, "P95 " + (stats.p95_ttft_text || "--")],
         [t("quality_streak", "当前连续失败"), stats.streak_text],
@@ -2123,6 +2123,13 @@
                 (quality.note_code
                   ? t(quality.note_code, quality.note)
                   : quality.note) +
+                  (Number(stats.aborted_long) > 0
+                    ? " " +
+                      t(
+                        "quality_note_long",
+                        "窗口内持续 ≥60 秒的中断 {n} 次，多为上游超时后被取消，建议关注。",
+                      ).replace("{n}", String(stats.aborted_long))
+                    : "") +
                   (quality.note_truncated
                     ? " " + t("quality_note_truncated", "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。")
                     : ""),

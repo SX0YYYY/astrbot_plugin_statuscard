@@ -639,6 +639,7 @@ class PageApi:
                 "completed": 0,
                 "errors": 0,
                 "aborted": 0,
+                "aborted_long": 0,
                 "success_rate": None,
                 "success_text": "--",
                 "error_streak": 0,
