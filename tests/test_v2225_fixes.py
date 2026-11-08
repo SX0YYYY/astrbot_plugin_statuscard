@@ -695,17 +695,24 @@ def test_audit_kinds_tuple_not_invalid():
 
 def test_unresolved_survives_yesterday_flap(tmp_path):
     store = ReportStore(tmp_path / "report.db")
-    day_y = int(dt.datetime(2026, 11, 2, 9, 0, 0).timestamp())
-    store.add_event(day_y, "2026-11-02", "service", "Web", "抖动", "alert", "t")
+    # CI runs in UTC while the business uses the configured timezone: build
+    # the timestamps FROM the config timezone so the events land at the same
+    # spot of the report window everywhere (the v2.20.21 lesson).
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    win_start = int(dt.datetime(2026, 11, 3, 0, 0, 0, tzinfo=tz).timestamp())
+    flap_alert = win_start - 15 * 3600  # 11-02 09:00 in Asia/Shanghai
+    flap_rec = flap_alert + 60
+    relapse = win_start - 3 * 3600  # 11-02 21:00 in Asia/Shanghai
+    store.add_event(flap_alert, "2026-11-02", "service", "Web", "抖动", "alert", "t")
     store.resolve_event(
-        day_y + 60, "Web", day_y + 60, kind="service", target="t", close_all=True
+        flap_rec, "Web", flap_rec, kind="service", target="t", close_all=True
     )
     store.add_event(
-        day_y + 60, "2026-11-02", "service", "Web", "持续 00:01:00", "recovery", "t"
+        flap_rec, "2026-11-02", "service", "Web", "持续 00:01:00", "recovery", "t"
     )
-    store.add_event(
-        day_y + 36000, "2026-11-02", "service", "Web", "复发未恢复", "alert", "t"
-    )
+    store.add_event(relapse, "2026-11-02", "service", "Web", "复发未恢复", "alert", "t")
     builder = DailyReportBuilder(store, {"display": {"timezone": "Asia/Shanghai"}})
     view = builder.build(day=dt.date(2026, 11, 3), span_days=1)
     anom = view.get("anomalies") or {}
