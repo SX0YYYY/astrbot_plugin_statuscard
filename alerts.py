@@ -2536,6 +2536,20 @@ class AlertEngine:
         ):
             last_sent = _safe_float(st.get("last_sent"))
             if last_sent and now - last_sent >= self.cooldown:
+                # Fold a recovery notice that was queued before this outage
+                # into the deferred alert, exactly like the fresh-latch
+                # branch above. Leaving it queued made the recovery push TWO
+                # "已恢复" messages back to back: the old episode's notice
+                # first, then this episode's (2026-11-08 audit).
+                had_pending_recovery = bool(st.pop("pending_recovery", None))
+                st.pop("recovery_offline_count", None)
+                if had_pending_recovery:
+                    for stale_key in (
+                        "recovery_attempt",
+                        "recovery_next_attempt",
+                        "recovery_retry_count",
+                    ):
+                        st.pop(stale_key, None)
                 text = (
                     "🔴 Bot 连接离线\n"
                     "──────────────\n"
@@ -2544,6 +2558,8 @@ class AlertEngine:
                     f"检测时间: {_now_text(self.config)}\n"
                     "（本条为通知冷却结束后的补发）"
                 )
+                if had_pending_recovery:
+                    text += "\n（上一次的恢复通知未送达，已并入本条）"
                 result = await self._send(text, kind="offline")
                 if self._delivered(result):
                     st["alerted"] = True

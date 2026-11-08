@@ -14,7 +14,7 @@ Measurement rules (settled 2026-10-28):
   the agent run was cancelled (``AgentRunner.was_aborted()``). The framework
   records no reason and its own log line misleadingly says "by user": the
   real triggers are same-session takeovers (a follow-up message or a
-  /reset //new //stop command), other plugins calling ``stop_event()``, and
+  /reset / /new / /stop command), other plugins calling ``stop_event()``, and
   long-hanging calls cancelled while retrying an upstream timeout. An
   online review (2026-11-08, 20 aborted rows in one day, none of them user
   stops) confirmed this. So it is reported separately as "interrupted" and
@@ -407,6 +407,7 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
         "success_rate": None,
         "success_text": "--",
         "error_streak": 0,
+        "truncated": False,
     }
     connection = connect_readonly(db_path)
     if connection is None:
@@ -418,7 +419,12 @@ def today_overview(config: Any, db_path: Path | str | None = None) -> dict[str, 
         today = now_in_timezone(config).date()
         start_text = f"{(today - timedelta(days=2)).isoformat()} 00:00:00"
         end_text = f"{(today + timedelta(days=2)).isoformat()} 00:00:00"
-        rows, _oldest_kept, _truncated = fetch_window(connection, start_text, end_text)
+        rows, _oldest_kept, truncated = fetch_window(connection, start_text, end_text)
+        # A capped window under-reports the day: surface the truncation so
+        # the overview card can say so instead of showing a quietly clipped
+        # "today" figure (2026-11-08 audit; the report section already had
+        # this disclosure).
+        result["truncated"] = bool(truncated)
         # Streak over the newest rows regardless of day, same as the alert
         # engine's walk; a streak that started yesterday must stay visible.
         recent = fetch_recent(connection, 30)

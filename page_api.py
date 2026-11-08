@@ -643,6 +643,7 @@ class PageApi:
                 "success_rate": None,
                 "success_text": "--",
                 "error_streak": 0,
+                "truncated": False,
             }
         # ``psutil.boot_time()`` raises in a sandboxed container that hides
         # /proc. The collectors module already guards its copy; the overview

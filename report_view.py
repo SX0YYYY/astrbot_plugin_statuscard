@@ -1164,14 +1164,12 @@ class DailyReportBuilder:
             resolved_ts = event.get("resolved_ts")
             started_i = safe_int(event.get("ts") or 0)
             outside = str(event.get("day") or "") not in window_days
-            if status == "recovery" and outside:
-                # Events before the window must also close their episode: the
-                # previous day's recovery used to be skipped by the day filter
-                # while its alert had already been registered here, so an
-                # in-window recovery was paired with a stale start time from
-                # the day before (16 hours for a 30-second blip).
-                continue
             if outside:
+                # Rendering skips events outside the window. Their EPISODE
+                # bookkeeping (a pre-window recovery closing its episode) is
+                # the pairing loop's job above -- dropping it here too used
+                # to pair an in-window recovery with a stale start time from
+                # the day before (16 hours for a 30-second blip).
                 continue
             if status not in {"alert", "recovery", "failed"}:
                 continue
@@ -2269,7 +2267,7 @@ class DailyReportBuilder:
                 "Token 口径：token_input_other + token_input_cached + token_output；"
                 "成功率 = 完成 / (完成 + 失败)，中断（aborted）单列不计入分母。"
                 + (
-                    "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+                    " 窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
                     if truncated
                     else ""
                 )
@@ -2423,7 +2421,9 @@ class DailyReportBuilder:
                 "多为上游超时后被取消，建议关注。"
             )
         if truncated:
-            note += "；窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+            # A space, not "；": the base note already ends with "。" and
+            # "。；" read as a doubled punctuation (2026-11-08 audit).
+            note += " 窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
 
         return {
             "available": True,
@@ -2434,6 +2434,10 @@ class DailyReportBuilder:
                 "completed_text": _fmt_num(stats["completed"]),
                 "errors_text": _fmt_num(stats["errors"]),
                 "aborted_text": _fmt_num(stats["aborted"]),
+                # Numeric key: the dashboard note appends the long-abort
+                # sentence from THIS field ("aborted_long_text" has no
+                # consumer -- the text key exists for future text surfaces).
+                "aborted_long": int(stats.get("aborted_long") or 0),
                 "aborted_long_text": _fmt_num(stats.get("aborted_long") or 0),
                 "success_rate_text": (
                     f"{stats['success_rate']:.1f}%"

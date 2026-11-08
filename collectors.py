@@ -353,7 +353,16 @@ def _short_disk_error(value: Any) -> str | None:
     # be reported as a read timeout.
     if "permission denied" in low or "errno 13" in low:
         return "无权限读取"
-    if "no such file" in low or "errno 2]" in low:
+    if (
+        "no such file" in low
+        or "errno 2]" in low
+        # Windows dev boxes: "[WinError 2] 系统找不到指定的文件" / "[WinError
+        # 3] 系统找不到指定的路径" used to fall through to the raw truncation
+        # (2026-11-08 audit).
+        or "winerror 2]" in low
+        or "winerror 3]" in low
+        or "系统找不到指定的" in text
+    ):
         return "挂载点不存在"
     if "input/output error" in low or "errno 5" in low:
         return "I/O 错误"

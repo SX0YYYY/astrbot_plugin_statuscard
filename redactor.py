@@ -28,13 +28,20 @@ HIDDEN_NUMBER = "--"
 # Address-shaped tokens that must not reach a chat or the dashboard when the
 # hostname rule is on. Plain words and codes ("HTTP 500", "ReadTimeout") stay
 # readable: hiding every non-empty error text made the monitor cards useless.
+#
+# The URL stop set also excludes CJK punctuation: a URL directly followed by
+# "，如果超时请重试" used to swallow the readable tail ("。" "，" "：" ... are
+# not whitespace, so the character class ran past the URL into the sentence,
+# 2026-11-08 reverse audit). Half-width "]" stays OUT on purpose: an IPv6
+# literal host ("http://[fe80::1]/path") must survive the URL pass whole.
+_URL_STOP = r"[^\s'\"）)，。：；！？、》]"
 _ADDRESS_RE = re.compile(
     # host:port must come first: with the IPv4 branch ahead of it,
     # "10.1.2.3:8080" matched only the address and left the port dangling
     # in the masked text ("（已隐藏地址）:8080", v2.20.20).
     r"(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
     r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
-    r"|https?://[^\s'\"）)]+"  # URL
+    r"|https?://" + _URL_STOP + r"+"  # URL
     r"|\b(?=[0-9a-f:]*[a-f])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,}\b",  # IPv6
     re.IGNORECASE,
 )
@@ -52,6 +59,12 @@ _IPV6_CANDIDATE_RE = re.compile(
     r"(?:%[0-9A-Za-z._~-]+)?"
     r"(?![0-9A-Za-z:])"
 )
+
+# The URL branch of _ADDRESS_RE as a standalone pattern: used as the FIRST
+# pass in ``mask_address_tokens`` so a URL is hidden whole instead of being
+# truncated at the hostname pass's placeholder (2026-11-08 audit). The stop
+# set excludes CJK punctuation so the sentence after the URL survives.
+_URL_RE = re.compile(r"https?://" + _URL_STOP + r"+", re.IGNORECASE)
 
 
 def _is_ipv6_literal(token: str) -> bool:
@@ -459,9 +472,17 @@ class Redactor:
         value = str(text or "")
         if not value or not self.hostname:
             return value
-        # Host names first: the pattern consumes "1.2.3.4.example.com" as one
+        # URLs before anything else: the hostname pass would mask only the
+        # host inside a URL, and its placeholder "（已隐藏地址）" ends with
+        # "）" -- which is in the URL branch's stop set. The URL branch then
+        # truncated right after the placeholder and the path plus query
+        # string leaked ("https://host/api?token=abc 超时" became
+        # "（已隐藏地址））/api?token=abc 超时", 2026-11-08 audit). A whole
+        # URL is one identifying blob: hide it completely.
+        masked = _URL_RE.sub("（已隐藏地址）", value)
+        # Host names next: the pattern consumes "1.2.3.4.example.com" as one
         # token, so the IP pass below cannot leave an isolated "." behind.
-        masked = _HOSTNAME_RE.sub(_mask_bare_hostname, value)
+        masked = _HOSTNAME_RE.sub(_mask_bare_hostname, masked)
         masked = _ADDRESS_RE.sub(_address_replacement, masked)
         # The compact IPv6 notation needs its own pass: the regex above only
         # knows the full eight-group form (v2.20.14).

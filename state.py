@@ -49,6 +49,7 @@ class StateStore:
 
     def load(self) -> None:
         existed = self.path.is_file()
+        self._cleanup_orphan_tmps()
         try:
             raw = self.path.read_text(encoding="utf-8")
             parsed = json.loads(raw)
@@ -72,6 +73,25 @@ class StateStore:
                 with self._lock:
                     self.data = {}
         self._migrate(existed)
+
+    def _cleanup_orphan_tmps(self) -> None:
+        """Remove ``state.json.<pid>.<tid>.tmp`` files from a crashed run.
+
+        The write path cleans its own temp file on failure (v2.20.20/22), but
+        a hard kill between write and replace left the orphan forever. Files
+        owned by THIS process are left alone: a concurrent writer thread
+        still owns its temp file.
+        """
+
+        try:
+            for cand in self.path.parent.glob(f"{self.path.name}.*.tmp"):
+                parts = cand.name.split(".")
+                # state.json.<pid>.<tid>.tmp -> ["state", "json", pid, tid, "tmp"]
+                owner_pid = parts[2] if len(parts) >= 5 else ""
+                if owner_pid.isdigit() and int(owner_pid) != os.getpid():
+                    cand.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("清理状态临时文件失败", exc_info=True)
 
     def _restore_from_backup(self) -> bool:
         """Try the previous good copy before falling back to an empty state.

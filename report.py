@@ -1767,6 +1767,12 @@ class DailyReporter:
                     day or self._default_report_day(), False, "weekly sections empty"
                 )
             self._weekly_pause_until = time.time() + 600
+            # ``_clear_retry`` also drops the DAILY report's retry queue: the
+            # two scopes share one retry state. In the current config the
+            # daily path exits under the same conditions (sections empty /
+            # db rebuilt) and clears itself, so nothing is lost -- but a
+            # future change to either side must keep that agreement in mind
+            # (2026-11-08 audit).
             self._clear_retry()
             return
         targets = self._targets("weekly")
@@ -1850,6 +1856,9 @@ class DailyReporter:
                 day or self._default_report_day()
             )
             self._weekly_pause_until = time.time() + 600
+            # See the sections-empty branch above: _clear_retry spans both
+            # report scopes; the daily path currently self-clears under the
+            # same condition (2026-11-08 audit).
             self._clear_retry()
             return
         try:
@@ -2132,9 +2141,9 @@ class DailyReporter:
                 self._pending_recovery_since = time.time()
             # A long outage has no "next retry" that can succeed; poll every
             # 15 minutes as a fallback in case the reconnect hook is missed.
-            # The post-midnight backfill passes poll_offline=False: it already
-            # waited once and a 15-minute poll only rebuilt the report 24
-            # times before 06:00 (v2.20.17 audit). After four rounds the
+            # All current callers pass poll_offline=True (v2.20.24 restored
+            # the 15-minute poll for the catch-up path too); the parameter
+            # stays so a future caller can opt out. After four rounds the
             # poll backs off to one hour (v2.20.24): a channel that never
             # comes back kept rebuilding the whole report every 15 minutes.
             now_ts = time.time()

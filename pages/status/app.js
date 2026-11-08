@@ -1260,10 +1260,12 @@
             "</strong></div>",
         )
         .join("");
-      $("provider-summary").textContent = t(
-        "quality_scope_today",
-        "今天 · 按展示时区",
-      );
+      $("provider-summary").textContent =
+        t("quality_scope_today", "今天 · 按展示时区") +
+        (quality.truncated
+          ? " · " +
+            t("quality_truncated", "数据超 2 万条，仅统计最近部分，合计可能偏小")
+          : "");
     } else {
       // The backend ships fixed Chinese reasons; translate the known codes
       // so an English dashboard does not leak Chinese strings.
@@ -2868,13 +2870,28 @@
 
     document.querySelectorAll("#event-switch button").forEach((button) => {
       button.addEventListener("click", () => {
-        state.eventDays = button.dataset.days;
+        const requested = button.dataset.days;
+        if (!requested || String(requested) === String(state.eventDays)) return;
+        const previous = state.eventDays;
+        state.eventDays = requested;
         document
           .querySelectorAll("#event-switch button")
           .forEach((item) => item.classList.toggle("active", item === button));
-        loadEvents().catch((error) =>
-          toast(error.message || t("error_load", "加载失败")),
-        );
+        loadEvents().catch((error) => {
+          // Mirror the history range switch: a failed load used to leave the
+          // new range highlighted over the old data (2026-11-08 audit).
+          if (String(state.eventDays) !== String(requested)) return;
+          state.eventDays = previous;
+          document
+            .querySelectorAll("#event-switch button")
+            .forEach((item) =>
+              item.classList.toggle(
+                "active",
+                item.dataset.days === String(previous),
+              ),
+            );
+          toast(error.message || t("error_load", "加载失败"));
+        });
       });
     });
 

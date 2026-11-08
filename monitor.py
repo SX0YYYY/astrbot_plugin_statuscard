@@ -227,6 +227,11 @@ class ServiceMonitor:
         # while the item never ran (2026-11-06 audit).
         self.skipped_items: list[str] = []
         self.items = self._normalize_items(cfg_get(config, "monitors.items", []))
+        # Unfiltered copy (disabled entries included): the prune must tell
+        # "the operator disabled this item" apart from "the entry is gone"
+        # -- both drop the state key, but the event text differs
+        # (2026-11-08 audit).
+        self._configured_items = list(cfg_get(config, "monitors.items", []) or [])
         self._task: asyncio.Task | None = None
         self._running = False
         self._silence_warned = False
@@ -480,7 +485,11 @@ class ServiceMonitor:
                 for key, state in items.items()
                 if isinstance(state, dict)
                 and str(state.get("name") or "") == name
-                and str(state.get("target") or "") == legacy
+                # The legacy redact_url truncated at "#"/"?" WITHOUT
+                # rstripping, so an old slot for "python #1" stored
+                # "python " (trailing space). Both sides are stripped here
+                # or the match can never succeed (2026-11-08 audit).
+                and str(state.get("target") or "").rstrip() == legacy
             ]
             if len(candidates) == 1:
                 self._move_state_key(candidates[0], base_key)
@@ -734,8 +743,47 @@ class ServiceMonitor:
                         name,
                     )
                     continue
+
+                # A disabled entry still exists in the config: "removed"
+                # would send the operator looking for a deletion that never
+                # happened (2026-11-08 audit). Raw config entries carry no
+                # __template_key, so kind falls back to "type" and the
+                # target comparison uses the probe-target shape.
+
+                def _disabled_same(
+                    item: dict[str, Any],
+                    slot_key: str,
+                    slot_name: str,
+                    slot_target: str,
+                ) -> bool:
+                    if cfg_bool(item, "enabled", True):
+                        return False
+                    kind_raw = str(
+                        item.get("__template_key") or item.get("type") or ""
+                    ).lower()
+                    if not kind_raw or kind_raw != slot_key.split(":", 1)[0]:
+                        return False
+                    if str(item.get("name") or "") != slot_name:
+                        return False
+                    return (
+                        self._probe_target({**item, "__template_key": kind_raw})
+                        == slot_target
+                    )
+
+                disabled_same_key = any(
+                    _disabled_same(item, key, name, target)
+                    for item in self._configured_items
+                    if isinstance(item, dict)
+                )
                 pending_events.append(
-                    (name, target, "监测项已移除，自动关闭", "recovery")
+                    (
+                        name,
+                        target,
+                        "监测项已停用，自动关闭"
+                        if disabled_same_key
+                        else "监测项已移除，自动关闭",
+                        "recovery",
+                    )
                 )
         self.state.save()
         # Write the events after releasing the state lock. add_event is a
@@ -1189,6 +1237,13 @@ class ServiceMonitor:
                         "recovery_attempt",
                         "recovery_next_attempt",
                         "recovery_retry_count",
+                        # The offline backoff tiers belong to the episode that
+                        # just ended: keeping them made the NEXT fault of this
+                        # item start at a mid-tier delay (v2.20.24 fixed the
+                        # normal recovery path; this silent-window path was
+                        # missed, 2026-11-08 audit).
+                        "offline_retry_count",
+                        "recovery_offline_count",
                         # ``stale`` only suppresses the recovery notice of
                         # the episode it was written for. Keeping it here
                         # made the NEXT episode's recovery silent, because
@@ -1271,6 +1326,13 @@ class ServiceMonitor:
                 st["fails"] = fails
                 st["last_error"] = detail
                 st["last_checked"] = now
+                # The probe IS failing: the episode starts here even though
+                # alerting is suppressed by the dependency. Without this the
+                # outage clock only started when the dependency recovered,
+                # under-reporting the duration by the whole suppressed
+                # window (2026-11-08 audit; same lesson as v2.20.25).
+                if not safe_float(st.get("since") or 0):
+                    st["since"] = now
                 states[key] = st
                 logger.info(
                     "监测项 %s 异常，但依赖项 %s 也异常，已抑制重复告警",
@@ -1833,6 +1895,11 @@ class ServiceMonitor:
             # old timestamps (and the event log kept two recovery rows).
             "pending_recovery",
             "recovery_offline_count",
+            # Same episode-boundary rule as the recovery path: the offline
+            # backoff must not survive a config-error close, or the next
+            # fault after the config is fixed starts at a mid-tier delay
+            # (2026-11-08 audit).
+            "offline_retry_count",
             "recovery_attempt",
             "recovery_next_attempt",
             "recovery_retry_count",
@@ -2303,7 +2370,10 @@ class ServiceMonitor:
                 kind,
                 name,
                 str(item.get("url") or ""),
-                str(item.get("keyword") or ""),
+                # The probe strips the keyword before matching; a pasted
+                # trailing space used to look like a second check and alert
+                # beside the original (2026-11-08 audit).
+                str(item.get("keyword") or "").strip(),
                 str(cfg_int(item, "expected_status", 0)),
                 str(cfg_bool(item, "verify_tls", True)),
                 str(item.get("suppress_when_down") or "").strip(),
@@ -2313,11 +2383,13 @@ class ServiceMonitor:
             # The probe defaults an omitted host to 127.0.0.1, so the
             # signature must do the same: a copied item that spells the
             # default out looked like a second check and alerted beside the
-            # original for the same port (2026-11-06 audit).
+            # original for the same port (2026-11-06 audit). The probe also
+            # strips whitespace, so the signature does too (2026-11-08
+            # audit).
             return (
                 kind,
                 name,
-                str(item.get("host") or "127.0.0.1"),
+                str(item.get("host") or "127.0.0.1").strip(),
                 str(cfg_int(item, "port", 0)),
                 timeout,
             )

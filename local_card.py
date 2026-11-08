@@ -348,7 +348,8 @@ def render_fallback_card(view: dict[str, Any]) -> bytes:
             )
             draw.text(
                 (WIDTH - PADDING - 140, row_y),
-                str(item.get("cpu") or "--"),
+                # 0.0 is a valid sample: only a missing value shows "--".
+                ("--" if item.get("cpu") is None else f"{item.get('cpu')}"),
                 font=_font(18),
                 fill=MUTED,
             )

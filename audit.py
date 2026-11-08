@@ -90,11 +90,20 @@ def _monitor_config_errors(config: Any) -> list[str]:
                 f"监测项「{name}」（{KIND_LABELS[kind]}）缺少 {required} 配置"
             )
         elif kind == "tcp":
+            raw_port = item.get("port")
+            # cfg_int (the runtime path) rejects booleans before int(): a
+            # `port: true` used to pass this audit as int(True)==1 while the
+            # probe reported a config error (2026-11-08 audit).
+            if isinstance(raw_port, bool):
+                problems.append(
+                    f"监测项「{name}」（TCP）端口不是数字（当前值 {raw_port!r}），无法探测"
+                )
+                continue
             try:
-                port = int(item.get("port") or 0)
+                port = int(raw_port or 0)
             except (TypeError, ValueError):
                 problems.append(
-                    f"监测项「{name}」（TCP）端口不是数字（当前值 {item.get('port')!r}），无法探测"
+                    f"监测项「{name}」（TCP）端口不是数字（当前值 {raw_port!r}），无法探测"
                 )
                 continue
             if not (1 <= port <= 65535):

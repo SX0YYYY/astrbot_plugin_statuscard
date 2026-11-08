@@ -415,7 +415,6 @@ class StatusCardPlugin(Star):
                         for key, ts in self._status_cooldown.items()
                         if ts >= cutoff
                     }
-            self._status_inflight.add(chat_key)
         notices: list[str] = []
         if (
             cfg_bool(self.config, "display.privacy_notice", True)
@@ -436,6 +435,12 @@ class StatusCardPlugin(Star):
         if notices:
             yield event.plain_result("\n".join(notices))
         try:
+            # Inside the try: a generator closed while suspended on the
+            # notice yield above never runs its finally, so an add() before
+            # the try would leak the slot and every later 查看状态 from this
+            # chat would answer "正在生成" until reload (2026-11-08 audit).
+            if chat_key:
+                self._status_inflight.add(chat_key)
             image_url = await self._render_status_image(event)
             if chat_key:
                 self._status_inflight.discard(chat_key)
