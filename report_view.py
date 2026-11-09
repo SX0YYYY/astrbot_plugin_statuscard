@@ -298,6 +298,29 @@ def _line_chart(
     }
 
 
+def _pair_key(item: dict[str, Any], name: str | None = None) -> tuple:
+    """Episode key for one event row.
+
+    The first three slots are the historical rule identity
+    (``kind, name, target``). The fourth is the monitor's stable state key
+    (``item_key``) when the row carries one; legacy rows written by <=2.20.27
+    have ``item_key IS NULL`` and therefore always compare as ``""`` -- two
+    legacy rows keep exactly the pairing they had before this column existed.
+    Two monitor items that share kind+name+target but differ in keyword/query
+    now occupy different slots and cannot close each other's episode.
+
+    ``name`` is optional because the call sites already computed it (and skip
+    empty names); passing it avoids reading the field twice.
+    """
+
+    return (
+        str(item.get("kind") or ""),
+        str(item.get("name") or "") if name is None else name,
+        str(item.get("target") or ""),
+        str(item.get("item_key") or ""),
+    )
+
+
 class DailyReportBuilder:
     """Build the daily-report view from the plugin store and AstrBot history.
 
@@ -921,7 +944,7 @@ class DailyReportBuilder:
         # ``open_episode`` maps a rule to the episode that is currently open
         # for it: the start of the interruption and the moment it ended (0
         # while it is still running).
-        open_episode: dict[tuple[str, str, str], tuple[int, int]] = {}
+        open_episode: dict[tuple[str, str, str, str], tuple[int, int]] = {}
         # An interruption that began before the window still has an alert row
         # outside ``events``; load the preceding month so a recovery inside
         # the window can be paired with it instead of showing "--".
@@ -934,15 +957,15 @@ class DailyReportBuilder:
         # fault outlives the previous day, its alert row is outside
         # ``events`` but carries THIS recovery's timestamp, and the recovery
         # branch below needs that row to recover the start (v2.20.20).
-        outside_stamped: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+        outside_stamped: dict[tuple[str, str, str, str], list[tuple[int, int]]] = {}
         # Keep the row itself: an outage that spans the WHOLE window needs its
         # name/detail to render a row, and that row lives outside ``events``.
-        outside_rows: dict[tuple[str, str, str], dict[int, dict[str, Any]]] = {}
+        outside_rows: dict[tuple[str, str, str, str], dict[int, dict[str, Any]]] = {}
         # Recovery events before the window. They prove an episode actually
         # ended before the window started, even when ``close_all`` later
         # stamped the old alert row with an unrelated (much later) recovery
         # -- the historical orphan rows have exactly this shape.
-        outside_recoveries: dict[tuple[str, str, str], list[int]] = {}
+        outside_recoveries: dict[tuple[str, str, str, str], list[int]] = {}
         outside_lookback = self._event_lookback_seconds()
         for alert in sorted(
             self.store.list_events_range(
@@ -957,11 +980,7 @@ class DailyReportBuilder:
             name = str(alert.get("name") or "")
             if not name:
                 continue
-            key = (
-                str(alert.get("kind") or ""),
-                name,
-                str(alert.get("target") or ""),
-            )
+            key = _pair_key(alert, name)
             stamp = safe_int(alert.get("ts") or 0)
             if status in {"alert", "failed"}:
                 # A "failed" row means the fault happened but its push did
@@ -1025,12 +1044,14 @@ class DailyReportBuilder:
         # rendered "已恢复 3天22:27:29" for a 90-second outage, while the
         # outage that really happened was swallowed by the de-duplication
         # (v2.20.12).
-        seen_ids: set[tuple[tuple[str, str, str], int]] = set()
+        seen_ids: set[tuple[tuple[str, str, str, str], int]] = set()
         # For every alert row: the start of its episode and the moment that
         # episode ended (0 while it is still open).
-        episode_of: dict[tuple[tuple[str, str, str], int], tuple[int, int]] = {}
+        episode_of: dict[tuple[tuple[str, str, str, str], int], tuple[int, int]] = {}
         # For every recovery row: the episode it closed.
-        recovery_episode: dict[tuple[tuple[str, str, str], int], tuple[int, int]] = {}
+        recovery_episode: dict[
+            tuple[tuple[str, str, str, str], int], tuple[int, int]
+        ] = {}
         # ``open_episode`` already holds the interruptions that began before
         # the window; the scan below continues from there, so a recovery
         # inside the window closes the right episode.
@@ -1039,11 +1060,7 @@ class DailyReportBuilder:
             name = str(event.get("name") or "")
             if not name:
                 continue
-            key = (
-                str(event.get("kind") or ""),
-                name,
-                str(event.get("target") or ""),
-            )
+            key = _pair_key(event, name)
             stamp = safe_int(event.get("ts") or 0)
             if status in {"alert", "failed"}:
                 current = open_episode.get(key)
@@ -1095,12 +1112,7 @@ class DailyReportBuilder:
                         item
                         for item in events
                         if str(item.get("status") or "") in {"alert", "failed"}
-                        and (
-                            str(item.get("kind") or ""),
-                            str(item.get("name") or ""),
-                            str(item.get("target") or ""),
-                        )
-                        == key
+                        and _pair_key(item) == key
                         and safe_int(item.get("ts") or 0) == start
                     ),
                     None,
@@ -1126,12 +1138,7 @@ class DailyReportBuilder:
                             safe_int(item.get("ts") or 0)
                             for item in events
                             if str(item.get("status") or "") in {"alert", "failed"}
-                            and (
-                                str(item.get("kind") or ""),
-                                str(item.get("name") or ""),
-                                str(item.get("target") or ""),
-                            )
-                            == key
+                            and _pair_key(item) == key
                             and safe_int(item.get("ts") or 0) > start
                             and safe_int(item.get("ts") or 0) <= stamp
                         ]
@@ -1143,24 +1150,20 @@ class DailyReportBuilder:
 
         # Keys whose episode started inside the window and is still open; the
         # unresolved count below reads this set.
-        episode_open: set[tuple[str, str, str]] = set()
+        episode_open: set[tuple[str, str, str, str]] = set()
         # Row index of the last alert/failed row per key. A recovery that
         # belongs to a row already shown must not append a second line: an
         # outage that started AND ended inside the window used to appear twice
         # ("已恢复 00:01:30" followed by "恢复 00:01:30"), which reads like two
         # incidents.
-        emitted: dict[tuple[str, str, str], int] = {}
+        emitted: dict[tuple[str, str, str, str], int] = {}
         # Keys that already have a row in this section. The whole-window
         # sweep below must not duplicate an outage that is already shown.
-        rendered_keys: set[tuple[str, str, str]] = set()
+        rendered_keys: set[tuple[str, str, str, str]] = set()
         for event in events:
             status = str(event.get("status") or "")
             name = str(event.get("name") or "")
-            key = (
-                str(event.get("kind") or ""),
-                name,
-                str(event.get("target") or ""),
-            )
+            key = _pair_key(event, name)
             resolved_ts = event.get("resolved_ts")
             started_i = safe_int(event.get("ts") or 0)
             outside = str(event.get("day") or "") not in window_days
@@ -1319,14 +1322,10 @@ class DailyReportBuilder:
         # An interruption that began before the window and never got a
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
         # would otherwise read as "no anomalies". Surface it explicitly.
-        def _event_key(item: dict[str, Any]) -> tuple[str, str, str]:
-            return (
-                str(item.get("kind") or ""),
-                str(item.get("name") or ""),
-                str(item.get("target") or ""),
-            )
+        def _event_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+            return _pair_key(item)
 
-        stale: dict[tuple[str, str, str], dict[str, Any]] = {}
+        stale: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         # The query keeps the earliest unclosed row of each rule (grouped by
         # kind/name/target) and returns them ascending, so a flapping rule
         # cannot spend the limit on duplicate rows and hide newer outages
@@ -1431,13 +1430,7 @@ class DailyReportBuilder:
                 # in that range is a retry of the same outage, not a new one.
                 late = self.store.list_events_range(window_end_ts, resolved, limit=5000)
                 if any(
-                    str(item.get("status") or "") == "alert"
-                    and (
-                        str(item.get("kind") or ""),
-                        str(item.get("name") or ""),
-                        str(item.get("target") or ""),
-                    )
-                    == key
+                    str(item.get("status") or "") == "alert" and _pair_key(item) == key
                     for item in late
                 ):
                     continue

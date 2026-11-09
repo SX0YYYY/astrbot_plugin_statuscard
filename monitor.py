@@ -632,12 +632,28 @@ class ServiceMonitor:
         target: str,
         detail: str,
         status: str,
+        item_key: str | None = None,
     ) -> None:
         if self.report_store is None:
             return
         try:
             now = time.time()
             day = now_in_timezone(self.config).strftime("%Y-%m-%d")
+            event_key = item_key
+            # An episode that started before the upgrade has a legacy alert
+            # row (item_key NULL). Writing a keyed recovery would leave that
+            # alert unpaired: the report pairs alert and recovery rows, so the
+            # upgrade-window recovery must stay legacy-shaped too.
+            # ``resolve_event`` below still receives the key and closes both
+            # NEW and NULL rows.
+            if (
+                status == "recovery"
+                and item_key is not None
+                and self.report_store.has_open_legacy_alert(
+                    "service", name, redact_url(target)
+                )
+            ):
+                event_key = None
             self.report_store.add_event(
                 int(now),
                 day,
@@ -646,12 +662,14 @@ class ServiceMonitor:
                 redact_url(detail),
                 status,
                 redact_url(target),
+                item_key=event_key,
             )
             if status == "recovery":
                 # Close the open alert of the same target so the report can
                 # show how long the interruption lasted, even across a
-                # plugin restart. Matching on kind+target keeps two monitor
-                # items that share a name from closing each other's alerts.
+                # plugin restart. The stable item_key keeps two monitor items
+                # that share kind+name+target (different keyword/query/timeout)
+                # from closing each other's alerts.
                 self.report_store.resolve_event(
                     int(now),
                     name,
@@ -659,6 +677,7 @@ class ServiceMonitor:
                     kind="service",
                     target=redact_url(target),
                     close_all=True,
+                    item_key=item_key,
                 )
         except Exception:
             logger.exception("记录服务监测事件失败")
@@ -685,7 +704,7 @@ class ServiceMonitor:
         # No early return on an empty item list: clearing every monitor used
         # to leave its latched alerts open in the daily report until the
         # 30-day window rolled over.
-        pending_events: list[tuple[str, str, str, str]] = []
+        pending_events: list[tuple[str, str, str, str, str]] = []
         with self.state.section("monitors") as monitors:
             states = monitors.setdefault("items", {})
             if not isinstance(states, dict):
@@ -783,6 +802,10 @@ class ServiceMonitor:
                         if disabled_same_key
                         else "监测项已移除，自动关闭",
                         "recovery",
+                        # The stale slot's own key: it is the item_key the
+                        # alert rows of this item were written with, so the
+                        # close only touches this item's episode.
+                        str(key),
                     )
                 )
         self.state.save()
@@ -790,8 +813,8 @@ class ServiceMonitor:
         # synchronous sqlite INSERT with a 5 s busy timeout; holding the
         # monitor lock across it blocked the sampler and the alert engine
         # whenever the database was slow (2026-11-06 audit).
-        for name, target, detail, status in pending_events:
-            self._record_event(name, target, detail, status)
+        for name, target, detail, status, item_key in pending_events:
+            self._record_event(name, target, detail, status, item_key=item_key)
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
     async def stop(self) -> None:
@@ -897,7 +920,7 @@ class ServiceMonitor:
         # Items skipped for config errors never reach _check_item; if one
         # was already alerting when its config broke, close that episode
         # here instead of freezing it in the "unresolved" list forever.
-        pending_closes: list[tuple[dict[str, Any], str, str, str, str]] = []
+        pending_closes: list[tuple[dict[str, Any], str, str, str, str, str]] = []
         for item in self.items:
             if not item.get("config_error"):
                 continue
@@ -928,6 +951,7 @@ class ServiceMonitor:
                         redact_url(target_text),
                         kind,
                         f"配置不完整（{item.get('config_error')}）",
+                        key,
                     )
                 )
         # The close writes its event (synchronous SQLite) and queues the
@@ -935,9 +959,16 @@ class ServiceMonitor:
         # sampler and the alert engine for as long as the write took -- the
         # same reason _prune_state runs outside the lock (v2.20.24 audit).
         # ``st`` stays the live mapping, and check_all saves below.
-        for st, close_name, close_target, close_kind, close_detail in pending_closes:
+        for (
+            st,
+            close_name,
+            close_target,
+            close_kind,
+            close_detail,
+            close_key,
+        ) in pending_closes:
             self._close_episode_for_config_error(
-                st, close_name, close_target, close_kind, close_detail
+                st, close_name, close_target, close_kind, close_detail, close_key
             )
         with self.state.section("monitors") as monitors:
             monitors["last_run"] = time.time()
@@ -1130,6 +1161,7 @@ class ServiceMonitor:
                 target_text,
                 "上次告警发送被中断（重载/重启），已按告警中处理",
                 "alert",
+                item_key=key,
             )
 
         if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
@@ -1156,7 +1188,7 @@ class ServiceMonitor:
                 )
             if alerting:
                 self._close_episode_for_config_error(
-                    st, name, target_text, kind, detail
+                    st, name, target_text, kind, detail, key
                 )
             states[key] = st
             return
@@ -1221,6 +1253,7 @@ class ServiceMonitor:
                         target_text,
                         f"持续 {format_duration(now - origin)}（维护静默期内，未推送）",
                         "recovery",
+                        item_key=key,
                     )
                     st["alerting"] = False
                     st["since"] = 0
@@ -1257,6 +1290,7 @@ class ServiceMonitor:
                         target_text,
                         f"{prev_error}（维护静默期内自愈，未推送）",
                         "alert",
+                        item_key=key,
                     )
                     self._record_event(
                         name,
@@ -1264,6 +1298,7 @@ class ServiceMonitor:
                         f"持续 {format_duration(now - started)}"
                         "（维护静默期内，未推送）",
                         "recovery",
+                        item_key=key,
                     )
                     # Close the episode here: leaving ``alerting=True`` made
                     # the first post-window probe take the normal-recovery
@@ -1304,12 +1339,14 @@ class ServiceMonitor:
                 target_text,
                 f"{prev_error}（维护静默期内自愈，未推送）",
                 "alert",
+                item_key=key,
             )
             self._record_event(
                 name,
                 target_text,
                 f"持续 {format_duration(now - silent_since)}（维护静默期内，未推送）",
                 "recovery",
+                item_key=key,
             )
             st["last_error"] = ""
         elif silent_since and not ok and not alerting:
@@ -1406,6 +1443,7 @@ class ServiceMonitor:
                         target_text,
                         f"{detail}（冷却窗口内仅记录，未重复推送）",
                         "alert",
+                        item_key=key,
                     )
                     logger.info(
                         "监测项 %s 在冷却窗口内再次异常，已记录事件不重复推送",
@@ -1513,7 +1551,9 @@ class ServiceMonitor:
                         # equals the reason the summary batch was pushed with;
                         # the key above is the primary match anyway.
                         st["summary_reason"] = push_detail
-                        self._record_event(name, target_text, detail, "alert")
+                        self._record_event(
+                            name, target_text, detail, "alert", item_key=key
+                        )
                     elif delivered:
                         st["last_sent"] = now
                         st["retry_count"] = 0
@@ -1528,7 +1568,9 @@ class ServiceMonitor:
                         st.pop("summary_buffered", None)
                         st.pop("summary_key", None)
                         st.pop("summary_reason", None)
-                        self._record_event(name, target_text, detail, "alert")
+                        self._record_event(
+                            name, target_text, detail, "alert", item_key=key
+                        )
                     else:
                         if self._transport_offline() or delivery_offline(result):
                             # The channel is down, so this failure says
@@ -1559,7 +1601,9 @@ class ServiceMonitor:
                             retry_count = safe_int(st.get("retry_count") or 0) + 1
                             st["retry_count"] = retry_count
                             st["next_attempt"] = now + retry_delay(retry_count)
-                        self._record_event(name, target_text, detail, "failed")
+                        self._record_event(
+                            name, target_text, detail, "failed", item_key=key
+                        )
             elif alerting and pending:
                 next_attempt = safe_float(st.get("next_attempt") or 0)
                 if now >= next_attempt:
@@ -1588,7 +1632,9 @@ class ServiceMonitor:
                         st.pop("summary_buffered", None)
                         st.pop("summary_key", None)
                         st.pop("summary_reason", None)
-                        self._record_event(name, target_text, detail, "alert")
+                        self._record_event(
+                            name, target_text, detail, "alert", item_key=key
+                        )
                     else:
                         if self._transport_offline() or delivery_offline(result):
                             # The channel is down, so this failure says
@@ -1780,7 +1826,7 @@ class ServiceMonitor:
                 # The event log does not depend on the notification pref: the
                 # daily report's interruption durations and unresolved list
                 # rely on resolved_ts being written on every recovery.
-                self._record_event(name, target_text, detail, "recovery")
+                self._record_event(name, target_text, detail, "recovery", item_key=key)
                 # Pop unconditionally: leaving it set across a
                 # recover_notify=False recovery made the NEXT healthy
                 # recovery claim an undelivered alert out of nowhere.
@@ -1865,6 +1911,7 @@ class ServiceMonitor:
         target_text: str,
         kind: str,
         detail: str,
+        item_key: str | None = None,
     ) -> None:
         """Close an in-flight alert because the target no longer exists.
 
@@ -1911,6 +1958,7 @@ class ServiceMonitor:
             target_text,
             f"目标已不存在或配置错误，告警自动关闭（{detail}）",
             "recovery",
+            item_key=item_key,
         )
         if notified and self.recover_notify and not self._is_silenced():
             # The maintenance window promises "probe only, never push"; a

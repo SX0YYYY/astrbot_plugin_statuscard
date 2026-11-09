@@ -697,7 +697,9 @@ class _FakeReportStore:
     def __init__(self) -> None:
         self.events: list[tuple] = []
 
-    def add_event(self, *args: object) -> None:
+    def add_event(self, *args: object, **kwargs: object) -> None:
+        # ``item_key`` is an optional keyword on the real store; this stub
+        # only needs the positional row the assertions unpack.
         self.events.append(args)
 
 

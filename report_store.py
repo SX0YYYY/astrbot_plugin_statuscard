@@ -9,7 +9,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class ReportStore:
@@ -266,7 +266,12 @@ class ReportStore:
                     target      TEXT,
                     detail      TEXT,
                     status      TEXT NOT NULL,
-                    resolved_ts INTEGER
+                    resolved_ts INTEGER,
+                    -- Stable per-monitor key so two items sharing
+                    -- kind+name+target (different keyword / query / timeout)
+                    -- cannot close each other's alerts. NULL on rows written
+                    -- by <=2.20.27: those keep the legacy triple pairing.
+                    item_key    TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_day
                     ON events(day);
@@ -324,9 +329,17 @@ class ReportStore:
                     ON process_samples(metric, ts);
 
                 DROP TABLE IF EXISTS todos;
-                PRAGMA user_version = 3;
+                PRAGMA user_version = 4;
                 """
             )
+            # CREATE TABLE IF NOT EXISTS does not add a column to an existing
+            # database. Upgrade in place: ADD COLUMN is lossless (old rows get
+            # NULL) and guarded by table_info so every restart is idempotent.
+            # This must stay OUTSIDE executescript: an ALTER on a database that
+            # already has the column would abort the whole script.
+            cols = [row[1] for row in con.execute("PRAGMA table_info(events)")]
+            if "item_key" not in cols:
+                con.execute("ALTER TABLE events ADD COLUMN item_key TEXT")
             con.commit()
         finally:
             con.close()
@@ -627,12 +640,14 @@ class ReportStore:
         status: str,
         target: str = "",
         resolved_ts: int | None = None,
+        item_key: str | None = None,
     ) -> bool:
         return self._write(
             """
             INSERT INTO events
-                (ts, day, kind, name, target, detail, status, resolved_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (ts, day, kind, name, target, detail, status, resolved_ts,
+                 item_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(ts),
@@ -643,6 +658,7 @@ class ReportStore:
                 detail,
                 status,
                 resolved_ts,
+                item_key,
             ),
         )
 
@@ -654,6 +670,7 @@ class ReportStore:
         kind: str | None = None,
         target: str | None = None,
         close_all: bool = False,
+        item_key: str | None = None,
     ) -> bool:
         """Mark the newest open alert of ``name`` as resolved.
 
@@ -686,6 +703,15 @@ class ReportStore:
         if target is not None:
             conditions.append("target = ?")
             case_params.append(target)
+        if item_key is not None:
+            # Close this item's own NEW rows plus every LEGACY row of the same
+            # triple. A row written by <=2.20.27 has item_key NULL; an
+            # upgrade-in-flight episode must still be closable, otherwise the
+            # daily report keeps it in "unresolved" for the whole retention
+            # window. Rows of another NEW item carry a different key and are
+            # left untouched.
+            conditions.append("(item_key = ? OR item_key IS NULL)")
+            case_params.append(item_key)
         cond_sql = " AND ".join(conditions)
         if close_all:
             sql = f"""
@@ -708,6 +734,28 @@ class ReportStore:
               AND ts = (SELECT MAX(ts) FROM events WHERE {cond_sql})
         """
         return self._write(sql, (int(resolved_ts), *case_params, *case_params))
+
+    def has_open_legacy_alert(self, kind: str, name: str, target: str) -> bool:
+        """Whether an unclosed alert written by <=2.20.27 exists for a rule.
+
+        A row from before the ``item_key`` column has NULL there. When such
+        an episode is still open at upgrade time, its recovery event must be
+        written without a key too: the report pairs alert and recovery rows,
+        and a keyed recovery could not pair with the legacy NULL alert. New
+        rows all carry a key, so this is only true for the upgrade window.
+        """
+
+        rows = self._query(
+            """
+            SELECT 1 FROM events
+            WHERE kind = ? AND name = ? AND COALESCE(target, '') = ?
+              AND status IN ('alert', 'failed')
+              AND resolved_ts IS NULL AND item_key IS NULL
+            LIMIT 1
+            """,
+            (kind, name, str(target or "")),
+        )
+        return bool(rows)
 
     def list_unresolved_alerts(
         self, before_ts: int, since_ts: int, limit: int = 50
@@ -735,12 +783,15 @@ class ReportStore:
 
         rows = self._query(
             """
-            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            SELECT id, ts, day, kind, name, target, detail, status,
+                   resolved_ts, item_key
             FROM (
                 SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
-                       e.status, e.resolved_ts,
+                       e.status, e.resolved_ts, e.item_key,
                        ROW_NUMBER() OVER (
-                           PARTITION BY e.kind, e.name, COALESCE(e.target, '')
+                           PARTITION BY e.kind, e.name,
+                                        COALESCE(e.target, ''),
+                                        COALESCE(e.item_key, '')
                            ORDER BY e.ts ASC, e.id ASC
                        ) AS rn
                 FROM events AS e
@@ -751,6 +802,7 @@ class ReportStore:
                       WHERE r.status = 'recovery' AND r.ts > e.ts
                         AND r.kind = e.kind AND r.name = e.name
                         AND COALESCE(r.target, '') = COALESCE(e.target, '')
+                        AND COALESCE(r.item_key, '') = COALESCE(e.item_key, '')
                   )
             )
             WHERE rn = 1
@@ -768,6 +820,7 @@ class ReportStore:
             "detail",
             "status",
             "resolved_ts",
+            "item_key",
         )
         return [dict(zip(keys, row)) for row in rows]
 
@@ -1099,7 +1152,8 @@ class ReportStore:
     def list_events(self, day: str, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._query(
             """
-            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            SELECT id, ts, day, kind, name, target, detail, status,
+                   resolved_ts, item_key
             FROM events WHERE day = ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             # 1000 was too low: a day with a flapping monitor can exceed it,
@@ -1118,6 +1172,7 @@ class ReportStore:
             "detail",
             "status",
             "resolved_ts",
+            "item_key",
         )
         return [dict(zip(keys, row)) for row in rows]
 
@@ -1134,7 +1189,8 @@ class ReportStore:
 
         rows = self._query(
             """
-            SELECT id, ts, day, kind, name, target, detail, status, resolved_ts
+            SELECT id, ts, day, kind, name, target, detail, status,
+                   resolved_ts, item_key
             FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             (int(start_ts), int(end_ts), max(1, min(200000, limit))),
@@ -1150,6 +1206,7 @@ class ReportStore:
             "detail",
             "status",
             "resolved_ts",
+            "item_key",
         )
         return [dict(zip(keys, row)) for row in rows]
 

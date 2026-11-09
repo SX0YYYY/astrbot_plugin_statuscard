@@ -33,7 +33,6 @@ from types import SimpleNamespace
 import astrbot_plugin_statuscard.alerts as alerts_module
 import astrbot_plugin_statuscard.monitor as monitor_module
 import astrbot_plugin_statuscard.page_api as page_api_module
-import pytest
 from astrbot_plugin_statuscard.alerts import AlertEngine
 from astrbot_plugin_statuscard.audit import run_audit
 from astrbot_plugin_statuscard.delivery import DeliveryResult
@@ -766,7 +765,7 @@ def test_process_section_guards_inf(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_monitor_fold_clears_recovery_offline_ladder(tmp_path):
+def test_monitor_fold_clears_recovery_offline_ladder(tmp_path, monkeypatch):
     """Folding a queued recovery into a new alert must drop its ladder."""
 
     now_box = [2000.0]
@@ -777,8 +776,11 @@ def test_monitor_fold_clears_recovery_offline_ladder(tmp_path):
     )
     import astrbot_plugin_statuscard.monitor as mon_mod
 
-    ptmp = pytest.MonkeyPatch()
-    ptmp.setattr(mon_mod, "time", SimpleNamespace(time=lambda: now_box[0]))
+    # ``monkeypatch`` (not a bare MonkeyPatch) so the module-level ``time``
+    # is restored: leaking a frozen clock into later tests made every
+    # subsequent event write carry ts=2000 and its recovery unable to match
+    # (2026-11-09 audit).
+    monkeypatch.setattr(mon_mod, "time", SimpleNamespace(time=lambda: now_box[0]))
     mode = {"ok": False}
 
     async def fake_probe(item):

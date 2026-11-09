@@ -539,7 +539,13 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
             invalid_rules += 1
             continue
         for kind in kinds:
-            if str(kind).strip() and str(kind).strip() not in valid_kinds:
+            # ``resolve_targets`` normalises kinds with strip().lower() before
+            # matching, so a hand-edited "Service" DOES take effect at runtime.
+            # Validating the raw spelling here reported it as an unknown type
+            # that "won't work" -- the opposite of the truth, and it pushed the
+            # operator into editing a working rule (2026-11-09 audit).
+            normalized = str(kind).strip().lower()
+            if normalized and normalized not in valid_kinds:
                 unknown_kinds.add(str(kind).strip())
     if invalid_rules:
         issues.append(

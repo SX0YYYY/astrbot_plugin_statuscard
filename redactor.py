@@ -497,6 +497,21 @@ class Redactor:
         masked = re.sub(
             rf"({re.escape(HIDDEN)}|（已隐藏地址）):\d{{2,5}}\b", r"\1", masked
         )
+        # A URL whose path ends in a closing bracket ("https://host/(a)") is
+        # cut at the ")" by the URL pass when the next character is not part
+        # of the URL ("...);token=SECRET"). The query string then survives the
+        # placeholder. Only this exact shape -- a masked URL immediately
+        # followed by ")" and a leftover credential query -- is swept up here;
+        # plain text containing "token=" and the readable tail after a normal
+        # URL are never touched (2026-11-09 audit).
+        masked = re.sub(
+            r"(（已隐藏地址）\))[?&;]?[^\s）)]*?"
+            r"(?<![A-Za-z0-9_])(?:token|password|passwd|secret|credential|api[_-]?key)"
+            r"(?![A-Za-z0-9_])[^\s）)]*",
+            r"\1",
+            masked,
+            flags=re.IGNORECASE,
+        )
         return masked
 
     def mask_name(self, name: Any) -> str:
