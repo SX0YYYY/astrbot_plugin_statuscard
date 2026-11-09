@@ -736,26 +736,72 @@ class ReportStore:
         return self._write(sql, (int(resolved_ts), *case_params, *case_params))
 
     def has_open_legacy_alert(self, kind: str, name: str, target: str) -> bool:
-        """Whether an unclosed alert written by <=2.20.27 exists for a rule.
+        """Whether the CURRENT episode is only represented by a legacy row.
 
         A row from before the ``item_key`` column has NULL there. When such
         an episode is still open at upgrade time, its recovery event must be
         written without a key too: the report pairs alert and recovery rows,
-        and a keyed recovery could not pair with the legacy NULL alert. New
-        rows all carry a key, so this is only true for the upgrade window.
+        and a keyed recovery could not pair with the legacy NULL alert.
+
+        The ``NOT EXISTS`` guard matters: a keyed episode that started AFTER
+        the upgrade can coexist with an old unclosed orphan. Writing the
+        recovery without a key then would pair it with the orphan's start
+        (a phantom row with a multi-hour duration) while the real episode
+        rendered separately -- two "recovered" lines for one blip
+        (2026-11-09 reverse audit). When a keyed open row exists, the
+        recovery stays keyed and the orphan keeps its historical behaviour.
         """
 
+        params = (kind, name, str(target or ""))
         rows = self._query(
             """
-            SELECT 1 FROM events
-            WHERE kind = ? AND name = ? AND COALESCE(target, '') = ?
-              AND status IN ('alert', 'failed')
-              AND resolved_ts IS NULL AND item_key IS NULL
+            SELECT 1 FROM events AS e
+            WHERE e.kind = ? AND e.name = ? AND COALESCE(e.target, '') = ?
+              AND e.status IN ('alert', 'failed')
+              AND e.resolved_ts IS NULL AND e.item_key IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM events AS k
+                  WHERE k.kind = e.kind AND k.name = e.name
+                    AND COALESCE(k.target, '') = COALESCE(e.target, '')
+                    AND k.status IN ('alert', 'failed')
+                    AND k.resolved_ts IS NULL AND k.item_key IS NOT NULL
+              )
             LIMIT 1
             """,
-            (kind, name, str(target or "")),
+            params,
         )
         return bool(rows)
+
+    def rekey_open_events(
+        self,
+        kind: str,
+        name: str,
+        target: str,
+        old_key: str,
+        new_key: str,
+    ) -> bool:
+        """Move still-open alert rows to a re-keyed monitor slot.
+
+        The state slot key changes when the operator edits a monitor (a new
+        sibling appears, a duplicate is removed, the probe signature
+        changes). The alert rows already written keep the OLD key, so the
+        later recovery -- which resolves by the NEW key -- could never close
+        them and the daily report kept them "unresolved" for the whole
+        retention window (2026-11-09 reverse audit). Only open rows are
+        touched: closed history keeps the key it was written with.
+        """
+
+        if not old_key or not new_key or old_key == new_key:
+            return False
+        return self._write(
+            """
+            UPDATE events SET item_key = ?
+            WHERE item_key = ?
+              AND kind = ? AND name = ? AND COALESCE(target, '') = ?
+              AND status IN ('alert', 'failed') AND resolved_ts IS NULL
+            """,
+            (new_key, old_key, kind, name, str(target or "")),
+        )
 
     def list_unresolved_alerts(
         self, before_ts: int, since_ts: int, limit: int = 50

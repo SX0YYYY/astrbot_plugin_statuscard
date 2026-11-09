@@ -402,15 +402,39 @@ class ServiceMonitor:
     def _move_state_key(self, old: str, new: str) -> None:
         """Move one persisted state entry to a new key (one-time migration)."""
 
+        moved: dict[str, Any] | None = None
         try:
             with self.state.section("monitors") as monitors:
                 items = monitors.get("items")
                 if isinstance(items, dict) and old in items and new not in items:
-                    items[new] = items.pop(old)
+                    moved = items.pop(old)
+                    items[new] = moved
             self.state.save()
             logger.info("监测项状态键已从旧共享键迁移：%s -> %s", old, new)
         except Exception:
             logger.debug("迁移监测项状态键失败", exc_info=True)
+            return
+        # Re-key the still-open alert rows too, OUTSIDE the state lock: the
+        # SQLite write must not block sampling / the alert engine (same
+        # reason as _prune_state). Rows written under the old slot key would
+        # otherwise never be closed by the recovery that resolves under the
+        # new key, leaving a phantom "未恢复" row for the whole retention
+        # window (2026-11-09 reverse audit).
+        if isinstance(moved, dict) and self.report_store is not None:
+            name = str(moved.get("name") or "")
+            target = str(moved.get("target") or "")
+            # Without a name/target there is nothing to match safely; leaving
+            # the old row alone is better than re-keying an unrelated rule.
+            if name and target:
+                try:
+                    # Service-monitor events are always written with
+                    # kind="service" (the "http"/"tcp" prefix belongs to the
+                    # STATE key, not to the event row).
+                    self.report_store.rekey_open_events(
+                        "service", name, target, old, new
+                    )
+                except Exception:
+                    logger.debug("迁移未闭合事件行失败", exc_info=True)
 
     def _migrate_suffixed_state(self, base_key: str) -> None:
         """Carry an old suffixed state slot over to ``base_key``.

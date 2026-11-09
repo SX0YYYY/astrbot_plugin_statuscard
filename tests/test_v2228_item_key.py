@@ -272,3 +272,69 @@ def test_keyed_recovery_still_closes_its_own_new_alert(tmp_path: Path) -> None:
     )
     row = next(r for r in store.list_events(DAY, 5000) if r["status"] == "alert")
     assert row["resolved_ts"] == 1794100600
+
+
+def test_state_key_migration_rekeys_open_event_rows(tmp_path: Path) -> None:
+    """Editing a monitor must carry its still-open alert rows to the new key.
+
+    The state slot is re-keyed on config edits (new sibling / duplicate
+    removed / probe signature changed). If the open alert rows keep the old
+    key, the later recovery resolves under the new key and the old row stays
+    "unresolved" for the whole retention window.
+    """
+    store = ReportStore(tmp_path / "report.db")
+    old = "http:网关:https://h/x"
+    new = old + "#a1b2c3d4"
+    store.add_event(
+        1794100000, DAY, "service", "网关", "down", "alert", TARGET, item_key=old
+    )
+    state = StateStore(tmp_path / "state.json")
+    items = state.data.setdefault("monitors", {}).setdefault("items", {})
+    items[old] = {
+        "name": "网关",
+        "target": TARGET,
+        "alerting": True,
+        "since": 1794100000.0,
+    }
+    state.save()
+    monitor = ServiceMonitor(None, state, {}, store)
+    monitor._move_state_key(old, new)
+
+    row = next(r for r in store.list_events(DAY, 5000) if r["status"] == "alert")
+    assert row["item_key"] == new
+
+    store.add_event(
+        1794100600, DAY, "service", "网关", "ok", "recovery", TARGET, item_key=new
+    )
+    store.resolve_event(
+        1794100600,
+        "网关",
+        1794100600,
+        kind="service",
+        target=TARGET,
+        close_all=True,
+        item_key=new,
+    )
+    row = next(r for r in store.list_events(DAY, 5000) if r["status"] == "alert")
+    assert row["resolved_ts"] == 1794100600
+    assert store.list_unresolved_alerts(1794200000, 1794000000) == []
+
+
+def test_keyed_episode_is_not_treated_as_legacy(tmp_path: Path) -> None:
+    """A keyed open row must win over an older NULL orphan.
+
+    Otherwise the recovery is written WITHOUT a key and pairs with the old
+    orphan's start, producing a phantom long-duration row next to the real
+    episode (two "recovered" lines for one blip).
+    """
+    store = ReportStore(tmp_path / "report.db")
+    store.add_event(1793992800, DAY, "service", "Svc", "old", "alert", "t")
+    store.add_event(
+        1794100000, DAY, "service", "Svc", "new", "alert", "t", item_key="svc:Svc:t"
+    )
+    assert not store.has_open_legacy_alert("service", "Svc", "t")
+
+    # No keyed row at all -> the legacy shape is still needed.
+    other = ReportStore(tmp_path / "other.db")
+    other.add_event(1794100000, DAY, "service", "Svc", "old", "alert", "t")
+    assert other.has_open_legacy_alert("service", "Svc", "t")

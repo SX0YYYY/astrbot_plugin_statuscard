@@ -113,3 +113,24 @@ def test_bracketed_url_non_credential_key_is_not_over_masked() -> None:
     assert "monkey=abc" in _mask("https://host/a)monkey=abc 超时")
     assert "tokenless=abc" in _mask("https://host/a)tokenless=abc 超时")
     assert "说明文字" in _mask("https://host/a)说明文字")
+
+
+def test_underscore_prefixed_credentials_are_masked() -> None:
+    """access_token / refresh_token / client_secret must be swept too.
+
+    The lookbehind used to reject a "_" prefix, so only the bare names were
+    masked (2026-11-09 reverse audit).
+    """
+    # The VALUE must not itself contain a credential word: "SECRET" would
+    # match the built-in "secret" key and mask the row even with the buggy
+    # lookbehind, making the test pass for the wrong reason.
+    for key in ("access_token", "refresh_token", "client_secret"):
+        out = _mask(f"https://host/a);{key}=VALUE123 超时")
+        assert "VALUE123" not in out, (key, out)
+        assert "超时" in out, (key, out)
+
+
+def test_letter_prefixed_words_are_not_masked() -> None:
+    """A letter prefix still means the word is not a credential key."""
+    assert "monkey=abc" in _mask("https://host/a)monkey=abc 超时")
+    assert "tokenless=abc" in _mask("https://host/a)tokenless=abc 超时")

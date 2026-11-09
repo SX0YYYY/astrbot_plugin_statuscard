@@ -506,7 +506,10 @@ class Redactor:
         # URL are never touched (2026-11-09 audit).
         masked = re.sub(
             r"(（已隐藏地址）\))[?&;]?[^\s）)]*?"
-            r"(?<![A-Za-z0-9_])(?:token|password|passwd|secret|credential|api[_-]?key)"
+            # The lookbehind must allow a "_" prefix: access_token /
+            # refresh_token / client_secret were left visible, while a
+            # letter prefix (monkey=, tokenless=) is still rejected.
+            r"(?<![A-Za-z0-9])(?:token|password|passwd|secret|credential|api[_-]?key)"
             r"(?![A-Za-z0-9_])[^\s）)]*",
             r"\1",
             masked,
