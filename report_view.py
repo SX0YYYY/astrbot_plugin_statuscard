@@ -351,6 +351,21 @@ def _event_start(item: dict[str, Any]) -> int:
     return started
 
 
+# The provider-quality note is rendered in two places: the report IMAGE
+# (always Chinese, built here) and the Web dashboard (translated through
+# .astrbot-plugin/i18n/*.json). Keeping the Chinese text in one constant lets
+# a contract test prove the dashboard copies never drift; the dashboard adds
+# the long/truncated sentences itself, so they are separate constants.
+QUALITY_NOTE_BASE = (
+    "口径：成功率 = 完成 / (完成 + 失败)；中断（aborted）单列，不计入失败。"
+    "中断指调用被取消，不一定是人为中止：含同会话新消息/命令接管、其他插件"
+    "停止事件、上游超时被取消等。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为"
+    "未记录。按 AstrBot provider_stats 记录统计。"
+)
+QUALITY_NOTE_LONG = "窗口内持续 ≥60 秒的中断 {n} 次，多为上游超时后被取消，建议关注。"
+QUALITY_NOTE_TRUNCATED = "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+
+
 class DailyReportBuilder:
     """Build the daily-report view from the plugin store and AstrBot history.
 
@@ -2482,21 +2497,13 @@ class DailyReportBuilder:
                 }
             )
 
-        note = (
-            "口径：成功率 = 完成 / (完成 + 失败)；中断（aborted）单列，不计入失败。"
-            "中断指调用被取消，不一定是人为中止：含同会话新消息/命令接管、其他插件"
-            "停止事件、上游超时被取消等。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为"
-            "未记录。按 AstrBot provider_stats 记录统计。"
-        )
+        note = QUALITY_NOTE_BASE
         if stats.get("aborted_long"):
-            note += (
-                f"窗口内持续 ≥60 秒的中断 {stats['aborted_long']} 次，"
-                "多为上游超时后被取消，建议关注。"
-            )
+            note += QUALITY_NOTE_LONG.format(n=stats["aborted_long"])
         if truncated:
             # A space, not "；": the base note already ends with "。" and
             # "。；" read as a doubled punctuation (2026-11-08 audit).
-            note += " 窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
+            note += " " + QUALITY_NOTE_TRUNCATED
 
         return {
             "available": True,

@@ -563,10 +563,6 @@ class DailyReporter:
         self._weekly_next_run_text: str | None = None
         self._last_sent_day: str | None = None
         self._last_attempt_day: str | None = None
-        # The calendar day of the last attempt, kept for diagnostics only.
-        # ``_last_attempt_day`` (the report day) is what the catch-up guard
-        # actually reads; the comment used to claim otherwise (v2.20.20).
-        self._last_attempt_wall_day: str | None = None
         # A day whose report was given up must not restart the retry cycle.
         # Without this marker the daily loop re-armed the catch-up after
         # every abandon and sent the report all night long (11 attempts and
@@ -612,13 +608,6 @@ class DailyReporter:
         # never blocks something the week key would not already block, so
         # it is redundant rather than load-bearing.
         self._weekly_last_sent_slot: str | None = None
-        # Week the last weekly send was ATTEMPTED in (set before any slow
-        # work). Redundant by design: the catch-up check looks only at
-        # last_sent/given_up/db_rebuilt, and a guard test asserts exactly
-        # that this marker does NOT influence it (an attempt alone must not
-        # block a catch-up). Kept because the field is part of the persisted
-        # delivery state; do not wire it into the catch-up decision.
-        self._weekly_attempt_week: str | None = None
         # A week whose weekly report was given up must not restart the
         # 10/20/30-minute retry cycle: the catch-up check only looked at
         # last_sent, so every abandon immediately scheduled another attempt
@@ -706,7 +695,6 @@ class DailyReporter:
 
         self._last_sent_day = self._sanitize_sent_day(saved.get("last_sent_day"))
         self._last_attempt_day = saved.get("last_attempt_day") or None
-        self._last_attempt_wall_day = saved.get("last_attempt_wall_day") or None
         self._daily_given_up_day = saved.get("daily_given_up_day") or None
         # When the report database had to be rebuilt during a report day,
         # that day's data is gone; sending an all-"--" report would lock the
@@ -762,7 +750,6 @@ class DailyReporter:
                 setattr(self, attribute, 0.0)
         self._weekly_last_sent_week = saved.get("weekly_last_sent_week") or None
         self._weekly_last_sent_slot = saved.get("weekly_last_sent_slot") or None
-        self._weekly_attempt_week = saved.get("weekly_attempt_week") or None
         self._weekly_given_up_week = saved.get("weekly_given_up_week") or None
         self._pending_retry_count = _safe_int(saved.get("pending_retry_count"))
         self._pending_retry_day = (
@@ -923,7 +910,6 @@ class DailyReporter:
                 {
                     "last_sent_day": self._last_sent_day,
                     "last_attempt_day": self._last_attempt_day,
-                    "last_attempt_wall_day": self._last_attempt_wall_day,
                     "schema": 2,
                     "daily_given_up_day": self._daily_given_up_day,
                     "db_repaired_at": getattr(self, "_db_repaired_at", None),
@@ -944,7 +930,6 @@ class DailyReporter:
                     "pending_retry_day": self._pending_retry_day,
                     "weekly_last_sent_week": self._weekly_last_sent_week,
                     "weekly_last_sent_slot": self._weekly_last_sent_slot,
-                    "weekly_attempt_week": self._weekly_attempt_week,
                     "weekly_given_up_week": self._weekly_given_up_week,
                     "weekly_pending": self._weekly_pending,
                     "weekly_pending_report_day": self._weekly_pending_report_day,
@@ -1748,9 +1733,6 @@ class DailyReporter:
     async def _send_weekly_scheduled(
         self, day: str | None = None, slot: str | None = None
     ) -> None:
-        # Redundant marker (nothing reads it; see the attribute comment at
-        # __init__), recorded only for parity with the persisted state.
-        self._weekly_attempt_week = self._week_key(self._today())
         self._save_delivery_state()
         weekly_sections = self._weekly_sections()
         if weekly_sections is not None and not weekly_sections:
@@ -2691,13 +2673,11 @@ class DailyReporter:
         # report 24 times in six hours (v2.20.17 audit). The backfill only
         # leaves the report in the recovery queue instead.
         backfill = bool(getattr(self, "_daily_backfill_inflight", False))
-        # Two markers, but only one is load-bearing:
-        # ``_last_attempt_day`` = "which report day was last attempted" (the
-        # catch-up guard reads this) and ``_last_attempt_wall_day`` = "on
-        # which calendar day" (recorded for diagnostics; nothing reads it).
-        # The wall-clock marker is kept so old state files stay valid.
+        # The report day that was last attempted; the catch-up guard reads
+        # this. The old companion ``_last_attempt_wall_day`` was written but
+        # never read, so v2.20.30 removed it (an old state file's extra key is
+        # ignored on load and dropped on the next save).
         self._last_attempt_day = day or self._default_report_day()
-        self._last_attempt_wall_day = self._today()
         self._save_delivery_state()
         targets = self._targets()
         if self._sections() is not None and not self._sections():

@@ -5,13 +5,13 @@ import hashlib
 import math
 import os
 import platform
+import queue
 import shutil
 import socket
 import sqlite3
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
 
 try:
     import pwd
@@ -371,63 +371,51 @@ def _short_disk_error(value: Any) -> str | None:
     return text if len(text) <= 24 else text[:23] + "…"
 
 
-def disk_usage(paths: list[str] | None = None) -> list[DiskUsage]:
-    targets = paths or _default_disk_paths()
-    ret: list[DiskUsage] = []
-    for name in targets:
-        try:
-            u = psutil.disk_usage(name)
-            # Measure against ``total`` so the number matches the
-            # "used / total" text printed beside it. psutil's own percent
-            # divides by (used + avail), which leaves out the filesystem's
-            # root-reserved blocks; on ext4 that reads 2-3 points higher and
-            # looks like an arithmetic error to whoever reads the card.
-            percent = (u.used / u.total * 100.0) if u.total else 0.0
-            ret.append(
-                DiskUsage(
-                    name=name,
-                    used=u.used,
-                    total=u.total,
-                    percent=round(percent, 1),
-                )
-            )
-        except Exception as exc:
-            ret.append(
-                DiskUsage(
-                    name=name, used=None, total=None, percent=None, exception=str(exc)
-                )
-            )
-    return ret
-
-
-# statvfs on a hung NFS/CIFS mount blocks forever. A dedicated pool keeps such
-# a worker from occupying the default executor that every other
-# ``asyncio.to_thread`` call shares, and the caller gives up after a timeout
-# instead of freezing the status card, the daily image and the dashboard.
-#
-# Each mount is submitted as its own job (one hung mount used to stall the
-# whole batch, so the root disk went blind along with it), and queued-but-
-# unstarted jobs are cancelled on the next call so a pool full of stuck
-# workers cannot pile up an ever-growing backlog.
-_DISK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="statuscard-disk")
+# statvfs on a hung NFS/CIFS mount blocks forever. A dedicated DAEMON thread
+# per probe keeps such a thread from occupying the default executor that every
+# other ``asyncio.to_thread`` call shares, from blocking the caller (the caller
+# gives up after a timeout) and from delaying interpreter shutdown: the old
+# module-level ThreadPoolExecutor was never shut down and its non-daemon
+# workers were joined at exit, so one hung mount made AstrBot take the full
+# systemd stop timeout on every restart (v2.20.30).
 _DISK_WARN_AT = 0.0
-# Paths that just timed out. ``future.cancel()`` cannot stop a worker already
-# blocked inside statvfs, so every sample of a hung NFS/CIFS mount leaked one
-# worker; after four calls the (previously 4-thread) pool was full and every
-# healthy mount timed out too until the process restarted (v2.20.8). A timed
-# out path is skipped for a few minutes instead of being submitted again.
+# Paths that just timed out. A daemon thread may still be blocked inside
+# statvfs forever; skipping the path for a few minutes keeps a hung mount from
+# spawning a new thread on every sample. After _DISK_MAX_TIMEOUTS consecutive
+# timeouts the mount is only probed once per _DISK_DEAD_RETRY window, which
+# bounds the thread leak to a handful per day while still recovering by itself
+# (v2.20.30: was float("inf"), i.e. "until the process restarts").
 _DISK_DEAD_UNTIL: dict[str, float] = {}
 _DISK_DEAD_COOLDOWN = 300.0
-# A statvfs that never returns keeps its worker forever: ``future.cancel()``
-# cannot stop a worker already blocked inside the syscall. A 300-second
-# cooldown only slowed the leak to one worker per five minutes -- after ~40
-# minutes all eight workers were hung and every healthy mount started timing
-# out as well, permanently (v2.20.8 measured; the pool is shared by the card,
-# the daily report, the dashboard and the disk alert). After this many
-# consecutive timeouts the mount is not submitted again until the process
-# restarts, which bounds the leak to three workers and keeps the rest usable.
+_DISK_DEAD_RETRY = 6 * 3600.0
 _DISK_FAIL_COUNT: dict[str, int] = {}
 _DISK_MAX_TIMEOUTS = 3
+
+
+def _disk_timeout(name: str) -> DiskUsage:
+    return DiskUsage(
+        name=name, used=None, total=None, percent=None, exception="读取超时"
+    )
+
+
+def _disk_worker(name: str, box: queue.Queue) -> None:
+    """Read one mount in a daemon thread and hand the result to the caller."""
+
+    try:
+        box.put_nowait(_disk_usage_one(name))
+    except BaseException as exc:  # pragma: no cover - defensive
+        try:
+            box.put_nowait(
+                DiskUsage(
+                    name=name,
+                    used=None,
+                    total=None,
+                    percent=None,
+                    exception=str(exc),
+                )
+            )
+        except Exception:
+            pass
 
 
 def disk_usage_bounded(
@@ -437,82 +425,70 @@ def disk_usage_bounded(
 
     targets = [str(path) for path in (paths or _default_disk_paths())]
     # Dedupe while keeping order: a duplicated path in disk_paths used to
-    # have its first future overwritten in the dict below -- an orphaned
-    # job that no one waits for or cancels, leaking one hung worker per
-    # call until the pool was full and every disk read timed out.
+    # start two probes for the same mount (one result was discarded).
     unique_targets = list(dict.fromkeys(targets))
     results: dict[str, DiskUsage] = {}
-    futures = {}
+    boxes: dict[str, queue.Queue] = {}
+    deadline = time.monotonic() + max(0.0, float(timeout))
     now = time.time()
     for name in unique_targets:
         if _DISK_DEAD_UNTIL.get(name, 0.0) > now:
-            # Recently hung: do not feed another worker to the same mount.
-            results[name] = DiskUsage(
-                name=name,
-                used=None,
-                total=None,
-                percent=None,
-                exception="读取超时",
-            )
+            # Recently hung: do not spawn another thread for the same mount.
+            results[name] = _disk_timeout(name)
             continue
-        futures[name] = _DISK_POOL.submit(_disk_usage_one, name)
-    done, _not_done = (
-        wait(futures.values(), timeout=timeout) if futures else (set(), set())
-    )
-    for name, future in futures.items():
-        if future in done and not future.cancelled():
-            try:
-                results[name] = future.result()
-                _DISK_DEAD_UNTIL.pop(name, None)
-                _DISK_FAIL_COUNT.pop(name, None)
-            except Exception as exc:  # pragma: no cover - defensive
-                results[name] = DiskUsage(
-                    name=name,
-                    used=None,
-                    total=None,
-                    percent=None,
-                    exception=str(exc),
-                )
+        box: queue.Queue = queue.Queue(maxsize=1)
+        worker = threading.Thread(
+            target=_disk_worker,
+            args=(name, box),
+            name="statuscard-disk",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception:
+            results[name] = _disk_timeout(name)
+            continue
+        boxes[name] = box
+
+    for name, box in boxes.items():
+        remaining = deadline - time.monotonic()
+        try:
+            outcome = box.get(timeout=max(0.0, remaining))
+        except queue.Empty:
+            outcome = None
+        if outcome is not None:
+            # The worker finished, success or a concrete error (permission,
+            # missing mount). Either way it is not a hang.
+            results[name] = outcome
+            _DISK_DEAD_UNTIL.pop(name, None)
+            _DISK_FAIL_COUNT.pop(name, None)
+            continue
+        now = time.time()
+        was_abandoned = _DISK_FAIL_COUNT.get(name, 0) >= _DISK_MAX_TIMEOUTS
+        if was_abandoned:
+            # The cool-down expired and this single probe also timed out:
+            # wait another full window instead of growing the counter.
+            _DISK_DEAD_UNTIL[name] = now + _DISK_DEAD_RETRY
+            logger.warning(
+                "磁盘挂载点 %s 仍无法读取，继续暂停 %d 小时后再试",
+                name,
+                int(_DISK_DEAD_RETRY // 3600),
+            )
         else:
-            was_running = future.running()
-            future.cancel()  # queued jobs die here; running ones keep hanging
-            if not was_running:
-                # The pool is saturated by OTHER mounts (each hung statvfs
-                # keeps its worker forever). This mount never got a worker,
-                # so counting it as its own timeout eventually marked every
-                # healthy mount dead ("连续 3 次读取超时") while the hung one
-                # was the only real problem (v2.20.17).
-                results[name] = DiskUsage(
-                    name=name,
-                    used=None,
-                    total=None,
-                    percent=None,
-                    exception="读取超时",
-                )
-                continue
             failures = _DISK_FAIL_COUNT.get(name, 0) + 1
             _DISK_FAIL_COUNT[name] = failures
             if failures >= _DISK_MAX_TIMEOUTS:
-                # Give up on this mount for the rest of the process: every
-                # further submission would leak one more worker and healthy
-                # mounts would eventually time out behind it (the pool is
-                # shared by the card, the report, the dashboard and the alert).
-                _DISK_DEAD_UNTIL[name] = float("inf")
+                _DISK_DEAD_UNTIL[name] = now + _DISK_DEAD_RETRY
                 logger.warning(
-                    "磁盘挂载点 %s 连续 %d 次读取超时，本次运行不再尝试"
-                    "（请检查挂载点，重启插件后可重试）",
+                    "磁盘挂载点 %s 连续 %d 次读取超时，改为每 %d 小时重试一次"
+                    "（探测线程为 daemon，不会阻止进程退出）",
                     name,
                     failures,
+                    int(_DISK_DEAD_RETRY // 3600),
                 )
             else:
-                _DISK_DEAD_UNTIL[name] = time.time() + _DISK_DEAD_COOLDOWN
-            results[name] = DiskUsage(
-                name=name,
-                used=None,
-                total=None,
-                percent=None,
-                exception="读取超时",
-            )
+                _DISK_DEAD_UNTIL[name] = now + _DISK_DEAD_COOLDOWN
+        results[name] = _disk_timeout(name)
     if any(r.exception for r in results.values()):
         # A hung mount is polled on every card/report sample; warning every
         # round filled the journal. Once per 10 minutes is enough.

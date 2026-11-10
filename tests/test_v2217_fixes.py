@@ -709,33 +709,60 @@ def test_audit_messages_are_masked_on_the_dashboard(tmp_path) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_queued_disk_read_does_not_mark_the_mount_dead(monkeypatch) -> None:
-    class FakeFuture:
-        def __init__(self) -> None:
-            self.cancelled = False
+def test_disk_probes_use_daemon_threads(monkeypatch) -> None:
+    """v2.20.30 replaced the never-shut-down executor with daemon threads.
 
-        def running(self) -> bool:
-            return False
+    A non-daemon worker stuck in statvfs was joined at interpreter exit, so
+    one hung NFS mount made every AstrBot restart wait for the systemd stop
+    timeout. The probe thread must be a daemon and the caller must still get
+    a normal result.
+    """
 
-        def cancel(self) -> bool:
-            self.cancelled = True
-            return True
+    created: list[bool] = []
 
-        def result(self):
-            raise AssertionError("not done")
+    class FakeThread:
+        def __init__(self, target, args, name, daemon):
+            created.append(bool(daemon))
+            self._target = target
+            self._args = args
 
-    class FakePool:
-        def submit(self, fn, name):
-            return FakeFuture()
+        def start(self) -> None:
+            self._target(*self._args)
 
     collectors_mod._DISK_FAIL_COUNT.clear()
     collectors_mod._DISK_DEAD_UNTIL.clear()
-    monkeypatch.setattr(collectors_mod, "_DISK_POOL", FakePool())
-    monkeypatch.setattr(collectors_mod, "wait", lambda futures, timeout: (set(), set()))
+    monkeypatch.setattr(collectors_mod, "_DISK_FAIL_COUNT", {})
+    monkeypatch.setattr(collectors_mod, "_DISK_DEAD_UNTIL", {})
+    monkeypatch.setattr(collectors_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        collectors_mod,
+        "_disk_usage_one",
+        lambda name: collectors_mod.DiskUsage(name=name, used=1, total=2, percent=50.0),
+    )
     result = collectors_mod.disk_usage_bounded(["/healthy"])
-    assert result[0].exception == "读取超时"
+    assert created == [True]
+    assert result[0].percent == 50.0
     assert "/healthy" not in collectors_mod._DISK_FAIL_COUNT
-    assert "/healthy" not in collectors_mod._DISK_DEAD_UNTIL
+
+
+def test_hung_disk_probe_returns_within_the_timeout(monkeypatch) -> None:
+    """A worker that never finishes must not hold the caller."""
+
+    def hang(name: str):
+        time.sleep(30)
+        return collectors_mod.DiskUsage(
+            name=name, used=None, total=None, percent=None, exception="读取超时"
+        )
+
+    collectors_mod._DISK_FAIL_COUNT.clear()
+    collectors_mod._DISK_DEAD_UNTIL.clear()
+    monkeypatch.setattr(collectors_mod, "_DISK_FAIL_COUNT", {})
+    monkeypatch.setattr(collectors_mod, "_DISK_DEAD_UNTIL", {})
+    monkeypatch.setattr(collectors_mod, "_disk_usage_one", hang)
+    started = time.monotonic()
+    result = collectors_mod.disk_usage_bounded(["/hung"], timeout=0.05)
+    assert time.monotonic() - started < 1.0
+    assert result[0].exception == "读取超时"
 
 
 def test_state_store_close_blocks_late_saves(tmp_path) -> None:

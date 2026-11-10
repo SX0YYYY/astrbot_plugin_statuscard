@@ -2560,6 +2560,28 @@ class ServiceMonitor:
             base += "#" + suffix
         return base
 
+    @staticmethod
+    def _display_target(item: dict[str, Any]) -> str:
+        """The probe target as an operator configured it, minus credentials.
+
+        ``_item_key`` is an internal identity: it appends a query hash and the
+        duplicate-item suffix, neither of which belongs in a display field
+        (v2.20.30 -- ``status()`` used to return the state key as ``target``).
+        """
+
+        kind = str(item.get("__template_key") or "")
+        if kind == "http":
+            return redact_url(str(item.get("url") or ""))
+        if kind == "tcp":
+            return f"{item.get('host', '')}:{item.get('port', '')}"
+        if kind == "docker":
+            return str(item.get("container") or "")
+        if kind == "process":
+            return str(item.get("pattern") or "")
+        if kind == "systemd":
+            return str(item.get("unit") or "")
+        return redact_url(str(item.get("target") or ""))
+
     def _targets_for(self, kind: str = "service") -> list[str]:
         picked = resolve_targets(self.config, kind)
         return self.targets if picked is None else picked
@@ -2843,7 +2865,12 @@ class ServiceMonitor:
                     # Stable key for the English dashboard: KIND_LABELS has
                     # a Chinese "进程" that leaked into en-US (v2.20.17).
                     "kind_key": str(item.get("__template_key") or ""),
-                    "target": self._item_key(item),
+                    # ``target`` is the configured probe target; the state
+                    # slot identity moved to ``state_key`` so a display field
+                    # no longer exposes the internal "#q<hash>" suffix
+                    # (v2.20.30). No in-repo consumer read the old value.
+                    "target": self._display_target(item),
+                    "state_key": self._item_key(item),
                     "state": item_states.get(self._item_key(item), {}),
                     "config_error": item.get("config_error"),
                 }

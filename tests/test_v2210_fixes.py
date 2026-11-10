@@ -199,7 +199,7 @@ def test_silenced_new_fault_still_records_a_pair(tmp_path: Path) -> None:
 
 
 # ----------------------------------------------------------------------
-# 磁盘池：挂死挂载点在有限次超时后被永久跳过
+# 磁盘探测：挂死挂载点有限次超时后进入长冷却，daemon 线程不拖退出
 # ----------------------------------------------------------------------
 
 
@@ -220,11 +220,36 @@ def test_hung_mount_is_abandoned_after_max_timeouts(
     for _ in range(collectors._DISK_MAX_TIMEOUTS):
         result = collectors.disk_usage_bounded(["/hung-mount"], timeout=0.05)
         assert result[0].exception == "读取超时"
-    assert collectors._DISK_DEAD_UNTIL["/hung-mount"] == float("inf")
-    # Once abandoned it is not submitted again at all.
+    # v2.20.30: no longer float("inf") -- the mount is probed once per
+    # _DISK_DEAD_RETRY window instead of requiring a plugin restart.
+    dead_until = collectors._DISK_DEAD_UNTIL["/hung-mount"]
+    assert dead_until > time.time()
+    assert dead_until <= time.time() + collectors._DISK_DEAD_RETRY + 5
+    # Inside the window it is not probed again.
     result = collectors.disk_usage_bounded(["/hung-mount"], timeout=0.05)
     assert result[0].exception == "读取超时"
     assert collectors._DISK_FAIL_COUNT["/hung-mount"] == collectors._DISK_MAX_TIMEOUTS
+
+
+def test_abandoned_mount_gets_one_retry_per_window(monkeypatch) -> None:
+    """After the cool-down expires the mount is probed exactly once more."""
+
+    monkeypatch.setattr(collectors, "_DISK_FAIL_COUNT", {"/hung-mount": 3})
+    monkeypatch.setattr(collectors, "_DISK_DEAD_UNTIL", {"/hung-mount": 0.0})
+    monkeypatch.setattr(collectors, "_DISK_MAX_TIMEOUTS", 3)
+
+    def fake(name: str):
+        time.sleep(0.25)
+        return collectors.DiskUsage(
+            name=name, used=None, total=None, percent=None, exception="读取超时"
+        )
+
+    monkeypatch.setattr(collectors, "_disk_usage_one", fake)
+    result = collectors.disk_usage_bounded(["/hung-mount"], timeout=0.05)
+    assert result[0].exception == "读取超时"
+    # The counter did not grow; a fresh window starts now.
+    assert collectors._DISK_FAIL_COUNT["/hung-mount"] == 3
+    assert collectors._DISK_DEAD_UNTIL["/hung-mount"] > time.time()
 
 
 # ----------------------------------------------------------------------

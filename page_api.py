@@ -526,21 +526,6 @@ class PageApi:
             )
         return items
 
-    def _snapshots_for_page(self, plugin: Any) -> list[dict[str, Any]]:
-        """Raw snapshots, with the QQ counts removed under qq_stats redaction."""
-
-        snapshots = plugin.report_store.list_snapshots(30)
-        if "qq_stats" not in self._redact():
-            return snapshots
-        return [
-            {
-                "day": row.get("day"),
-                "complete": row.get("complete"),
-                "captured_at": row.get("captured_at"),
-            }
-            for row in snapshots
-        ]
-
     @staticmethod
     def _downsample(
         rows: list[dict[str, Any]], limit: int = 120
@@ -738,9 +723,20 @@ class PageApi:
         exercised end to end.
         """
 
-        kind = str(await _request_value("kind", "monitors")).lower()
+        raw_kind = await _request_value("kind", None)
+        kind = str(raw_kind or "").strip().lower()
         if kind not in ("targets", "monitors", "webhook"):
-            return jsonify({"ok": False, "error": f"unknown kind: {kind}"})
+            # A bridge that loses the JSON body used to fall back to
+            # "monitors" silently: the operator clicked "verify targets", the
+            # page rendered undefined rows and no message was sent. Reject
+            # the request instead of guessing (v2.20.30).
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "missing or unknown kind",
+                    "error_code": "verify_kind_missing",
+                }
+            )
         now = time.time()
         if now - self._verify_last.get(kind, 0.0) < 30:
             return jsonify(

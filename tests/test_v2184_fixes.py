@@ -120,8 +120,10 @@ def test_disk_percent_matches_used_over_total(monkeypatch: pytest.MonkeyPatch) -
         free=22_600_000_000,
     )
     monkeypatch.setattr(collectors.psutil, "disk_usage", lambda _path: fake)
+    monkeypatch.setattr(collectors, "_DISK_DEAD_UNTIL", {})
+    monkeypatch.setattr(collectors, "_DISK_FAIL_COUNT", {})
 
-    disks = collectors.disk_usage(["/"])
+    disks = collectors.disk_usage_bounded(["/"])
 
     assert len(disks) == 1
     assert disks[0].percent == pytest.approx(62.9, abs=0.05)
@@ -132,8 +134,10 @@ def test_disk_percent_zero_total_is_safe(monkeypatch: pytest.MonkeyPatch) -> Non
 
     fake = types.SimpleNamespace(used=0, total=0, percent=0.0, free=0)
     monkeypatch.setattr(collectors.psutil, "disk_usage", lambda _path: fake)
+    monkeypatch.setattr(collectors, "_DISK_DEAD_UNTIL", {})
+    monkeypatch.setattr(collectors, "_DISK_FAIL_COUNT", {})
 
-    disks = collectors.disk_usage(["/"])
+    disks = collectors.disk_usage_bounded(["/"])
 
     assert disks[0].percent == 0.0
 

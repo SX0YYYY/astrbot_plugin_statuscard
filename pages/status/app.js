@@ -2045,6 +2045,30 @@
     const quality = data.provider_quality || {};
     if (quality.available) {
       const stats = quality.stats || {};
+      const translatedNote = quality.note_code
+        ? t(quality.note_code, quality.note)
+        : quality.note;
+      // When t() falls back to the server text (old bridge, unknown locale),
+      // that text ALREADY contains the long/truncated sentences; appending
+      // them again printed the same sentence twice (v2.20.30).
+      const usedTranslation = translatedNote !== quality.note;
+      let noteText = translatedNote || "";
+      if (usedTranslation && Number(stats.aborted_long) > 0) {
+        noteText +=
+          " " +
+          t(
+            "quality_note_long",
+            "窗口内持续 ≥60 秒的中断 {n} 次，多为上游超时后被取消，建议关注。",
+          ).replace("{n}", String(stats.aborted_long));
+      }
+      if (usedTranslation && quality.note_truncated) {
+        noteText +=
+          " " +
+          t(
+            "quality_note_truncated",
+            "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。",
+          );
+      }
       const pairs = [
         [t("report_calls", "调用次数"), stats.calls_text],
         [t("quality_success", "成功率"), stats.success_rate_text],
@@ -2122,23 +2146,7 @@
               "</tbody></table></div>"
             : "") +
           (quality.note
-            ? '<p class="card-note">' +
-              esc(
-                (quality.note_code
-                  ? t(quality.note_code, quality.note)
-                  : quality.note) +
-                  (Number(stats.aborted_long) > 0
-                    ? " " +
-                      t(
-                        "quality_note_long",
-                        "窗口内持续 ≥60 秒的中断 {n} 次，多为上游超时后被取消，建议关注。",
-                      ).replace("{n}", String(stats.aborted_long))
-                    : "") +
-                  (quality.note_truncated
-                    ? " " + t("quality_note_truncated", "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。")
-                    : ""),
-              ) +
-              "</p>"
+            ? '<p class="card-note">' + esc(noteText) + "</p>"
             : "") +
           "</div>",
       );

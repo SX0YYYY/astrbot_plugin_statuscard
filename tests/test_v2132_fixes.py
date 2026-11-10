@@ -25,15 +25,26 @@ def _page_api(tmp_path: Path, config: dict) -> page_api_module.PageApi:
     return page_api_module.PageApi(plugin)
 
 
-def test_snapshots_redacted_under_qq_stats(tmp_path: Path) -> None:
-    api = _page_api(tmp_path, {"display": {"page_redact": ["qq_stats"]}})
-    assert api.plugin.report_store.record_snapshot(
-        "2026-10-25", 22, 8, 2119, 50000, True, 1
+def test_qq_stats_redaction_hides_the_qq_section(tmp_path: Path) -> None:
+    """The qq_stats rule still hides the QQ figures on the real report path.
+
+    This used to drive ``PageApi._snapshots_for_page``, a helper no route ever
+    called (removed in v2.20.30). The rule itself is applied by the report
+    builder, so assert it there instead of through dead code.
+    """
+
+    from astrbot_plugin_statuscard.report_view import DailyReportBuilder
+
+    store = ReportStore(tmp_path / "report.db")
+    builder = DailyReportBuilder(
+        store,
+        {"display": {"timezone": "Asia/Shanghai", "redact": ["qq_stats"]}},
     )
-    rows = api._snapshots_for_page(api.plugin)
-    assert rows
-    assert "friends" not in rows[0]
-    assert rows[0]["day"] == "2026-10-25"
+    view = builder.build(day="2026-10-25", sections=["qq"])
+    qq = view["qq"]
+    assert qq["available"] is False
+    assert "隐藏" in qq["empty_reason"]
+    assert qq["days"] == []
 
 
 def test_history_invalid_range_normalized(tmp_path: Path, monkeypatch) -> None:

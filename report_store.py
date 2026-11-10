@@ -160,12 +160,22 @@ class ReportStore:
                 try:
                     con.execute("BEGIN IMMEDIATE")
                     con.rollback()
-                except sqlite3.Error:
-                    logger.warning(
-                        "日报数据库可读但不可写（只读挂载或磁盘已满），本次报告将跳过"
-                    )
-                    self.available = False
-                    return False
+                except sqlite3.Error as exc:
+                    if any(word in str(exc).lower() for word in ("locked", "busy")):
+                        # Another writer (the sampler, a backup) holds the
+                        # write lock. The schema reads fine and a report only
+                        # reads, so a transient BUSY is NOT a broken database;
+                        # treating it as one skipped the whole report day
+                        # (v2.20.30).
+                        logger.info(
+                            "日报数据库暂时被写锁占用，探针按可用处理（报告只读）"
+                        )
+                    else:
+                        logger.warning(
+                            "日报数据库可读但不可写（只读挂载或磁盘已满），本次报告将跳过"
+                        )
+                        self.available = False
+                        return False
             return True
         except Exception:
             logger.exception("日报数据库探针失败")
