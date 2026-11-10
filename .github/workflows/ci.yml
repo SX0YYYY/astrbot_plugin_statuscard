@@ -7,11 +7,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # Both interpreters the plugin supports in practice: 3.11 is the CI
+      # baseline, 3.12 is what the local dev machine and newer AstrBot
+      # images run. fail-fast stays off so one version's failure does not
+      # hide the other's result.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
