@@ -175,16 +175,6 @@
         </div>
       </div>
       <div class="chart-block">
-        <div class="chart-title">好友 / 群聊 <span>每日快照</span></div>
-        {{ legend(d.qq.charts.friends_groups) }}
-        {{ chart_svg(d.qq.charts.friends_groups) }}
-      </div>
-      <div class="chart-block">
-        <div class="chart-title">群员 <span>各群 member_count 之和</span></div>
-        {{ legend(d.qq.charts.members) }}
-        {{ chart_svg(d.qq.charts.members) }}
-      </div>
-      <div class="chart-block">
         <div class="chart-title">发送 / 接收 <span>按日</span></div>
         {{ legend(d.qq.charts.traffic) }}
         {{ chart_svg(d.qq.charts.traffic) }}
@@ -319,7 +309,7 @@
       </table>
       {% endif %}
       <div class="chart-block">
-        <div class="chart-title">调用 / 失败 <span>按日</span></div>
+        <div class="chart-title">调用 / 失败 / 中断 <span>按日</span></div>
         {{ legend(d.provider_quality.trend) }}
         {{ chart_svg(d.provider_quality.trend) }}
       </div>

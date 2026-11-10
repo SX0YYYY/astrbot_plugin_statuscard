@@ -613,7 +613,7 @@
           "show_advanced": true
         },
         "type": "object",
-        "hint": "按 AstrBot 的 provider_stats 记录监测 LLM 调用质量：连续失败达到阈值时告警，恢复后通知。被取消的调用（aborted，不一定是人为中止）不算失败，也不打断连续计数。",
+        "hint": "按 AstrBot 的 provider_stats 记录监测 LLM 调用质量：连续失败达到阈值时告警，恢复后通知。失败 = 调用返回错误（计入成功率、累计连续失败）；中断 = 调用被取消（aborted，不一定是人为中止），不计入失败、不进成功率，也不打断连续计数。",
         "items": {
           "enabled": {
             "description": "启用 LLM 连续失败告警",
@@ -630,7 +630,7 @@
               "max": 10,
               "step": 1
             },
-            "hint": "按时间连续的 provider_stats 记录计算，中间被取消的调用（aborted）不打断连续链。",
+            "hint": "按时间连续的 provider_stats 记录计算。失败 = 调用返回错误；中断（aborted，调用被取消，不一定是人为中止）不计入失败、不进成功率，也不打断连续链。",
             "condition": {
               "enabled": true
             }

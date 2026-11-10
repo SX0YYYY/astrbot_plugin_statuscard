@@ -251,10 +251,17 @@ def aggregate(
         )
 
         local_day = created.astimezone(tz).strftime("%Y-%m-%d")
-        day_bucket = by_day.setdefault(local_day, {"calls": 0, "errors": 0})
+        day_bucket = by_day.setdefault(
+            local_day, {"calls": 0, "errors": 0, "aborted": 0}
+        )
         day_bucket["calls"] += 1
         if status == "error":
             day_bucket["errors"] += 1
+        elif status == "aborted":
+            # The daily trend draws interruptions as their own line: "no
+            # failures" and "no interruptions" are different statements and
+            # the chart must show the difference (v2.20.31).
+            day_bucket["aborted"] += 1
 
         # The per-day trend above covers every fetched row so a longer
         # chart window can show history; everything below only counts the

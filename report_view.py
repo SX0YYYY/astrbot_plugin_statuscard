@@ -357,10 +357,12 @@ def _event_start(item: dict[str, Any]) -> int:
 # a contract test prove the dashboard copies never drift; the dashboard adds
 # the long/truncated sentences itself, so they are separate constants.
 QUALITY_NOTE_BASE = (
-    "口径：成功率 = 完成 / (完成 + 失败)；中断（aborted）单列，不计入失败。"
-    "中断指调用被取消，不一定是人为中止：含同会话新消息/命令接管、其他插件"
-    "停止事件、上游超时被取消等。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为"
-    "未记录。按 AstrBot provider_stats 记录统计。"
+    "口径：成功率 = 完成 / (完成 + 失败)。"
+    "失败 = 调用返回错误（框架记为 error），计入成功率分母，并累计「连续失败」；"
+    "中断 = 调用被取消（框架记为 aborted），不计入失败、不进成功率分母，也不打断连续失败。"
+    "中断不一定是人为中止：同会话新消息/命令接管、其他插件停止事件、上游超时被取消都会记为中断；"
+    "趋势图分别画 调用 / 失败 / 中断 三条线。延迟与 TTFT 仅统计成功调用，TTFT 为 0 视为未记录。"
+    "按 AstrBot provider_stats 记录统计。"
 )
 QUALITY_NOTE_LONG = "窗口内持续 ≥60 秒的中断 {n} 次，多为上游超时后被取消，建议关注。"
 QUALITY_NOTE_TRUNCATED = "窗口内请求超过 2 万条，仅统计最近部分，合计可能偏小。"
@@ -1782,21 +1784,10 @@ class DailyReportBuilder:
         else:
             empty_reason = "暂无 QQ 快照或发送数据；从日报数据底座启用后开始积累"
 
-        friends_groups = _line_chart(
-            labels,
-            [
-                {"name": "好友", "color": "#4f8cff", "values": friends},
-                {"name": "群聊", "color": "#8b5cf6", "values": groups},
-            ],
-            y_formatter=_fmt_num,
-            height=150,
-        )
-        member_chart = _line_chart(
-            labels,
-            [{"name": "群员", "color": "#f59e0b", "values": members}],
-            y_formatter=_fmt_num,
-            height=140,
-        )
+        # The friends/groups/members series are deliberately NOT charted: they
+        # are flat for months and the two trend blocks only made the daily
+        # image longer (v2.20.31). The figures stay in the stat cards above,
+        # so the snapshots are still collected and shown.
         traffic_chart = _line_chart(
             labels,
             [
@@ -1858,8 +1849,6 @@ class DailyReportBuilder:
                 )
             ),
             "charts": {
-                "friends_groups": friends_groups,
-                "members": member_chart,
                 "traffic": traffic_chart,
             },
             # The numbers above are a single snapshot + its daily delta, so a
@@ -2445,15 +2434,24 @@ class DailyReportBuilder:
 
         trend_calls: list[int | None] = []
         trend_errors: list[int | None] = []
+        trend_aborted: list[int | None] = []
         for item in chart_days:
             day_text = item.isoformat()
-            bucket = stats["by_day"].get(day_text) or {"calls": 0, "errors": 0}
+            bucket = stats["by_day"].get(day_text) or {
+                "calls": 0,
+                "errors": 0,
+                "aborted": 0,
+            }
             if min_day and day_text < min_day:
                 trend_calls.append(None)
                 trend_errors.append(None)
+                trend_aborted.append(None)
             else:
                 trend_calls.append(bucket["calls"])
-                trend_errors.append(bucket["errors"])
+                trend_errors.append(bucket.get("errors", 0))
+                # Older aggregates (before this bucket carried the key) read
+                # as 0 rather than raising.
+                trend_aborted.append(bucket.get("aborted", 0))
         trend = _line_chart(
             labels,
             [
@@ -2466,6 +2464,11 @@ class DailyReportBuilder:
                     "name": "失败",
                     "color": "#f87171",
                     "values": trend_errors,
+                },
+                {
+                    "name": "中断",
+                    "color": "#fbbf24",
+                    "values": trend_aborted,
                 },
             ],
             y_formatter=_fmt_compact,
