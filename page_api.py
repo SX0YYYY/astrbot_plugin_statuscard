@@ -369,6 +369,20 @@ class PageApi:
         """
 
         redactor = self._redactor()
+
+        def mask_value(value: Any) -> Any:
+            # The English dashboard renders ``params`` instead of parsing the
+            # Chinese message, so the same credentials must be stripped there
+            # (v2.20.30): a monitor name or target in params would otherwise
+            # bypass every mask the message goes through.
+            if isinstance(value, dict):
+                return {key: mask_value(inner) for key, inner in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [mask_value(inner) for inner in value]
+            if isinstance(value, str):
+                return redactor.mask_address_tokens(redact_url(value))
+            return value
+
         masked: list[dict[str, Any]] = []
         for issue in issues:
             item = issue.as_dict()
@@ -378,6 +392,7 @@ class PageApi:
             item["message"] = redactor.mask_address_tokens(
                 redact_url(str(item.get("message") or ""))
             )
+            item["params"] = mask_value(item.get("params") or {})
             masked.append(item)
         return masked
 
@@ -607,6 +622,10 @@ class PageApi:
                     # the hostname rule on. Mask it exactly like last_error
                     # (v2.20.19).
                     "config_error": self._mask_host_text(str(config_error or "")[:160]),
+                    # Structured twin for the English page (v2.20.30); the
+                    # values are field names / a raw port, not host-shaped.
+                    "config_error_code": item.get("config_error_code"),
+                    "config_error_params": item.get("config_error_params") or {},
                 }
             )
 

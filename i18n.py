@@ -161,3 +161,110 @@ def tr(config: Any, key: str, **kwargs: Any) -> str:
         except Exception:
             return text
     return text
+
+
+# v2.20.30 audit codes (kept in sync with .astrbot-plugin/i18n/*.json
+# by tests/test_v2230_fixes.py). update() keeps the tables above intact.
+MESSAGES["zh-CN"].update(
+    {
+        "audit_alert_threshold_zero_nan": "告警阈值「{label}」不是有效数字（NaN/Infinity），运行时会按 0 处理（规则关闭），请改成有效数值。",
+        "audit_alert_threshold_zero_zero": "告警阈值「{label}」为 0：该规则不生效（视为关闭）。如需关闭请保持 0；如需告警请设为大于 0 的值。",
+        "audit_alerts_no_targets": "资源与掉线告警已启用，但两类都没有可用的推送目标（通知中心无 resource/offline 规则，默认推送目标也为空），告警不会送达任何会话。请在「告警与每日定时状态图 → 默认推送目标」填写群号。",
+        "audit_alerts_offline_no_targets": "掉线 / 恢复通知没有可用的推送目标（通知中心无 offline 规则，默认推送目标也为空），掉线时不会收到消息。",
+        "audit_alerts_resource_no_targets": "资源告警（CPU / 内存 / SWAP / 磁盘 / 负载）没有可用的推送目标（通知中心无 resource 规则，默认推送目标也为空），触发时不会送达。",
+        "audit_daily_report_no_targets": "趋势日报已启用，但没有可用的推送目标（通知中心无 daily 规则，默认推送目标也为空），日报不会发送。",
+        "audit_daily_report_sections_empty": "「日报内容」全部未勾选，定时日报不会发送。请勾选至少一个模块，或关闭「启用趋势日报」。",
+        "audit_daily_report_sections_unknown": "「日报内容」含无法识别的模块：{unknown}；可用模块为 {allowed}。这些名称会被忽略，若没有其它有效模块则日报不会发送。",
+        "audit_daily_summary_no_targets": "每日定时状态图已启用，但没有可用的推送目标（通知中心无 daily_image 规则，默认推送目标也为空），到点后会静默跳过且当天不重试。",
+        "audit_disk_path_missing": "磁盘挂载点「{path}」不存在：状态卡、日报和看板会显示 --，请检查「状态卡显示 → 磁盘挂载点」。",
+        "audit_display_timezone_invalid": "时区「{tz_name}」无法识别，将回退到服务器本地时区；状态卡、告警和日报的时间会整体偏移，请检查拼写（例如 Asia/Shanghai）。",
+        "audit_history_exceeds_retention": "趋势天数（{history_days}）大于资源保留天数（{retention_days}），趋势图会缺 {missing} 天数据；请调大「资源保留天数」或调小「历史趋势天数」。",
+        "audit_invalid_schedule_time": "{label}的发送时间「{raw}」格式非法（应为 HH:MM），定时任务不会触发。",
+        "audit_legacy_module_targets": "检测到{scopes}单独配置了推送目标：该模块会用它而不是「默认推送目标」。如果本意就是统一发送，请在对应分组的「显示高级选项」里清空这一项。",
+        "audit_monitor_item_config": "监测项「{name}」（{kind}）{error}",
+        "audit_monitor_item_skipped_duplicate": "监测项「{name}」与前面的条目完全重复，已忽略",
+        "audit_monitor_item_skipped_unsupported_type": "监测项「{name}」的类型「{kind}」不受支持，已跳过探测",
+        "audit_monitors_all_invalid": "服务监测已启用，但所有监测项的类型不受支持或配置不完整，不会有任何探测或告警；请检查每个条目的类型与必填项。",
+        "audit_monitors_no_items": "服务监测已启用，但监测项列表为空（或全部停用），不会有任何探测或告警。",
+        "audit_monitors_no_targets": "服务监测已启用，但没有可用的推送目标（通知中心无 service 规则，默认推送目标也为空）。为避免无意义探测，监测项不会探测、也不会记录事件（看板与日报里不会有监测数据）；请先在「告警与每日定时状态图 → 默认推送目标」填写群号。",
+        "audit_notify_center_active": "通知中心已启用（{count} 条有效规则）：规则覆盖的类型走规则目标，其余类型继续使用「默认推送目标」。这是正常状态，无需处理；只有当某类型收不到通知时才需要检查这里的覆盖关系。",
+        "audit_notify_rule_invalid": "通知中心有 {count} 条规则未生效：缺少推送目标或未勾选任何通知类型。",
+        "audit_notify_rule_unknown_kind": "通知中心的规则里有无法识别的通知类型：{kinds}（可选：resource / service / offline / provider / daily / weekly / daily_image），这些类型不会生效。",
+        "audit_offline_broadcast_requires_alerts": "「掉线恢复全群广播」已开启，但「启用资源与掉线告警」未开启：掉线检测不会运行，广播也不会触发。请先打开告警总开关。",
+        "audit_provider_watch_no_targets": "LLM 服务告警已启用，但没有可用的推送目标（通知中心无 provider 规则，默认推送目标也为空），连续失败时不会送达任何会话。",
+        "audit_silence_enabled_without_time": "已开启「维护静默」但未填写截止时间，静默不会生效（留空表示不静默）。",
+        "audit_silence_time_invalid": "维护静默截止时间「{value}」格式不正确，应为 YYYY-MM-DD HH:MM，当前不会生效。",
+        "audit_target_format_suspect": "{label}「{target}」格式可疑：群聊可直接填群号，私聊填 default:FriendMessage:QQ号。",
+        "audit_unknown_redact_rule": "{label}规则含未知值：{unknown}；可用值为 {allowed}，未知值会被忽略。",
+        "audit_webhook_no_token": "Komari Webhook 已启用且勾选了「强制要求 Token」，但没有填写 Token，Webhook 会拒绝启动。请填写 Token 或关闭该开关。",
+        "audit_webhook_open_no_token": "Komari Webhook 监听所有网卡（{host}）但没有启用 Token 鉴权（未勾选「强制要求 Token」），出于安全考虑会拒绝启动。请勾选并填写 Token，或改回 127.0.0.1。",
+        "audit_weekly_report_no_targets": "周报已启用，但没有可用的推送目标（通知中心无 weekly 规则，默认推送目标也为空），周报不会发送。",
+        "monitor_config_error_invalid_port": "端口 {port} 不是有效的 1–65535 端口",
+        "monitor_config_error_missing_required": "缺少 {required} 配置",
+    }
+)
+MESSAGES["en-US"].update(
+    {
+        "audit_alert_threshold_zero_nan": "A threshold is not a valid number (NaN/Infinity); it is treated as 0, so that rule is off. Set a valid value.",
+        "audit_alert_threshold_zero_zero": "A threshold is 0, so that rule is off. Keep 0 to disable it, or set a positive value to alert.",
+        "audit_alerts_no_targets": "Resource and offline alerts are on, but neither has a usable push target (no resource/offline rule and no default target). Alerts will not reach any chat. Set a group number under Alerts & daily card → default push target.",
+        "audit_alerts_offline_no_targets": "Offline / recovery notices have no usable push target (no offline rule and no default target); a disconnect will not be reported.",
+        "audit_alerts_resource_no_targets": "Resource alerts (CPU / RAM / SWAP / disk / load) have no usable push target (no resource rule and no default target); they will not be delivered.",
+        "audit_daily_report_no_targets": "The daily report is on but has no usable push target (no daily rule and no default target); it will not be sent.",
+        "audit_daily_report_sections_empty": "No report section is selected, so the scheduled daily report will not be sent. Select at least one module, or turn the daily report off.",
+        "audit_daily_report_sections_unknown": "The report sections contain unknown modules: {unknown}. Allowed: {allowed}. They are ignored; if no valid section remains, no report is sent.",
+        "audit_daily_summary_no_targets": "The daily status card is on but has no usable push target (no daily_image rule and no default target); it will be skipped silently and not retried that day.",
+        "audit_disk_path_missing": 'Disk mount "{path}" does not exist: the status card, reports and dashboard will show --. Check Status card display → disk mounts.',
+        "audit_display_timezone_invalid": 'Unknown timezone "{tz_name}"; the plugin falls back to the server local timezone, shifting the status card, alerts and reports. Check the spelling (e.g. Asia/Shanghai).',
+        "audit_history_exceeds_retention": "The trend window ({history_days} days) is longer than resource retention ({retention_days} days); the chart will miss {missing} day(s). Increase retention or shorten the trend window.",
+        "audit_invalid_schedule_time": 'A scheduled send time is invalid ("{raw}"); it must be HH:MM, and the task will not run.',
+        "audit_legacy_module_targets": 'A module has its own target list, which overrides the default push target. Clear it under that group\'s "show advanced options" if you meant one destination for everything.',
+        "audit_monitor_item_config": 'Monitor item "{name}": {error}',
+        "audit_monitor_item_skipped_duplicate": 'Monitor item "{name}" duplicates an earlier entry and was ignored.',
+        "audit_monitor_item_skipped_unsupported_type": 'Monitor item "{name}" has an unsupported type ("{kind}") and was skipped.',
+        "audit_monitors_all_invalid": "Service monitoring is on, but every item has an unsupported type or incomplete configuration; nothing will be probed or alerted. Check each item's type and required fields.",
+        "audit_monitors_no_items": "Service monitoring is on, but the item list is empty (or every item is disabled); nothing will be probed or alerted.",
+        "audit_monitors_no_targets": "Service monitoring is on but has no push target (no service rule in the notification center and the default target list is empty). Monitors will not probe or record events (the dashboard and reports will show no data). Set a group number under Alerts & daily card → default push target.",
+        "audit_notify_center_active": "The notification center is active ({count} rule(s)): covered kinds use their rule target, the rest use the default push target. This is normal and needs no action; review the coverage only if a kind receives nothing.",
+        "audit_notify_rule_invalid": "{count} notification-center rule(s) are inactive: they have no target or no notification kind selected.",
+        "audit_notify_rule_unknown_kind": "Unknown notification kind(s) in the rules: {kinds} (allowed: resource / service / offline / provider / daily / weekly / daily_image); they will not take effect.",
+        "audit_offline_broadcast_requires_alerts": '"Broadcast disconnects to all groups" is on but "resource and offline alerts" is off: disconnects are never detected, so the broadcast never fires. Turn the alert master switch on first.',
+        "audit_provider_watch_no_targets": "LLM service alerts are on but have no usable push target (no provider rule and no default target); repeated failures will not be delivered.",
+        "audit_silence_enabled_without_time": "Maintenance silence is on but no end time is set, so it has no effect (leave it empty for no silence).",
+        "audit_silence_time_invalid": 'The maintenance silence end time "{value}" is malformed; use YYYY-MM-DD HH:MM, otherwise it will not apply.',
+        "audit_target_format_suspect": 'Target "{target}" looks malformed: use a group number for groups, or default:FriendMessage:QQ for a private chat.',
+        "audit_unknown_redact_rule": "Unknown redaction value(s): {unknown}. Allowed: {allowed}. Unknown values are ignored.",
+        "audit_webhook_no_token": 'The Komari webhook is on with "require token" enabled but no token is set, so it will refuse to start. Set a token or turn that switch off.',
+        "audit_webhook_open_no_token": 'The Komari webhook listens on all interfaces ({host}) without token authentication ("require token" is off); it will refuse to start for safety. Enable it and set a token, or bind 127.0.0.1.',
+        "audit_weekly_report_no_targets": "The weekly report is on but has no usable push target (no weekly rule and no default target); it will not be sent.",
+        "monitor_config_error_invalid_port": "port {port} is not a valid 1–65535 port",
+        "monitor_config_error_missing_required": "missing the {required} setting",
+    }
+)
+
+
+# v2.20.30 diagnostics labels
+MESSAGES["zh-CN"].update(
+    {
+        "diag_audit_pending": "配置体检: {count} 项待处理",
+        "diag_issue_error": "错误",
+        "diag_issue_warning": "提醒",
+        "diag_issue_info": "提示",
+        "diag_audit_more": "  …另有 {count} 项，见插件配置页提示",
+        "diag_audit_failed": "配置体检: 未完成（执行失败或超时），本次未检查配置",
+        "diag_audit_ok_hints": "配置体检: 未发现问题（{count} 条提示）",
+        "diag_audit_ok": "配置体检: 未发现问题",
+    }
+)
+MESSAGES["en-US"].update(
+    {
+        "diag_audit_pending": "Config check: {count} item(s) need attention",
+        "diag_issue_error": "Error",
+        "diag_issue_warning": "Warning",
+        "diag_issue_info": "Info",
+        "diag_audit_more": "  …and {count} more, see the plugin config page",
+        "diag_audit_failed": "Config check: not completed (failed or timed out); nothing was checked",
+        "diag_audit_ok_hints": "Config check: no problems found ({count} note(s))",
+        "diag_audit_ok": "Config check: no problems found",
+    }
+)

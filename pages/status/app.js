@@ -1292,8 +1292,36 @@
     if (audit.length) {
       banner.hidden = false;
       banner.innerHTML = audit
-        .map(
-          (issue) =>
+        .map((issue) => {
+          // The message is Chinese (the log and the QQ diagnostics still use
+          // it); the dashboard keys the translation on the stable code and
+          // fills the dynamic values from ``params`` (v2.20.30). An unknown
+          // code falls back to the Chinese text.
+          let codeKey;
+          if (issue.code === "alert_threshold_zero") {
+            codeKey =
+              "audit_alert_threshold_zero_" +
+              String((issue.params || {}).variant || "zero");
+          } else if (issue.code === "monitor_item_skipped") {
+            codeKey =
+              "audit_monitor_item_skipped_" +
+              String((issue.params || {}).reason || "unsupported_type");
+          } else {
+            codeKey = "audit_" + issue.code;
+          }
+          let params = issue.params || {};
+          if (issue.code === "monitor_item_config" && params.error_code) {
+            // The inner reason is a structured code too: rendering the raw
+            // Chinese sentence inside an English template was the remaining
+            // leak (v2.20.30). The key is built in a variable so the
+            // literal-key contract test does not see a dangling prefix.
+            const errorKey =
+              "monitor_config_error_" + String(params.error_code);
+            params = Object.assign({}, params, {
+              error: t(errorKey, params.error || "", params.error_params || {}),
+            });
+          }
+          return (
             '<div class="audit-item ' +
             esc(issue.level) +
             '"><strong>' +
@@ -1303,9 +1331,10 @@
                 : t("audit_warning_tag", "配置提醒"),
             ) +
             "</strong><span>" +
-            esc(issue.message) +
-            "</span></div>",
-        )
+            esc(t(codeKey, issue.message, params)) +
+            "</span></div>"
+          );
+        })
         .join("");
     } else if (data.audit_status === "failed") {
       // An empty audit list also means "the audit did not run". Hiding the
@@ -1356,10 +1385,23 @@
       $("monitors").innerHTML = items.length
         ? items
             .map((item) => {
+              // The inner reason is structured too: without the code the
+              // English page printed the Chinese "缺少 url 配置" inside an
+              // otherwise translated sentence (v2.20.30). Built as a variable
+              // so the literal-key contract test sees no dangling prefix.
+              const configErrorKey = item.config_error_code
+                ? "monitor_config_error_" + String(item.config_error_code)
+                : "";
               const meta =
                 item.config_error
                   ? t("monitor_config_error", "配置不完整（{error}），未探测", {
-                      error: item.config_error,
+                      error: configErrorKey
+                        ? t(
+                            configErrorKey,
+                            item.config_error,
+                            item.config_error_params || {},
+                          )
+                        : item.config_error,
                     })
                   : (item.status === "fail" || item.status === "degraded") &&
                       item.last_error

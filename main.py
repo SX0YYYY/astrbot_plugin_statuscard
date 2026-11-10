@@ -1022,6 +1022,37 @@ class StatusCardPlugin(Star):
             lines.append(tr(self.config, "monitor_all_ok"))
         yield event.plain_result("\n".join(lines))
 
+    def _diag_issue_text(self, issue: Any, redactor: Any) -> str:
+        """Translate one audit issue for the diagnostics command.
+
+        The dashboard keys on ``issue.code`` too; both surfaces share the same
+        key names. An unknown code (a new finding added without a key) falls
+        back to the Chinese message so it stays actionable.
+        """
+
+        code = str(getattr(issue, "code", "") or "")
+        params = dict(getattr(issue, "params", None) or {})
+        if code == "alert_threshold_zero":
+            key = "audit_alert_threshold_zero_" + str(params.get("variant") or "zero")
+        elif code == "monitor_item_skipped":
+            key = "audit_monitor_item_skipped_" + str(
+                params.get("reason") or "unsupported_type"
+            )
+        else:
+            key = "audit_" + code
+        if code == "monitor_item_config" and params.get("error_code"):
+            # Nested reason: translate it first, then substitute it into the
+            # outer sentence (the dashboard does the same).
+            params["error"] = tr(
+                self.config,
+                "monitor_config_error_" + str(params["error_code"]),
+                **(params.get("error_params") or {}),
+            )
+        text = tr(self.config, key, **params)
+        if text == key:
+            text = str(getattr(issue, "message", "") or "")
+        return redactor.mask_address_tokens(text)
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("状态卡诊断")
     async def cmd_diag(self, event: AstrMessageEvent):
@@ -1147,28 +1178,41 @@ class StatusCardPlugin(Star):
                 # Listing only a count left the administrator unable to act from
                 # QQ ("2 项待处理" -- which two?). Show the same details the info
                 # branch already prints.
-                lines.append(f"配置体检: {len(actionable)} 项待处理")
+                lines.append(
+                    tr(self.config, "diag_audit_pending", count=len(actionable))
+                )
                 for issue in actionable[:4]:
-                    tag = "错误" if issue.level == "error" else "提醒"
+                    tag = tr(
+                        self.config,
+                        "diag_issue_error"
+                        if issue.level == "error"
+                        else "diag_issue_warning",
+                    )
                     lines.append(
-                        f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                        f"  [{tag}] {self._diag_issue_text(issue, audit_redactor)}"
                     )
                 if len(actionable) > 4:
-                    lines.append(f"  …另有 {len(actionable) - 4} 项，见插件配置页提示")
+                    lines.append(
+                        tr(
+                            self.config,
+                            "diag_audit_more",
+                            count=len(actionable) - 4,
+                        )
+                    )
             elif self._audit_failed:
                 # ``initialize()`` already logs "体检未完成" when run_audit raised
                 # or timed out, but the command still claimed "未发现问题" --
                 # the most misleading all-clear (v2.20.19).
-                lines.append("配置体检: 未完成（执行失败或超时），本次未检查配置")
+                lines.append(tr(self.config, "diag_audit_failed"))
             elif audit:
-                lines.append(f"配置体检: 未发现问题（{len(audit)} 条提示）")
+                lines.append(tr(self.config, "diag_audit_ok_hints", count=len(audit)))
                 for issue in audit[:4]:
-                    tag = "错误" if issue.level == "error" else "提示"
+                    tag = tr(self.config, "diag_issue_info")
                     lines.append(
-                        f"  [{tag}] {audit_redactor.mask_address_tokens(issue.message)}"
+                        f"  [{tag}] {self._diag_issue_text(issue, audit_redactor)}"
                     )
             else:
-                lines.append("配置体检: 未发现问题")
+                lines.append(tr(self.config, "diag_audit_ok"))
 
             if self._diag.get("last_render_at"):
                 age = max(

@@ -226,6 +226,9 @@ class ServiceMonitor:
         # only a log line and every user-facing check said "no problems"
         # while the item never ran (2026-11-06 audit).
         self.skipped_items: list[str] = []
+        # Structured twin of ``skipped_items`` for the English dashboard:
+        # ``reason`` is a stable code, the other fields are display values.
+        self.skipped_details: list[dict[str, str]] = []
         self.items = self._normalize_items(cfg_get(config, "monitors.items", []))
         # Unfiltered copy (disabled entries included): the prune must tell
         # "the operator disabled this item" apart from "the entry is gone"
@@ -270,20 +273,35 @@ class ServiceMonitor:
                     f"监测项「{self._redactor.mask_name(str(item.get('name') or kind or '(未命名)'))}」"
                     f"的类型「{kind or '(空)'}」不受支持，已跳过探测"
                 )
+                self.skipped_details.append(
+                    {
+                        "name": self._redactor.mask_name(
+                            str(item.get("name") or kind or "(未命名)")
+                        ),
+                        "kind": kind or "(空)",
+                        "reason": "unsupported_type",
+                    }
+                )
                 continue
             required = REQUIRED_FIELDS[kind]
             config_error: str | None = None
+            config_error_code: str | None = None
+            config_error_params: dict[str, str] = {}
             required_value = item.get(required)
             if isinstance(required_value, str):
                 required_value = required_value.strip()
             if not required_value:
                 config_error = f"缺少 {required} 配置"
+                config_error_code = "missing_required"
+                config_error_params = {"required": required}
             elif kind == "tcp":
                 port = cfg_int(item, "port", 0)
                 # cfg_int swallows a non-numeric port into 0; both cases are
                 # config errors, not outages.
                 if not (1 <= port <= 65535):
                     config_error = f"端口 {item.get('port')!r} 不是有效的 1–65535 端口"
+                    config_error_code = "invalid_port"
+                    config_error_params = {"port": str(item.get("port"))}
             if config_error:
                 # A misconfigured probe would fail on every round and hit the
                 # alert cooldown as a fake "service down"; keep it visible as
@@ -302,6 +320,9 @@ class ServiceMonitor:
                 normalized[required] = str(item.get(required)).strip()
             if config_error:
                 normalized["config_error"] = config_error
+                # Structured twin for the English dashboard (v2.20.30).
+                normalized["config_error_code"] = config_error_code
+                normalized["config_error_params"] = dict(config_error_params)
             # Two entries with the same probe are the same check: running both
             # interleaved on one shared state slot sent the same alert twice
             # (and, when they disagreed, a "recovered" notice for a service
@@ -316,6 +337,13 @@ class ServiceMonitor:
                 self.skipped_items.append(
                     f"监测项「{self._redactor.mask_name(normalized['name'])}」"
                     "与前面的条目完全重复，已忽略"
+                )
+                self.skipped_details.append(
+                    {
+                        "name": self._redactor.mask_name(normalized["name"]),
+                        "kind": kind,
+                        "reason": "duplicate",
+                    }
                 )
                 continue
             seen_signatures.add(signature)
@@ -2873,6 +2901,10 @@ class ServiceMonitor:
                     "state_key": self._item_key(item),
                     "state": item_states.get(self._item_key(item), {}),
                     "config_error": item.get("config_error"),
+                    # Structured twin so the English dashboard does not have
+                    # to render the Chinese sentence (v2.20.30).
+                    "config_error_code": item.get("config_error_code"),
+                    "config_error_params": item.get("config_error_params") or {},
                 }
                 for item in self.items
             ],

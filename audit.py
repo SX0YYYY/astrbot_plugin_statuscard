@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,9 +47,18 @@ class AuditIssue:
     level: str  # "error", "warning" or "info"
     code: str  # stable identifier the dashboard can key on
     message: str
+    # Dynamic values interpolated into ``message`` so the dashboard can render
+    # an English sentence without parsing the Chinese one (v2.20.30). Empty
+    # for static findings.
+    params: dict[str, Any] = field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, str]:
-        return {"level": self.level, "code": self.code, "message": self.message}
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "level": self.level,
+            "code": self.code,
+            "message": self.message,
+            "params": dict(self.params),
+        }
 
 
 def _effective_targets(config: Any, key: str, platform_id: str, kind: str) -> list[str]:
@@ -70,10 +79,10 @@ def _effective_targets(config: Any, key: str, platform_id: str, kind: str) -> li
     return normalize_targets(raw, platform_id)
 
 
-def _monitor_config_errors(config: Any) -> list[str]:
-    """Names and reasons of monitor items that cannot be probed."""
+def _monitor_config_errors(config: Any) -> list[dict[str, str]]:
+    """Name, kind and reason of monitor items that cannot be probed."""
 
-    problems: list[str] = []
+    problems: list[dict[str, str]] = []
     items = cfg_get(config, "monitors.items", []) or []
     if not isinstance(items, list):
         return problems
@@ -87,7 +96,13 @@ def _monitor_config_errors(config: Any) -> list[str]:
         name = _safe_label(item.get("name") or kind)
         if not item.get(required):
             problems.append(
-                f"监测项「{name}」（{KIND_LABELS[kind]}）缺少 {required} 配置"
+                {
+                    "name": name,
+                    "kind": KIND_LABELS[kind],
+                    "error": f"缺少 {required} 配置",
+                    "error_code": "missing_required",
+                    "error_params": {"required": required},
+                }
             )
         elif kind == "tcp":
             raw_port = item.get("port")
@@ -96,22 +111,42 @@ def _monitor_config_errors(config: Any) -> list[str]:
             # probe reported a config error (2026-11-08 audit).
             if isinstance(raw_port, bool):
                 problems.append(
-                    f"监测项「{name}」（TCP）端口不是数字（当前值 {raw_port!r}），无法探测"
+                    {
+                        "name": name,
+                        "kind": KIND_LABELS[kind],
+                        "error": f"端口不是数字（当前值 {raw_port!r}），无法探测",
+                        "error_code": "invalid_port",
+                        "error_params": {"port": str(raw_port)},
+                    }
                 )
                 continue
             try:
                 port = int(raw_port or 0)
             except (TypeError, ValueError):
                 problems.append(
-                    f"监测项「{name}」（TCP）端口不是数字（当前值 {raw_port!r}），无法探测"
+                    {
+                        "name": name,
+                        "kind": KIND_LABELS[kind],
+                        "error": f"端口不是数字（当前值 {raw_port!r}），无法探测",
+                        "error_code": "invalid_port",
+                        "error_params": {"port": str(raw_port)},
+                    }
                 )
                 continue
             if not (1 <= port <= 65535):
-                problems.append(f"监测项「{name}」（TCP）端口 {port} 超出 1–65535")
+                problems.append(
+                    {
+                        "name": name,
+                        "kind": KIND_LABELS[kind],
+                        "error": f"端口 {port} 超出 1–65535",
+                        "error_code": "invalid_port",
+                        "error_params": {"port": str(port)},
+                    }
+                )
     return problems
 
 
-def _monitor_unsupported_types(config: Any) -> list[str]:
+def _monitor_unsupported_types(config: Any) -> list[dict[str, str]]:
     """Items whose type name the probe loop does not recognise.
 
     ``_normalize_items`` drops them with one log line. The audit used to skip
@@ -119,7 +154,7 @@ def _monitor_unsupported_types(config: Any) -> list[str]:
     user with a "no problems" banner and an item that never ran.
     """
 
-    problems: list[str] = []
+    problems: list[dict[str, str]] = []
     items = cfg_get(config, "monitors.items", []) or []
     if not isinstance(items, list):
         return problems
@@ -131,7 +166,11 @@ def _monitor_unsupported_types(config: Any) -> list[str]:
             continue
         name = _safe_label(item.get("name") or kind or "(未命名)")
         problems.append(
-            f"监测项「{name}」的类型「{kind or '(空)'}」不受支持，已跳过探测"
+            {
+                "name": name,
+                "kind": kind or "(空)",
+                "reason": "unsupported_type",
+            }
         )
     return problems
 
@@ -213,29 +252,52 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 )
             )
     if monitors_on:
-        for problem in (
+        config_problems = (
             _monitor_config_errors(config)
             if monitor is None
             else [
-                f"监测项「{_safe_label(item.get('name'))}」"
-                f"（{KIND_LABELS.get(str(item.get('__template_key')), '?')}）"
-                f"{item.get('config_error')}"
+                {
+                    "name": _safe_label(item.get("name")),
+                    "kind": KIND_LABELS.get(str(item.get("__template_key")), "?"),
+                    "error": str(item.get("config_error")),
+                    "error_code": item.get("config_error_code"),
+                    "error_params": item.get("config_error_params") or {},
+                }
                 for item in monitor.items
                 if item.get("config_error")
             ]
-        ):
-            issues.append(AuditIssue("warning", "monitor_item_config", problem))
+        )
+        for problem in config_problems:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "monitor_item_config",
+                    f"监测项「{problem['name']}」（{problem['kind']}）"
+                    f"{problem['error']}",
+                    problem,
+                )
+            )
         # Items the probe loop dropped entirely (unknown type / exact
         # duplicate). Without this the audit reported a clean configuration
         # while a mistyped item never ran and never alerted (2026-11-06
-        # audit).
-        skipped = (
-            list(getattr(monitor, "skipped_items", []) or [])
+        # audit). ``skipped_details`` is the structured twin used here; the
+        # plain ``skipped_items`` strings remain for logs.
+        skipped_details = (
+            list(getattr(monitor, "skipped_details", []) or [])
             if monitor is not None
             else _monitor_unsupported_types(config)
         )
-        for problem in skipped:
-            issues.append(AuditIssue("warning", "monitor_item_skipped", problem))
+        for detail in skipped_details:
+            if detail.get("reason") == "duplicate":
+                message = f"监测项「{detail.get('name')}」与前面的条目完全重复，已忽略"
+            else:
+                message = (
+                    f"监测项「{detail.get('name')}」的类型「{detail.get('kind')}」"
+                    "不受支持，已跳过探测"
+                )
+            issues.append(
+                AuditIssue("warning", "monitor_item_skipped", message, detail)
+            )
     if alerts_on and not resource_targets and not offline_targets:
         issues.append(
             AuditIssue(
@@ -359,6 +421,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     f"Komari Webhook 监听所有网卡（{webhook_host}）但没有启用 "
                     "Token 鉴权（未勾选「强制要求 Token」），出于安全考虑会拒绝"
                     "启动。请勾选并填写 Token，或改回 127.0.0.1。",
+                    {"host": webhook_host},
                 )
             )
     if cfg_bool(config, "alerts.offline_broadcast.enabled", False) and not cfg_bool(
@@ -413,6 +476,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "invalid_schedule_time",
                     f"{label}的发送时间「{raw}」格式非法（应为 HH:MM），"
                     "定时任务不会触发。",
+                    {"label": label, "raw": raw},
                 )
             )
     tz_name = str(cfg_get(config, "display.timezone", "Asia/Shanghai") or "").strip()
@@ -429,6 +493,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     f"时区「{tz_name}」无法识别，将回退到服务器本地时区；"
                     "状态卡、告警和日报的时间会整体偏移，请检查拼写"
                     "（例如 Asia/Shanghai）。",
+                    {"tz_name": tz_name},
                 )
             )
     if alerts_on:
@@ -456,6 +521,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                         "alert_threshold_zero",
                         f"告警阈值「{label}」不是有效数字（NaN/Infinity），"
                         "运行时会按 0 处理（规则关闭），请改成有效数值。",
+                        {"label": label, "variant": "nan"},
                     )
                 )
             elif value <= 0:
@@ -465,6 +531,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                         "alert_threshold_zero",
                         f"告警阈值「{label}」为 0：该规则不生效（视为关闭）。"
                         "如需关闭请保持 0；如需告警请设为大于 0 的值。",
+                        {"label": label, "variant": "zero"},
                     )
                 )
     # The mount list drives the CARD, the report and the dashboard even when
@@ -488,6 +555,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                         "disk_path_missing",
                         f"磁盘挂载点「{path_text}」不存在：状态卡、日报和看板会显示 --，"
                         "请检查「状态卡显示 → 磁盘挂载点」。",
+                        {"path": path_text},
                     )
                 )
     active_rules = notify_rules_active(config)
@@ -501,6 +569,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 f"通知中心已启用（{active_rules} 条有效规则）：规则覆盖的类型走规则目标，"
                 "其余类型继续使用「默认推送目标」。这是正常状态，无需处理；"
                 "只有当某类型收不到通知时才需要检查这里的覆盖关系。",
+                {"count": active_rules},
             )
         )
     # Validate every rule, not just when no rule is active: one working rule
@@ -554,6 +623,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "notify_rule_invalid",
                 f"通知中心有 {invalid_rules} 条规则未生效："
                 "缺少推送目标或未勾选任何通知类型。",
+                {"count": invalid_rules},
             )
         )
     if unknown_kinds:
@@ -565,6 +635,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 + "、".join(sorted(unknown_kinds))
                 + "（可选：resource / service / offline / provider / "
                 "daily / weekly / daily_image），这些类型不会生效。",
+                {"kinds": "、".join(sorted(unknown_kinds))},
             )
         )
     # The per-module target lists are legacy: they still work (and win over
@@ -619,6 +690,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 f"检测到{'、'.join(legacy_scopes)}单独配置了推送目标：该模块会用它而不是"
                 "「默认推送目标」。如果本意就是统一发送，请在对应分组的「显示高级选项」里"
                 "清空这一项。",
+                {"scopes": "、".join(legacy_scopes)},
             )
         )
     # normalize_rules silently drops unknown values; a typo such as
@@ -645,6 +717,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     "unknown_redact_rule",
                     f"{label}规则含未知值：{', '.join(sorted(set(unknown)))}；"
                     f"可用值为 {', '.join(REDACT_RULES)}，未知值会被忽略。",
+                    {
+                        "label": label,
+                        "unknown": ", ".join(sorted(set(unknown))),
+                        "allowed": ", ".join(REDACT_RULES),
+                    },
                 )
             )
     # "Enabled but every section unchecked" is the second silent failure:
@@ -677,6 +754,10 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     f"「日报内容」含无法识别的模块：{', '.join(unknown)}；"
                     f"可用模块为 {', '.join(VALID_SECTIONS)}。"
                     "这些名称会被忽略，若没有其它有效模块则日报不会发送。",
+                    {
+                        "unknown": ", ".join(unknown),
+                        "allowed": ", ".join(VALID_SECTIONS),
+                    },
                 )
             )
     try:
@@ -698,6 +779,11 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 f"趋势天数（{history_days}）大于资源保留天数（{retention_days}），"
                 f"趋势图会缺 {history_days - retention_days} 天数据；"
                 "请调大「资源保留天数」或调小「历史趋势天数」。",
+                {
+                    "history_days": history_days,
+                    "retention_days": retention_days,
+                    "missing": history_days - retention_days,
+                },
             )
         )
     if monitors_on and cfg_bool(config, "monitors.silence_enabled", False):
@@ -731,6 +817,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                         "silence_time_invalid",
                         f"维护静默截止时间「{silence_until}」格式不正确，"
                         "应为 YYYY-MM-DD HH:MM，当前不会生效。",
+                        {"value": silence_until},
                     )
                 )
     # A mistyped target is the most common "alerts never arrive" cause and
@@ -770,6 +857,7 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 "target_format_suspect",
                 f"{label}「{_safe_label(text)}」格式可疑：群聊可直接填群号，"
                 "私聊填 default:FriendMessage:QQ号。",
+                {"label": label, "target": _safe_label(text)},
             )
         )
     return issues
