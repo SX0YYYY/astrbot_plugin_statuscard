@@ -871,6 +871,7 @@ class AlertEngine:
         detail: str,
         status: str,
         target: str = "",
+        started_ts: float | None = None,
     ) -> None:
         if self.report_store is None:
             return
@@ -878,7 +879,14 @@ class AlertEngine:
             now = time.time()
             day = now_in_timezone(self.config).strftime("%Y-%m-%d")
             self.report_store.add_event(
-                int(now), day, kind, name, detail, status, target
+                int(now),
+                day,
+                kind,
+                name,
+                detail,
+                status,
+                target,
+                started_ts=int(started_ts) if started_ts else None,
             )
             if status == "recovery":
                 # Close the open alert of the same rule so the report can
@@ -1293,7 +1301,14 @@ class AlertEngine:
             alerting = True
             st["alerting"] = True
             st["alerted"] = False
-            st["alert_since"] = _safe_float(st.get("last_attempt")) or now
+            # Keep a start recorded before the reload (the run-up writes it
+            # at the first over-threshold sample now): falling straight back
+            # to last_attempt moved the start forward again (v2.20.32).
+            st["alert_since"] = (
+                _safe_float(st.get("alert_since"))
+                or _safe_float(st.get("last_attempt"))
+                or now
+            )
             st["count"] = 0
             # Mark it as "never announced" so the cooldown-retry path picks
             # it up instead of treating it as an already-delivered alert.
@@ -1305,6 +1320,7 @@ class AlertEngine:
                 name,
                 "上次告警发送被中断（重载/重启），将重新补发",
                 "alert",
+                started_ts=st.get("alert_since"),
             )
 
         if threshold <= 0:
@@ -1365,6 +1381,17 @@ class AlertEngine:
             if not alerting:
                 count += 1
                 st["count"] = count
+                # The episode starts at the FIRST sample over the threshold,
+                # not at the push moment: with sustain>1 the push happens
+                # (sustain-1)*interval later, which under-reported the
+                # duration in the recovery notice and in the alert event's
+                # started_ts. monitor.py settled the same semantics in
+                # v2.20.24 ("starts at the FIRST failed probe"); the resource
+                # rules get the identical fix here (v2.20.32). The push
+                # branch below keeps its "if not set" write as a fallback
+                # for reload-recovery paths that never ran the run-up.
+                if count == 1 and not _safe_float(st.get("alert_since")):
+                    st["alert_since"] = now
             # A fault latched inside the cooldown was recorded but never
             # pushed. If it is still over the threshold when the cooldown
             # expires, the user has never seen it: send the alert now.
@@ -1452,6 +1479,7 @@ class AlertEngine:
                         name,
                         f"{value_text}（阈值 {threshold:.1f}{unit}，冷却窗口内仅记录）",
                         "alert",
+                        started_ts=st.get("alert_since"),
                     )
                     return
                 next_attempt = _safe_float(st.get("next_attempt"))
@@ -1551,6 +1579,7 @@ class AlertEngine:
                             name,
                             f"{value_text}（阈值 {threshold:.1f}{unit}）",
                             "alert",
+                            started_ts=st.get("alert_since"),
                         )
                     elif delivered:
                         st["alerting"] = True
@@ -1575,6 +1604,7 @@ class AlertEngine:
                             name,
                             f"{value_text}（阈值 {threshold:.1f}{unit}）",
                             "alert",
+                            started_ts=st.get("alert_since"),
                         )
                     else:
                         if self._transport_offline() or delivery_offline(result):
@@ -1682,13 +1712,39 @@ class AlertEngine:
                 _safe_int(st.get("retry_count")) > 0
                 or st.get("last_error") == "send_failed"
             ):
+                duration = now - _safe_float(st.get("alert_since"), now)
                 self._record_event(
                     "resource",
                     name,
-                    "告警未能送达，本次波动已结束",
+                    f"告警未能送达，本次波动已结束（持续 {format_duration(duration)}）",
                     "recovery",
+                    started_ts=now - duration if duration > 0 else None,
                 )
                 st["last_error"] = ""
+                # The alert itself never reached the chat, so suppressing the
+                # notice left the user with ZERO messages for a real outage.
+                # monitor.py settled this exact semantics in v2.20.14: the
+                # recovery carries the "此前未能送达" note instead. This
+                # branch never went through the aggregator (a buffered alert
+                # latches through summary_abandoned instead), so a direct
+                # send cannot race a summary to the chat.
+                if self.recover_notify:
+                    text = (
+                        f"✅ 已恢复 · {self._display_name(name)}\n"
+                        "──────────────\n"
+                        f"当前: {value_text}\n"
+                        f"主机: {self._hostname()}\n"
+                        f"告警持续: {format_duration(duration)}\n"
+                        f"时间: {_now_text(self.config)}\n"
+                        "（异常告警此前未能送达）"
+                    )
+                    result = await self._send(text)
+                    if not self._delivered(result):
+                        st["pending_recovery"] = text
+                        st["recovery_retry_count"] = 1
+                        st["recovery_next_attempt"] = now + retry_delay(1)
+                        st["recovery_awaits_summary"] = False
+                        logger.warning("告警 %s 的恢复通知未送达，已排队稍后补发", name)
             # A new episode starts with a clean retry budget. Leaving the
             # counter behind meant a later failure could give up on its first
             # attempt and never deliver any alert at all.
@@ -1836,6 +1892,10 @@ class AlertEngine:
                     name,
                     f"持续 {format_duration(duration)}",
                     "recovery",
+                    # Episode start, read before alert_since was cleared
+                    # above: the daily report pairs this row with the alert
+                    # and shows the real start (v2.20.32).
+                    started_ts=now - duration if duration > 0 else None,
                 )
                 # Read before clearing: only an alert that was ACTUALLY
                 # buffered may hand its recovery to the summary. An older
@@ -3370,8 +3430,15 @@ class AlertEngine:
             logger.error("无法导入 aiohttp，Komari Webhook 未启动: %s", exc)
             return
 
-        host = str(
-            cfg_get(self.config, "alerts.komari_webhook.host", "127.0.0.1")
+        # Strip before the loopback fallback: a whitespace-only host used to
+        # stay truthy, reach _webhook_bind_allowed as "" (a wildcard bind
+        # after normalisation) and get the listener refused at startup, while
+        # the config audit read it as loopback and reported no problem
+        # (v2.20.32). Blank now means loopback on both sides.
+        host = (
+            str(
+                cfg_get(self.config, "alerts.komari_webhook.host", "127.0.0.1") or ""
+            ).strip()
             or "127.0.0.1"
         )
         port = max(

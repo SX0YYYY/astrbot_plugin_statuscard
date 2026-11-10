@@ -279,6 +279,7 @@
         "verify_confirm_again": "Click again to confirm",
         "verify_confirm_targets": "A verification message will really be sent to every configured push target. Continue?",
         "verify_failed": "Check failed",
+        "verify_kind_missing": "The verify request is missing an unknown kind parameter (bridge glitch). Reload the page and try again",
         "verify_hint": "\"Push targets\" really sends a verification message and reports per-target receipts; \"Monitors\" probes once without touching alerting state; \"Webhook\" posts a simulated event to this plugin's listener to exercise the receive → parse → push chain.",
         "verify_hint_short": "30 s cooldown per kind",
         "verify_monitor_disabled": "Service monitors are disabled: this was a manual probe only; nothing is checked or alerted in the background.",

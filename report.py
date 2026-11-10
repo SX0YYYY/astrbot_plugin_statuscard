@@ -1381,7 +1381,17 @@ class DailyReporter:
                     self._weekly_image_pending = None
                     report_day = self._weekly_image_report_day
                     self._weekly_image_report_day = None
-                    if report_day and report_day != self._default_report_day():
+                    if not report_day:
+                        # A hand-edited or half-written state file left the
+                        # retry queued without its report day; the plain send
+                        # below would fall back to "yesterday" and record the
+                        # image under the wrong week (v2.20.32). Drop it --
+                        # the next weekly run re-renders the real report.
+                        logger.warning("周报图片重试缺少报告日，已丢弃本次补发")
+                        self._save_delivery_state()
+                        await asyncio.sleep(60)
+                        continue
+                    if report_day != self._default_report_day():
                         # Same rule as the daily image retry: the report day is
                         # pinned, so sending it late is still the same report.
                         # Dropping it lost the whole week.

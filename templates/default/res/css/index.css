@@ -610,6 +610,14 @@ body {
   color: #3f3f50;
 }
 
+/* A URL that lost its name keeps the full path (redact_url); without a
+   break rule a long unbroken path overflowed the 650px card (v2.20.32) --
+   the process table already had the same rule for long names. */
+.site-table td:first-child {
+  max-width: 320px;
+  overflow-wrap: anywhere;
+}
+
 .site-table tbody tr:last-child td,
 .process-table tbody tr:last-child td {
   border-bottom: none;

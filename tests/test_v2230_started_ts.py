@@ -305,7 +305,11 @@ def test_unresolved_row_uses_started_ts(tmp_path: Path) -> None:
 def test_dirty_started_ts_falls_back_to_ts(tmp_path: Path) -> None:
     """Future or absurdly old starts are ignored, not rendered as nonsense."""
 
-    for bad_start in (_ts(12, 0, 40) + 5000, _ts(12, 0, 40) - 500 * 86400):
+    # 1000 days back (beyond the 800-day plausibility guard that tracks the
+    # 730-day retention maximum) counts as an absurd start; 500 days does NOT
+    # any more -- a real outage that old is legitimate now that the lookback
+    # follows retention up to 730 days (v2.20.32).
+    for bad_start in (_ts(12, 0, 40) + 5000, _ts(12, 0, 40) - 1000 * 86400):
         db = tmp_path / f"dirty_{bad_start}.db"
         store = ReportStore(db)
         pushed = _ts(12, 0, 40)

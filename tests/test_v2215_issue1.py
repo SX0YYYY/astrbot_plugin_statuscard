@@ -494,7 +494,7 @@ def test_status_card_result_reaches_the_framework() -> None:
     }
     plugin._status_cooldown = {}
     plugin._status_inflight = set()
-    plugin._privacy_notified = set()
+    plugin._privacy_notified = {}  # insertion-ordered dict since v2.20.32
     plugin._diag = {}
     plugin.state = None
     plugin.context = None

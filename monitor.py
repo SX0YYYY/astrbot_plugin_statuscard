@@ -1822,6 +1822,11 @@ class ServiceMonitor:
                         # The summary is gone: delivered or abandoned. Either
                         # way the recovery may go out now.
                         st.pop("recovery_awaits_summary", None)
+                # Maintenance silence never reaches this loop: _check_item
+                # returns early at the top while silenced, so the queued
+                # recovery's retry budget cannot be burned by "failures"
+                # here (reverse audit v2.20.32 -- an earlier draft added a
+                # silence branch that turned out to be unreachable).
                 if now >= next_recovery:
                     result = await self._send(str(pending_text))
                     if self._delivered(result):

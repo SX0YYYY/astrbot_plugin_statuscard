@@ -350,9 +350,6 @@ class Sampler:
                 net["up_rate"] = 0.0
                 net["down_rate"] = 0.0
             return
-        if counters is None:
-            self._zero_net_rates(now)
-            return
         with self.state.section("net") as net:
             previous_iface = str(net.get("interface") or "")
             switched = bool(interface) and previous_iface not in ("", interface)

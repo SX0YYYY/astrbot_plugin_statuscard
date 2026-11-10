@@ -384,12 +384,18 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
         webhook_token = str(
             cfg_get(config, "alerts.komari_webhook.token", "") or ""
         ).strip()
-        # Same fallback the runtime uses (``or "127.0.0.1"``): an empty host
-        # binds loopback and starts fine -- audit used to read it as "" and
-        # raise a false "会拒绝启动" error against a perfectly working setup.
-        webhook_host = str(
-            cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or "127.0.0.1"
-        ).strip()
+        # Same fallback the runtime uses (strip first, THEN the loopback
+        # default): an empty or blank host binds loopback and starts fine --
+        # audit used to read it as "" and raise a false "会拒绝启动" error
+        # against a perfectly working setup, and a whitespace-only host used
+        # to slip past this check as "" while the runtime treated it as a
+        # wildcard bind (v2.20.32 normalises both sides identically).
+        webhook_host = (
+            str(
+                cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or ""
+            ).strip()
+            or "127.0.0.1"
+        )
         # Same normalisation as the runtime check (_webhook_bind_allowed):
         # "0:0:0:0:0:0:0:0" and "[::]" are wildcard binds too, and the audit
         # used to accept them while the listener refused to start.

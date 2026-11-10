@@ -212,7 +212,7 @@
       );
     });
     document.documentElement.lang = currentLocale();
-    document.title = t("app_name", "系统状态看板");
+    document.title = t("app_name", "服务器状态看板");
   }
 
   function toast(message) {
@@ -229,7 +229,12 @@
   // range buttons stayed disabled, because the loading reset only runs after
   // the promise settles. GETs are capped at 30s; POSTs (verify/preview) can
   // legitimately probe dozens of targets, so they get 90s (v2.20.21).
+  // The reports GET gets the same 90s: its cold build (30-day aggregation +
+  // event pairing) is designed around the backend's 90s waiter, so a 30s
+  // client timeout fired first and the user saw "请求超时" once before the
+  // cached build landed (v2.20.32).
   const API_GET_TIMEOUT_MS = 30000;
+  const API_REPORTS_TIMEOUT_MS = 90000;
   const API_POST_TIMEOUT_MS = 90000;
 
   function withTimeout(promise, ms, label) {
@@ -240,10 +245,13 @@
         ms,
       );
     });
+    // The loser of the race must not become an unhandled rejection when it
+    // settles later (v2.20.32).
+    promise.catch(() => {});
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
-  async function apiGet(name, params) {
+  async function apiGet(name, params, timeoutMs) {
     const bridge = getBridge();
     if (!bridge || typeof bridge.apiGet !== "function") {
       throw new Error(
@@ -252,7 +260,7 @@
     }
     const data = await withTimeout(
       bridge.apiGet(name, params),
-      API_GET_TIMEOUT_MS,
+      timeoutMs || API_GET_TIMEOUT_MS,
     );
     return typeof data === "string" ? JSON.parse(data) : data;
   }
@@ -1411,12 +1419,19 @@
                           time: formatTime(item.last_checked),
                         })
                       : t("monitor_not_checked", "尚未检查");
+              // Title attributes: the name and error lines are ellipsised
+              // by CSS, so the full text was unreachable on hover or mobile
+              // (v2.20.32).
               return (
                 '<div class="monitor"><i class="dot ' +
                 esc(item.status) +
-                '"></i><div class="monitor-main"><div class="monitor-name">' +
+                '"></i><div class="monitor-main"><div class="monitor-name" title="' +
                 esc(localizeHidden(item.name)) +
-                '</div><div class="monitor-meta">' +
+                '"><span>' +
+                esc(localizeHidden(item.name)) +
+                '</span></div><div class="monitor-meta" title="' +
+                esc(monitorKindText(item) + " · " + localizeHidden(meta)) +
+                '">' +
                 esc(monitorKindText(item) + " · " + localizeHidden(meta)) +
                 "</div></div></div>"
               );
@@ -1462,7 +1477,6 @@
   function exportCsv() {
     if (state.exporting) return Promise.resolve();
     const button = $("export-csv");
-    const label = button ? button.textContent : "";
     state.exporting = true;
     if (button) {
       button.disabled = true;
@@ -1472,7 +1486,10 @@
       state.exporting = false;
       if (button) {
         button.disabled = false;
-        button.textContent = label;
+        // Restore in the CURRENT language: a static snapshot taken before the
+        // flight re-applied the old locale if the user switched languages
+        // while the export ran (v2.20.32; same as runVerify).
+        button.textContent = t("export_csv", "导出 CSV");
       }
     });
   }
@@ -1486,32 +1503,50 @@
     }
     const range = state.historyRange || "7d";
     const kinds = ["resources", "processes", "websites", "events"];
-    let exported = 0;
+    // Fetch every kind first (parallel), then trigger the downloads back to
+    // back WITHOUT awaits between them: the old per-kind loop spaced the
+    // clicks out with a network round-trip + 250ms each, which pushed the
+    // 2nd-4th downloads out of the user-gesture window and got them blocked
+    // by the browser's "multiple automatic downloads" guard while the toast
+    // still claimed success (v2.20.32).
     let truncated = false;
+    const payloads = [];
     for (const kind of kinds) {
-      // Use the module-level apiGet: it parses a JSON *string* from the
-      // bridge. Calling bridge.apiGet directly meant a string payload made
-      // every export fail with "导出在 resources 中断（已导出 0 个文件）"
-      // while the data was there (v2.20.20).
-      const data = await apiGet("export", { kind, range });
+      let data = null;
+      try {
+        // Use the module-level apiGet: it parses a JSON *string* from the
+        // bridge. Calling bridge.apiGet directly meant a string payload made
+        // every export fail with "导出在 resources 中断（已导出 0 个文件）"
+        // while the data was there (v2.20.20).
+        data = await apiGet("export", { kind, range });
+      } catch (error) {
+        throw exportInterruptError(kind, payloads.length, error);
+      }
       if (data && data.db_unavailable) {
         throw new Error(
           t("db_unavailable_retry", "数据库暂时不可用，正在自动恢复，请稍后重试导出"),
         );
       }
       if (!data || !data.ok) {
-        throw new Error(
-          (data && data.error) ||
-            t("export_partial", "导出在 {kind} 中断（已导出 {count} 个文件）", {
-              kind,
-              count: exported,
-            }),
-        );
+        // Keep the already-fetched count in the message: a bare backend
+        // error used to hide how many files were already on disk, inviting
+        // a duplicate export (v2.20.32).
+        const backend = (data && data.error) || "";
+        const partial = t("export_partial", "导出在 {kind} 中断（已导出 {count} 个文件）", {
+          kind,
+          count: payloads.length,
+        });
+        throw new Error(backend ? partial + "：" + backend : partial);
       }
       if (data.truncated) truncated = true;
-      if ((data.rows || []).length) exported += 1;
-      downloadCsv(kind, range, data.rows || []);
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      payloads.push([kind, data.rows || []]);
+    }
+    let exported = 0;
+    for (const [kind, rows] of payloads) {
+      if (rows.length) {
+        exported += 1;
+        downloadCsv(kind, range, rows);
+      }
     }
     const done = exported
       ? t("export_done", "已导出 {count} 个文件", { count: exported })
@@ -1521,6 +1556,15 @@
         ? t("export_truncated", "数据量超出上限，仅导出最近的记录") + " · " + done
         : done,
     );
+  }
+
+  function exportInterruptError(kind, exportedCount, cause) {
+    const partial = t("export_partial", "导出在 {kind} 中断（已导出 {count} 个文件）", {
+      kind,
+      count: exportedCount,
+    });
+    const detail = cause && cause.message ? cause.message : "";
+    return new Error(detail ? partial + "：" + detail : partial);
   }
 
   function downloadCsv(kind, range, rows) {
@@ -1746,11 +1790,33 @@
     );
   }
 
+  // Loading state for the events/reports panels: without it a slow build
+  // looked like an empty page (v2.20.32). Mirrors setHistoryLoading.
+  function setEventsLoading(on) {
+    const panel = $("panel-events");
+    if (panel) panel.classList.toggle("is-loading", Boolean(on));
+    const hint = $("events-loading");
+    if (hint) hint.hidden = !on;
+  }
+
+  function setReportsLoading(on) {
+    const panel = $("panel-reports");
+    if (panel) panel.classList.toggle("is-loading", Boolean(on));
+    const hint = $("reports-loading");
+    if (hint) hint.hidden = !on;
+  }
+
   async function loadEvents() {
     // A stale-flag from the reports tab must not colour another tab's toast.
     state.reportsStale = false;
     const seq = ++state.eventsSeq;
-    const data = await apiGet("events", { days: state.eventDays });
+    setEventsLoading(true);
+    let data;
+    try {
+      data = await apiGet("events", { days: state.eventDays });
+    } finally {
+      if (seq === state.eventsSeq) setEventsLoading(false);
+    }
     if (seq !== state.eventsSeq) return;
     if (data.db_unavailable) {
       showDbUnavailable("events");
@@ -1869,8 +1935,15 @@
       return value + suffix(t("report_started_before_window", "窗口前开始"));
     }
     if (code === "cross_window") {
+      // "跨窗口关闭（窗口前开始）" carries BOTH meanings and the backend
+      // ships one code for it, so the fixed suffix written by
+      // report_view.py (duration_text += "（窗口前开始）") is the contract;
+      // endsWith on that constant is exact, while the old indexOf matched
+      // the marker anywhere in the text (v2.20.32).
+      const marker = "（窗口前开始）";
+      const hasStart = raw.endsWith(marker);
       const base = t("report_cross_window", "跨窗口关闭");
-      return raw.indexOf("窗口前开始") >= 0
+      return hasStart
         ? base + suffix(t("report_started_before_window", "窗口前开始"))
         : base;
     }
@@ -2301,6 +2374,19 @@
         .slice(0, 10);
     }
     if (next > limit) return;
+    // Mirror the backend's own lower bound (retention caps at 730 days):
+    // without it the "previous day" arrow kept firing a full build per
+    // click all the way down to the 30-year floor before saying so
+    // (v2.20.32).
+    const floorParts = limit.split("-").map(Number);
+    if (floorParts.length === 3) {
+      const floor = new Date(
+        Date.UTC(floorParts[0], floorParts[1] - 1, floorParts[2] - 730),
+      )
+        .toISOString()
+        .slice(0, 10);
+      if (next < floor) return;
+    }
     state.reportDay = next;
     loadReports(true).catch((error) => {
       // Only roll back when no newer request has already moved the pointer.
@@ -2317,13 +2403,22 @@
 
   async function loadReports(force) {
     const seq = ++state.reportsSeq;
+    setReportsLoading(true);
     const params = {};
     if (force) params.fresh = 1;
     if (state.reportDay) params.day = state.reportDay;
-    const data = await apiGet(
-      "reports",
-      Object.keys(params).length ? params : undefined,
-    );
+    let data;
+    try {
+      // The cold build is designed around the backend's 90s waiter; a plain
+      // 30s GET fired first on a big database (v2.20.32).
+      data = await apiGet(
+        "reports",
+        Object.keys(params).length ? params : undefined,
+        API_REPORTS_TIMEOUT_MS,
+      );
+    } finally {
+      if (seq === state.reportsSeq) setReportsLoading(false);
+    }
     if (seq !== state.reportsSeq) return;
     // The backend serves the previous payload while another build is in
     // flight; remember it so the refresh toast does not claim "数据已更新".
@@ -2835,6 +2930,10 @@
     const panels = $("panels");
     button.classList.remove("refreshing", "refresh-done", "refresh-failed");
     if (panels) panels.classList.remove("is-refreshing");
+    document.body.classList.toggle(
+      "is-refreshing",
+      status === "refreshing",
+    );
     if (status === "refreshing") {
       button.classList.add("refreshing");
       button.disabled = true;
@@ -2996,13 +3095,19 @@
     bind();
     const bridge = await waitForBridge();
     if (!bridge) {
-      const message = t(
-        "error_bridge",
-        "插件页面桥接不可用，请从 AstrBot 插件页面打开",
-      );
-      $("subtitle").textContent = message;
-      toast(message);
-      return;
+      // A slow host WebUI can inject the bridge after the 3s window; one
+      // retry beats a permanently dead page that needs a manual reload
+      // (v2.20.32).
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (!getBridge()) {
+        const message = t(
+          "error_bridge",
+          "插件页面桥接不可用，请从 AstrBot 插件页面打开",
+        );
+        $("subtitle").textContent = message;
+        toast(message);
+        return;
+      }
     }
     bindTheme();
     if (typeof bridge.ready === "function") {

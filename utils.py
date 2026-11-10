@@ -368,4 +368,8 @@ def mask_chat_ids(text: str) -> str:
         keep = min(2, len(digits) - 1)
         return "*" * (len(digits) - keep) + digits[len(digits) - keep :]
 
-    return re.sub(r"\d{6,}", _mask, str(text or ""))
+    # 5 digits too: early QQ accounts (10000-99999) are real chat ids and
+    # slipped through the old 6-digit floor (v2.20.32). This is a redaction
+    # helper -- over-masking a bare 5-digit number in an error string is
+    # cheaper than leaking an id.
+    return re.sub(r"\d{5,}", _mask, str(text or ""))

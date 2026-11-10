@@ -39,6 +39,15 @@ _ADDRESS_RE = re.compile(
     # host:port must come first: with the IPv4 branch ahead of it,
     # "10.1.2.3:8080" matched only the address and left the port dangling
     # in the masked text ("（已隐藏地址）:8080", v2.20.20).
+    #
+    # Source-file references ("main.py:531", "app.js:4387") are NOT host:port
+    # -- the hostname-shaped prefix ends in a code extension, so the negative
+    # lookahead exempts them, and the lookbehind stops the engine from
+    # re-matching the tail ("py:531") as a fresh two-letter host after the
+    # full-token attempt was rejected (v2.20.32). Real hosts rarely end in a
+    # source extension; "example.com:8080" is unaffected.
+    r"(?<![\w.$-])"
+    r"(?!\b[A-Za-z][A-Za-z0-9_.-]*\.(?:py|js|ts|mjs|cjs|jsx|tsx|json|md|html|css|sh|bash|yaml|yml|toml|cfg|ini|txt|log|jinja|j2|sql|bat|ps1|rb|go|rs|java|kt|php|c|h|cpp|hpp)\b)"
     r"(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
     r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
     r"|https?://" + _URL_STOP + r"+"  # URL
@@ -53,9 +62,18 @@ _ADDRESS_RE = re.compile(
 #
 # The candidate pattern is deliberately loose -- it also catches "12:34:56"
 # and "a:b" -- and ``_is_ipv6_literal`` decides what is really an address.
+#
+# The groups are bounded ({0,4} hex per segment, {2,9} segments): the old
+# unbounded "[0-9A-Fa-f:]*" inside "(?::...)*" was a classic (A*)* shape and
+# backtracked exponentially on malformed hex-colon runs -- 28 segments took
+# ~24 s, 30 segments ~93 s, and every caller runs this on the event loop
+# (admin-configured monitor names, mount paths, webhook text), so one bad
+# label froze the whole bot (v2.20.32). Every string _is_ipv6_literal can
+# accept has <=4 hex per segment and <=8 segments, so the bounded pattern
+# still finds exactly the same candidates.
 _IPV6_CANDIDATE_RE = re.compile(
     r"(?<![0-9A-Za-z:.])"
-    r"[0-9A-Fa-f]*:[0-9A-Fa-f:]*(?::[0-9A-Fa-f:]*)*[0-9A-Fa-f]*"
+    r"(?:[0-9A-Fa-f]{0,4}:){2,9}[0-9A-Fa-f]{0,4}"
     r"(?:%[0-9A-Za-z._~-]+)?"
     r"(?![0-9A-Za-z:])"
 )

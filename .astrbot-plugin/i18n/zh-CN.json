@@ -279,6 +279,7 @@
         "verify_confirm_again": "再点一次确认发送",
         "verify_confirm_targets": "将向所有配置的推送目标真实发送一条验证消息，继续？",
         "verify_failed": "验证失败",
+        "verify_kind_missing": "验证请求缺少或包含未知的类型参数（页面桥接异常），请刷新页面后重试",
         "verify_hint": "「推送目标」会真实发送一条验证消息并回报回执；「监测项」只探测一次、不影响告警状态；「Webhook」向本插件监听端口发送模拟事件，走通接收→解析→推送整条链路。",
         "verify_hint_short": "每类 30 秒冷却",
         "verify_monitor_disabled": "服务监测已关闭：本次只是手动探测，后台不会自动检查或告警",

@@ -324,12 +324,23 @@ main.is-refreshing {
   pointer-events: none;
 }
 
+/* The tab bar is a sibling of <main>: without covering it a click during a
+   refresh switched tabs and the completion toast then described a panel the
+   user was no longer looking at (v2.20.32). */
+body.is-refreshing nav.tabs {
+  pointer-events: none;
+  opacity: 0.6;
+}
+
 main.is-refreshing::after {
   content: "";
   position: absolute;
   inset: 0;
   z-index: 30;
   border-radius: var(--radius);
+  /* Fallback first: a browser without color-mix() used to render this
+  overlay fully transparent and its text unreadable (v2.20.32). */
+  background: var(--bg);
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   backdrop-filter: saturate(0.8);
 }
@@ -1007,6 +1018,9 @@ main.is-refreshing::after {
   justify-content: center;
   gap: 10px;
   border-radius: var(--radius);
+  /* Fallback first: a browser without color-mix() used to render this
+  overlay fully transparent and its text unreadable (v2.20.32). */
+  background: var(--bg);
   background: color-mix(in srgb, var(--bg) 55%, transparent);
   color: var(--muted);
   font-size: 12px;

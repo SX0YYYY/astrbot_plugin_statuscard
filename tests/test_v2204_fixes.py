@@ -458,9 +458,53 @@ def test_prune_keeps_the_whole_oldest_trend_day(tmp_path: Path) -> None:
     day_start = base - (base % 86400)
     old_ts = day_start - 30 * 86400 + 1800
     store.add_resource(old_ts, 10.0, 50.0, 10.0, 40.0, 0.1)
-    # Cleanup runs late in the evening of the same wall-clock day.
-    store.prune(resource_days=30, event_days=90, now=day_start + 23 * 3600)
+    # Cleanup runs late in the evening of the same wall-clock day. The
+    # production caller passes the display-timezone midnight explicitly
+    # (report.py) -- that is the path this regression guards.
+    store.prune(
+        resource_days=30,
+        event_days=90,
+        now=day_start + 23 * 3600,
+        local_day_start=day_start,
+    )
     rows = store.list_resources(day_start - 31 * 86400, day_start)
     assert any(int(row["ts"]) == old_ts for row in rows), (
         "the oldest day of the 30-day trend must survive a late cleanup"
+    )
+
+
+def test_prune_fallback_uses_local_midnight_not_utc(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the caller cannot compute the display-timezone midnight, the
+    fallback must align to the HOST-local midnight, not the UTC boundary:
+    on a CST server the UTC cutoff re-created the partial first day the
+    day-alignment exists to fix (v2.20.32). time.localtime is patched so
+    the assertion does not depend on the test host's own timezone.
+    """
+
+    import types as _types
+    from datetime import datetime, timedelta, timezone
+
+    from astrbot_plugin_statuscard import report_store as rs
+
+    store = ReportStore(tmp_path / "report.db")
+
+    def fake_localtime(ts):
+        # Pretend the host clock runs at UTC+8.
+        d = datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=8)))
+        return _types.SimpleNamespace(tm_year=d.year, tm_mon=d.month, tm_mday=d.day)
+
+    monkeypatch.setattr(rs.time, "localtime", fake_localtime)
+    now = 1_800_000_000 + 23 * 3600  # UTC 01-15 23:00 = fake-local 01-16 07:00
+    # Fake-local cutoff (1-day retention) = local 01-15 00:00 =
+    # 1_799_971_200; the UTC fallback cutoff would be 1_799_913_600. A
+    # sample between the two survives the UTC boundary and must NOT
+    # survive the local one.
+    sample = 1_799_940_000  # UTC 01-14 09:20 = fake-local 17:20
+    store.add_resource(sample, 1.0, 2.0, 0.0, 1.0, 0.0)
+    store.prune(resource_days=1, event_days=90, now=now)
+    kept = [int(r["ts"]) for r in store.list_resources(0)]
+    assert sample not in kept, (
+        "fallback must align to the host-local midnight, not the UTC boundary"
     )

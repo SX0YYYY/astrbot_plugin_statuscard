@@ -43,6 +43,8 @@ from .version import resolve_astrbot_version
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _TZ_WARNED: set[str] = set()
 _IMG_WARNED: set[str] = set()
+# Dedup keys for the avatar-upload fallback warnings above (v2.20.32).
+_AVATAR_FALLBACK_WARNED: set[str] = set()
 
 
 def _dt_now() -> datetime:
@@ -1859,10 +1861,16 @@ async def fetch_avatar_bytes(
     )
     if source == "upload":
         uploaded = uploaded_file_path(config, "avatar.avatar_upload_files", data_dir)
+        # One warning per fallback reason: every render used to re-log the
+        # same two lines, and the "没有可用的上传文件" text was wrong when a
+        # file existed but was oversized/undecodable (v2.20.32).
         if uploaded is not None:
+            warn_key = f"avatar:{uploaded}"
             try:
                 if uploaded.stat().st_size > MAX_IMAGE_BYTES:
-                    logger.warning("上传头像超过 10 MB，已跳过: %s", uploaded)
+                    if warn_key not in _AVATAR_FALLBACK_WARNED:
+                        _AVATAR_FALLBACK_WARNED.add(warn_key)
+                        logger.warning("上传头像超过 10 MB，回退 QQ 头像: %s", uploaded)
                 else:
                     data = uploaded.read_bytes()
                     if data:
@@ -1870,10 +1878,21 @@ async def fetch_avatar_bytes(
                         prepared = await _prepare_avatar(data)
                         if prepared is not None:
                             return prepared
-                        logger.warning("上传头像超过像素/体积上限，回退 QQ 头像")
+                        if warn_key not in _AVATAR_FALLBACK_WARNED:
+                            _AVATAR_FALLBACK_WARNED.add(warn_key)
+                            logger.warning(
+                                "上传头像超过像素/体积上限，回退 QQ 头像: %s", uploaded
+                            )
             except Exception as exc:
-                logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
-        logger.warning("头像来源为自定义上传，但没有可用的上传文件，回退 QQ 头像")
+                if warn_key not in _AVATAR_FALLBACK_WARNED:
+                    _AVATAR_FALLBACK_WARNED.add(warn_key)
+                    logger.warning("读取上传头像失败 %s: %s", uploaded, exc)
+        else:
+            if "avatar:none" not in _AVATAR_FALLBACK_WARNED:
+                _AVATAR_FALLBACK_WARNED.add("avatar:none")
+                logger.warning(
+                    "头像来源为自定义上传，但没有可用的上传文件，回退 QQ 头像"
+                )
 
     url = bot.get("avatar_url") or ""
     if not url:

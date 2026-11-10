@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1027,13 +1028,24 @@ class ReportStore:
             try:
                 day_start = int(local_day_start)
             except (TypeError, ValueError):
-                day_start = now - (now % 86400)
+                day_start = None
         else:
+            day_start = None
+        if day_start is None:
             # ``now % 86400`` is the UTC day boundary, which is 08:00 in
             # Asia/Shanghai: the oldest kept day had only 16 hours of samples
             # and the chart showed a fake dip. Callers pass the
-            # display-timezone midnight when they have it (v2.20.5).
-            day_start = now - (now % 86400)
+            # display-timezone midnight when they have it (v2.20.5); when
+            # that parse failed, fall back to the host-local midnight instead
+            # of the UTC boundary -- on a CST server the UTC cutoff would
+            # re-create exactly the fake dip this alignment exists to fix.
+            # A host that really runs UTC keeps the old behaviour.
+            local_now = time.localtime(now)
+            day_start = int(
+                datetime(
+                    local_now.tm_year, local_now.tm_mon, local_now.tm_mday
+                ).timestamp()
+            )
         resource_cutoff = day_start - max(1, resource_days) * 86400
         event_cutoff = day_start - max(1, event_days) * 86400
         # One transaction for every table. Five separate writes meant a

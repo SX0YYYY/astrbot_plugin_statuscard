@@ -143,6 +143,12 @@ def _clip_text(draw: ImageDraw.ImageDraw, text: str, font: Any, max_width: int) 
 
     if draw.textlength(text, font=font) <= max_width:
         return text
+    # A hand-edited mount point can be arbitrarily long; measuring the whole
+    # string once per dropped character was O(n^2) and stalled the fallback
+    # render for seconds on a 10 KB label. Cut to a sane prefix first
+    # (v2.20.32).
+    if len(text) > 120:
+        text = text[:120]
     while text and draw.textlength(text + "…", font=font) > max_width:
         text = text[:-1]
     return text + "…"

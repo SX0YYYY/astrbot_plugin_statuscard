@@ -1616,12 +1616,39 @@ class PageApi:
                 )
             result = self._reports_build_results.get(cache_key)
             if result is not None:
-                # The handoff payload can be older than the 60 s cache
+                # The handoff payload CAN be older than the 60 s cache
                 # window, so it is marked as stale: otherwise the page
                 # would claim the data was just updated (v2.20.24 audit).
+                # But "older" is not automatic: two tabs opening the same
+                # day at the same second handed out a payload built one
+                # second ago and the page then told the user it was
+                # showing last-time data. Judge by the payload's own
+                # generated_at instead (v2.20.32).
                 handed = copy.deepcopy(result)
                 if isinstance(handed, dict):
-                    handed["stale"] = True
+                    built_txt = str(handed.get("generated_at") or "")
+                    built_ts = 0.0
+                    if built_txt:
+                        try:
+                            # generated_at is the DISPLAY timezone's wall
+                            # clock (report_view formats an aware datetime);
+                            # interpret it with the same zone, not the host
+                            # zone, or a mismatched deployment shifted the
+                            # freshness verdict by hours (v2.20.32).
+                            built_ts = (
+                                datetime.strptime(built_txt, "%Y-%m-%d %H:%M:%S")
+                                .replace(
+                                    tzinfo=now_in_timezone(self.plugin.config).tzinfo
+                                )
+                                .timestamp()
+                            )
+                        except (ValueError, TypeError):
+                            built_ts = 0.0
+                    fresh_enough = (
+                        built_ts > 0
+                        and time.time() - built_ts <= self._reports_cache_seconds
+                    )
+                    handed["stale"] = not fresh_enough
                 return jsonify(handed)
             # The running build failed (no result): fall through and build
             # here, so the caller still gets an error payload.

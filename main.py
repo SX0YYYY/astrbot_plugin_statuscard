@@ -122,13 +122,19 @@ class StatusCardPlugin(Star):
         )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
+        # One "立即检测" at a time: two concurrent runs each probed all 16
+        # targets with their own 6-way semaphore, doubling the load on the
+        # slow targets and replying twice (v2.20.32).
+        self._monitor_test_inflight = False
         # Preview renders are the most expensive path (full report build +
         # T2I). Two rapid ``预览日报`` commands used to run concurrently and
         # send two images; the status card already had this guard (v2.20.19).
         self._preview_inflight: set[str] = set()
         # Cached shrink result for the uploaded background: (path, mtime, bytes).
         self._bg_shrink_cache: tuple[str, float, bytes] | None = None
-        self._privacy_notified: set[str] = set()
+        # Insertion-ordered dict (key -> True): the cap sweep must drop the
+        # oldest sessions, and a plain set iterates in hash order (v2.20.32).
+        self._privacy_notified: dict[str, bool] = {}
         self._delivery: DeliveryService | None = None
         self._diag: dict[str, Any] = self._load_diag()
         self.page_api = PageApi(self)
@@ -421,14 +427,16 @@ class StatusCardPlugin(Star):
             and chat_key
             and chat_key not in self._privacy_notified
         ):
-            self._privacy_notified.add(chat_key)
+            self._privacy_notified[chat_key] = True
             if len(self._privacy_notified) > 500:
-                # Drop the oldest entries instead of clearing the whole set:
+                # Drop the OLDEST entries instead of clearing the whole set:
                 # a clear() re-notified every session that had already seen
-                # the notice.
+                # the notice. A set iterates in hash order, so the old
+                # "first 100" sweep actually dropped arbitrary members --
+                # dict keeps insertion order (v2.20.32).
                 for stale_key in list(self._privacy_notified)[:100]:
-                    self._privacy_notified.discard(stale_key)
-                self._privacy_notified.add(chat_key)
+                    del self._privacy_notified[stale_key]
+                self._privacy_notified[chat_key] = True
             notices.append(tr(self.config, "privacy_notice"))
         if cfg_bool(self.config, "display.progress_notice", True):
             notices.append(tr(self.config, "progress_notice"))
@@ -628,8 +636,13 @@ class StatusCardPlugin(Star):
         except OSError:
             logger.debug("设置本地简化卡权限失败")
         try:
+            # 1200s, not 600s: a failed fallback send retries at +30/+120/+600
+            # (RETRY_DELAYS) and rebuilds the MessageChain from the FILE PATH,
+            # so the last retry can read the file up to ~750s after it was
+            # written. A 600s sweep deleted the card under a pending retry
+            # and the retry then failed forever (v2.20.32).
             for old in self.data_dir.glob("statuscard_fallback_*.png"):
-                if old != path and old.stat().st_mtime < time.time() - 600:
+                if old != path and old.stat().st_mtime < time.time() - 1200:
                     old.unlink(missing_ok=True)
         except Exception:
             logger.debug("清理旧的本地简化卡文件失败")
@@ -967,11 +980,19 @@ class StatusCardPlugin(Star):
         if not self.monitor.items:
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
+        if self._monitor_test_inflight:
+            yield event.plain_result(tr(self.config, "monitor_testing"))
+            return
+        self._monitor_test_inflight = True
         # Probing every item can take minutes (slow HTTP/TCP targets, six
         # concurrent); the command used to stay completely silent until the
         # final summary, so the operator could not tell it was running.
-        yield event.plain_result(tr(self.config, "monitor_testing"))
+        # The notice yield sits INSIDE the try: a generator closed by the
+        # framework right at that yield must still run the finally, or the
+        # inflight flag would stick True and every later call would answer
+        # "正在检测" until reload (reverse audit v2.20.32).
         try:
+            yield event.plain_result(tr(self.config, "monitor_testing"))
             results = await self.monitor.test_all()
         except Exception as exc:
             # The "正在检测" notice already went out: an exception here used
@@ -981,6 +1002,8 @@ class StatusCardPlugin(Star):
                 tr(self.config, "monitor_test_error", error=exc.__class__.__name__)
             )
             return
+        finally:
+            self._monitor_test_inflight = False
         failed = [item for item in results if not item["ok"]]
         lines = [
             tr(self.config, "monitor_result_title"),
@@ -1050,6 +1073,13 @@ class StatusCardPlugin(Star):
             )
         text = tr(self.config, key, **params)
         if text == key:
+            text = str(getattr(issue, "message", "") or "")
+        elif _format_missed(text, params):
+            # tr() returns the UNFILLED template when text.format(**params)
+            # raises, and that template is not equal to the key, so the
+            # message fallback above never fired and the operator saw raw
+            # "{label}" placeholders. Every current key/param pair matches;
+            # this guards future audit codes (v2.20.32).
             text = str(getattr(issue, "message", "") or "")
         return redactor.mask_address_tokens(text)
 
@@ -1307,10 +1337,16 @@ class StatusCardPlugin(Star):
             report_status = await asyncio.to_thread(self.report.status)
             store_stats = report_status.get("store", {})
             if not self.report_store.available:
+                # Same redaction as the audit text above: an init exception can
+                # quote the DB path or a host name, and this line goes to the
+                # group (v2.20.32).
                 lines.append(
                     "日报数据库: 不可用（"
-                    + str(
-                        getattr(self.report_store, "init_error", None) or "初始化失败"
+                    + audit_redactor.mask_addresses(
+                        str(
+                            getattr(self.report_store, "init_error", None)
+                            or "初始化失败"
+                        )
                     )
                     + "，详见后台日志）"
                 )
@@ -1353,7 +1389,10 @@ class StatusCardPlugin(Star):
                     "最近日报: "
                     + ("成功" if last_run.get("ok") else "失败")
                     + f"（{last_run.get('day') or '--'}，"
-                    + f"{str(last_run.get('detail') or '无详情')[:40]}）"
+                    + audit_redactor.mask_addresses(
+                        str(last_run.get("detail") or "无详情")
+                    )[:40]
+                    + "）"
                 )
             else:
                 lines.append("最近日报: 暂无发送记录")
@@ -1479,3 +1518,18 @@ class StatusCardPlugin(Star):
         # guard; this trailing stop_event() is kept as the v2.5.1 second line
         # of defence and is safe only after every yield.
         event.stop_event()
+
+
+def _format_missed(text: str, params: dict) -> bool:
+    """True when a placeholder from *params* survived in *text*.
+
+    i18n.tr returns the UNFILLED template when text.format(**params)
+    raises; detecting the leftover "{key}" markers is exact and cannot
+    false-positive on parameter values that themselves contain braces
+    (a value like "cpu{value}" made a second format() pass raise and the
+    first draft then discarded a correctly filled sentence). Module-level
+    so test doubles (SimpleNamespace) calling _diag_issue_text keep
+    working (v2.20.32).
+    """
+
+    return any("{" + str(key) + "}" in text for key in params)

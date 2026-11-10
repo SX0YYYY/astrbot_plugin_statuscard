@@ -345,8 +345,8 @@ def _event_start(item: dict[str, Any]) -> int:
     # one from years ago. A negative duration (or a 1970 start) is worse than
     # the old push-moment fallback, so only plausible starts are trusted. The
     # bound is wider than the default 90-day retention because
-    # ``daily_report.event_retention_days`` is configurable up to 365.
-    if started > ts or ts - started > 400 * 86400:
+    # ``daily_report.event_retention_days`` is configurable up to 730.
+    if started > ts or ts - started > 800 * 86400:
         return ts
     return started
 
@@ -930,11 +930,16 @@ class DailyReportBuilder:
         that: its only alert row was older than the lookback, so the report
         said "no anomalies" while the service was still down. Follow the
         configured event retention instead (default 90 days); the DB prunes
-        rows beyond it anyway, so the query cannot grow without bound.
+        rows beyond it anyway, so the query cannot grow without bound. The
+        cap matches the retention slider's own maximum (730) -- clamping the
+        lookback tighter than the retention window made an episode that
+        started 400+ days ago invisible even though its rows were still
+        stored, and its recovery row was then dropped as unmatched
+        (v2.20.32).
         """
 
         days = cfg_int(self.config, "daily_report.event_retention_days", 90)
-        return max(1, min(365, days)) * 86400
+        return max(1, min(730, days)) * 86400
 
     def _anomaly_section(
         self,
@@ -1022,7 +1027,7 @@ class DailyReportBuilder:
         outside_lookback = self._event_lookback_seconds()
         for alert in sorted(
             self.store.list_events_range(
-                window_start_ts - outside_lookback, window_start_ts - 1, limit=5000
+                window_start_ts - outside_lookback, window_start_ts - 1, limit=20000
             ),
             key=lambda item: (
                 safe_int(item.get("ts") or 0),
@@ -1355,11 +1360,19 @@ class DailyReportBuilder:
             # locate the event inside it. The same applies to a start that
             # falls on another day: "23:59" under a report for the 9th read as
             # if it happened that day (2026-11-10 reverse audit).
-            row_time = (
-                display_start.get((key, started_i), started_i)
-                if status in {"alert", "failed"}
-                else started_i
-            )
+            # Belt-and-braces: the pairing loop above fills display_start
+            # for every in-window alert/failed row, so the first get() should
+            # always hit; fall back to the episode's start (what the duration
+            # column already quotes) if a future refactor ever reorders the
+            # two loops (reverse audit v2.20.32 -- currently unreachable).
+            row_time = started_i
+            if status in {"alert", "failed"}:
+                episode = episode_of.get((key, started_i))
+                episode_start = episode[0] if episode else started_i
+                row_time = display_start.get(
+                    (key, started_i),
+                    display_start.get((key, episode_start), episode_start),
+                )
             row_dt = datetime.fromtimestamp(row_time, self.tz)
             time_format = (
                 "%H:%M" if span == 1 and row_dt.date() == day else "%m-%d %H:%M"
@@ -1525,7 +1538,12 @@ class DailyReportBuilder:
                 # episode: this old row is an orphan that close_all merely
                 # stamped (its own recovery event was lost). A "failed" row
                 # in that range is a retry of the same outage, not a new one.
-                late = self.store.list_events_range(window_end_ts, resolved, limit=5000)
+                # 20000 instead of 5000: the covering check must not silently miss an
+                # alert row just because a noisy 90-day lookback outran the
+                # DESC+LIMIT window (v2.20.32).
+                late = self.store.list_events_range(
+                    window_end_ts, resolved, limit=20000
+                )
                 if any(
                     str(item.get("status") or "") == "alert" and _pair_key(item) == key
                     for item in late
@@ -1578,7 +1596,16 @@ class DailyReportBuilder:
             covering_ids = {id(item) for item in covering_rows}
             kept_covering = [item for item in items if id(item) in covering_ids]
             rest = [item for item in items if id(item) not in covering_ids]
-            head = kept_covering + rest[-max(0, room - len(kept_covering)) :]
+            # Covering rows themselves must stay within the room: when there
+            # were more of them than slots, "unresolved + covering" alone
+            # overflowed 20 and the trailing [-20:] cut silently dropped the
+            # unresolved head again. The slice below also MUST NOT run with
+            # 0: rest[-0:] is rest[0:] in Python (the whole list), which
+            # overflowed the table and pushed exactly the protected rows out
+            # of the final cut while reporting dropped=0 (v2.20.32).
+            kept_covering = kept_covering[:room]
+            keep_n = max(0, room - len(kept_covering))
+            head = kept_covering + (rest[-keep_n:] if keep_n else [])
             dropped_in_window = max(0, len(items) - len(head))
             items = unresolved_items + head
         return {
@@ -2652,9 +2679,7 @@ def build_report_text(view: dict[str, Any]) -> str:
         if anomalies.get("data_truncated"):
             # The per-day row cap hid the oldest events of that day: the
             # number above is a lower bound, not the whole story (v2.20.24).
-            line += (
-                "（事件量超出单日统计上限，可能有故障未被统计，故障时长也可能不准确）"
-            )
+            line += "（窗口内事件量超出单日统计上限，可能有故障未被统计，故障时长也可能不准确）"
         brief_items = anomalies.get("items") or []
         if brief_items:
             # Without the text image this is the only place the user learns
