@@ -33,7 +33,11 @@ def _builder(store: ReportStore) -> DailyReportBuilder:
 
 
 def _anomalies(store: ReportStore) -> dict:
-    view = _builder(store).build(day=None, span_days=1)
+    # Pass the fixed DAY explicitly: build(day=None) means "yesterday", which
+    # made this file pass only on 2026-11-09 and fail on every later day (the
+    # third "hardcoded date + implicit yesterday" regression, after v2.20.21
+    # and v2.20.25).
+    view = _builder(store).build(day=DAY, span_days=1)
     return view.get("anomalies") or {}
 
 
@@ -118,12 +122,13 @@ def test_schema_v3_database_is_upgraded_in_place(tmp_path: Path) -> None:
     assert store.available
     con = sqlite3.connect(db)
     cols = [row[1] for row in con.execute("PRAGMA table_info(events)")]
-    rows = con.execute("SELECT ts, item_key FROM events").fetchall()
+    rows = con.execute("SELECT ts, item_key, started_ts FROM events").fetchall()
     version = con.execute("PRAGMA user_version").fetchone()[0]
     con.close()
     assert "item_key" in cols
-    assert rows == [(1794100000, None)]
-    assert version == 4
+    assert "started_ts" in cols
+    assert rows == [(1794100000, None, None)]
+    assert version == 5
 
     # Re-opening must not raise and must not touch the rows.
     again = ReportStore(db)

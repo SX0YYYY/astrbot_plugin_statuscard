@@ -1171,6 +1171,10 @@ class PageApi:
                     "detail": self._mask_host_text(str(row.get("detail") or "")),
                     "status": row.get("status"),
                     "resolved_ts": row.get("resolved_ts"),
+                    # The first failed probe; NULL on rows written by
+                    # <=2.20.29 and on recovery rows (the reader falls back
+                    # to ts).
+                    "started_ts": row.get("started_ts"),
                 }
                 for row in fetched[-limit:]
             ]
@@ -1395,6 +1399,10 @@ class PageApi:
                 "detail": self._mask_host_text(str(event.get("detail") or ""))[:200],
                 "status": event.get("status"),
                 "resolved_ts": event.get("resolved_ts"),
+                # The outage start (first failed probe). The dashboard shows
+                # this instead of the push moment so it matches the alert
+                # text; rows from <=2.20.29 carry null.
+                "started_ts": event.get("started_ts"),
             }
             for event in events
         ]

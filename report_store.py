@@ -9,7 +9,24 @@ from typing import Any
 
 from astrbot.api import logger
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+def _optional_int(value: Any) -> int | None:
+    """Coerce a stored/hand-edited timestamp to int, or drop it.
+
+    A corrupted ``state.json`` can hand ``_record_event`` a string or
+    ``float("inf")``. The column is optional, so an unparsable value must
+    become NULL -- raising here would abort the whole INSERT and silently
+    lose the event row (2026-11-10 reverse audit).
+    """
+
+    if not value:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 class ReportStore:
@@ -271,7 +288,14 @@ class ReportStore:
                     -- kind+name+target (different keyword / query / timeout)
                     -- cannot close each other's alerts. NULL on rows written
                     -- by <=2.20.27: those keep the legacy triple pairing.
-                    item_key    TEXT
+                    item_key    TEXT,
+                    -- The moment the interruption actually BEGAN (the first
+                    -- failed probe), which can be (threshold-1)*interval
+                    -- earlier than ``ts`` (the push moment). The daily report
+                    -- measures durations from here so it agrees with the
+                    -- recovery notice; NULL on rows written by <=2.20.29 and
+                    -- on recovery rows, where readers fall back to ``ts``.
+                    started_ts  INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_day
                     ON events(day);
@@ -329,7 +353,7 @@ class ReportStore:
                     ON process_samples(metric, ts);
 
                 DROP TABLE IF EXISTS todos;
-                PRAGMA user_version = 4;
+                PRAGMA user_version = 5;
                 """
             )
             # CREATE TABLE IF NOT EXISTS does not add a column to an existing
@@ -340,6 +364,8 @@ class ReportStore:
             cols = [row[1] for row in con.execute("PRAGMA table_info(events)")]
             if "item_key" not in cols:
                 con.execute("ALTER TABLE events ADD COLUMN item_key TEXT")
+            if "started_ts" not in cols:
+                con.execute("ALTER TABLE events ADD COLUMN started_ts INTEGER")
             con.commit()
         finally:
             con.close()
@@ -641,13 +667,14 @@ class ReportStore:
         target: str = "",
         resolved_ts: int | None = None,
         item_key: str | None = None,
+        started_ts: int | None = None,
     ) -> bool:
         return self._write(
             """
             INSERT INTO events
                 (ts, day, kind, name, target, detail, status, resolved_ts,
-                 item_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 item_key, started_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(ts),
@@ -659,6 +686,7 @@ class ReportStore:
                 status,
                 resolved_ts,
                 item_key,
+                _optional_int(started_ts),
             ),
         )
 
@@ -830,10 +858,10 @@ class ReportStore:
         rows = self._query(
             """
             SELECT id, ts, day, kind, name, target, detail, status,
-                   resolved_ts, item_key
+                   resolved_ts, item_key, started_ts
             FROM (
                 SELECT e.id, e.ts, e.day, e.kind, e.name, e.target, e.detail,
-                       e.status, e.resolved_ts, e.item_key,
+                       e.status, e.resolved_ts, e.item_key, e.started_ts,
                        ROW_NUMBER() OVER (
                            PARTITION BY e.kind, e.name,
                                         COALESCE(e.target, ''),
@@ -867,6 +895,7 @@ class ReportStore:
             "status",
             "resolved_ts",
             "item_key",
+            "started_ts",
         )
         return [dict(zip(keys, row)) for row in rows]
 
@@ -1199,7 +1228,7 @@ class ReportStore:
         rows = self._query(
             """
             SELECT id, ts, day, kind, name, target, detail, status,
-                   resolved_ts, item_key
+                   resolved_ts, item_key, started_ts
             FROM events WHERE day = ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             # 1000 was too low: a day with a flapping monitor can exceed it,
@@ -1219,6 +1248,7 @@ class ReportStore:
             "status",
             "resolved_ts",
             "item_key",
+            "started_ts",
         )
         return [dict(zip(keys, row)) for row in rows]
 
@@ -1236,7 +1266,7 @@ class ReportStore:
         rows = self._query(
             """
             SELECT id, ts, day, kind, name, target, detail, status,
-                   resolved_ts, item_key
+                   resolved_ts, item_key, started_ts
             FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?
             """,
             (int(start_ts), int(end_ts), max(1, min(200000, limit))),
@@ -1253,6 +1283,7 @@ class ReportStore:
             "status",
             "resolved_ts",
             "item_key",
+            "started_ts",
         )
         return [dict(zip(keys, row)) for row in rows]
 

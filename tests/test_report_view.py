@@ -278,7 +278,16 @@ def test_weekly_anomaly_time_carries_date(tmp_path: Path) -> None:
     """Inside a 7-day window a bare "HH:MM" cannot locate an event."""
 
     store = ReportStore(tmp_path / "report.db")
-    store.add_event(1_700_000_000, "2026-10-19", "service", "Nginx", "down", "alert")
+    # ts and day must agree: v2.20.30 renders a date whenever the row's start
+    # falls on another day, so a mismatched pair (a 2023 ts under a 2026 day)
+    # would now carry a date in the daily report too.
+    ts = int(datetime(2026, 10, 19, 9, 0, tzinfo=TZ).timestamp())
+    store.add_event(ts, "2026-10-19", "service", "Nginx", "down", "alert")
+    # Close it: an open episode would still be listed as "ongoing" by a later
+    # window's unresolved sweep (the event-retention lookback reaches back
+    # 90 days), so the "no anomalies" assertion below needs a finished outage.
+    store.add_event(ts + 300, "2026-10-19", "service", "Nginx", "ok", "recovery")
+    store.resolve_event(ts + 300, "Nginx", ts + 300, kind="service", close_all=True)
 
     weekly = _builder(tmp_path, store).build(
         day="2026-10-20", history_days=7, sections=["anomaly"], span_days=7

@@ -321,6 +321,36 @@ def _pair_key(item: dict[str, Any], name: str | None = None) -> tuple:
     )
 
 
+def _event_start(item: dict[str, Any]) -> int:
+    """When the interruption began, for display and duration purposes.
+
+    ``ts`` is the moment the row was written, which for an alert/failed row is
+    the PUSH moment: with ``fail_threshold`` > 1 the first failed probe is
+    ``(threshold-1)*interval`` earlier. The recovery notice has always billed
+    from that first failure (``state["since"]``), so reading ``started_ts``
+    here makes the daily report agree with it. Rows written by <=2.20.29 (and
+    every recovery row) carry NULL and fall back to ``ts``, which is exactly
+    the old behaviour.
+
+    Pairing is deliberately NOT driven by this: episode keys and the
+    ``episode_of`` bookkeeping stay on ``ts`` so this column cannot reshuffle
+    which alert belongs to which recovery.
+    """
+
+    ts = safe_int(item.get("ts") or 0)
+    started = safe_int(item.get("started_ts") or 0)
+    if not started or not ts:
+        return started or ts
+    # A hand-edited or corrupted state file can persist a future ``since`` or
+    # one from years ago. A negative duration (or a 1970 start) is worse than
+    # the old push-moment fallback, so only plausible starts are trusted. The
+    # bound is wider than the default 90-day retention because
+    # ``daily_report.event_retention_days`` is configurable up to 365.
+    if started > ts or ts - started > 400 * 86400:
+        return ts
+    return started
+
+
 class DailyReportBuilder:
     """Build the daily-report view from the plugin store and AstrBot history.
 
@@ -945,6 +975,12 @@ class DailyReportBuilder:
         # for it: the start of the interruption and the moment it ended (0
         # while it is still running).
         open_episode: dict[tuple[str, str, str, str], tuple[int, int]] = {}
+        # The moment each alert row's interruption actually began, keyed by
+        # (rule, row ts). Alert rows carry ``started_ts`` (the first failed
+        # probe); legacy rows and recovery rows fall back to their own ts.
+        # Only display and duration read this -- the pairing dicts above and
+        # below keep using ``ts`` so a late push cannot reshuffle episodes.
+        display_start: dict[tuple[tuple[str, str, str, str], int], int] = {}
         # An interruption that began before the window still has an alert row
         # outside ``events``; load the preceding month so a recovery inside
         # the window can be paired with it instead of showing "--".
@@ -983,6 +1019,7 @@ class DailyReportBuilder:
             key = _pair_key(alert, name)
             stamp = safe_int(alert.get("ts") or 0)
             if status in {"alert", "failed"}:
+                display_start[(key, stamp)] = _event_start(alert)
                 # A "failed" row means the fault happened but its push did
                 # not arrive; it still starts an interruption for pairing.
                 # A row that already carries a ``resolved_ts`` belongs to a
@@ -1063,6 +1100,7 @@ class DailyReportBuilder:
             key = _pair_key(event, name)
             stamp = safe_int(event.get("ts") or 0)
             if status in {"alert", "failed"}:
+                display_start[(key, stamp)] = _event_start(event)
                 current = open_episode.get(key)
                 if current is None:
                     # A new episode of this rule.
@@ -1186,29 +1224,39 @@ class DailyReportBuilder:
                     start = None
                 else:
                     start = episode[0]
+                # The pairing key stays on ``ts``; the outage is billed and
+                # positioned from the first failed probe (``started_ts``), so
+                # this row agrees with the recovery notice the operator got.
+                start_display = (
+                    display_start.get((key, start), start) if start else None
+                )
                 # A fault that began before the window and recovered inside
                 # it has no in-window alert row, so the counter never counted
                 # it while the table showed it: "异常 0 次" above a 20-minute
                 # outage (v2.20.17). Count it here unless its alert row was
                 # already counted above.
-                if start and start < window_start_ts and (key, start) not in seen_ids:
+                if (
+                    start_display
+                    and start_display < window_start_ts
+                    and (key, start) not in seen_ids
+                ):
                     count += 1
                 # The episode is over: a later alert with the same key is a
                 # new one and must count again.
                 seen_ids = {sid for sid in seen_ids if sid[0] != key}
                 episode_open.discard(key)
-                if start:
-                    if started_i - start > (span + 1) * 86400:
+                if start_display:
+                    if started_i - start_display > (span + 1) * 86400:
                         # Same guard as the alert branch below. The recovery
                         # branch used to overwrite the guarded "跨窗口关闭"
                         # with the raw duration, so a three-day-old orphan
                         # became "3天01:05:00" (v2.20.17).
                         duration_text = "跨窗口关闭"
-                        if start < window_start_ts:
+                        if start_display < window_start_ts:
                             duration_text += "（窗口前开始）"
                     else:
-                        duration_text = format_duration(started_i - start)
-                        if start < window_start_ts:
+                        duration_text = format_duration(started_i - start_display)
+                        if start_display < window_start_ts:
                             duration_text += "（窗口前开始）"
                 prior = emitted.get(key)
                 if prior is not None and prior < len(items):
@@ -1236,6 +1284,12 @@ class DailyReportBuilder:
                     episode_start, episode_end = started_i, 0
                 else:
                     episode_start, episode_end = episode
+                # Same split as the recovery branch: ``episode_start`` stays
+                # the pairing key, ``episode_display_start`` is the real first
+                # failure used for the duration and the time column.
+                episode_display_start = display_start.get(
+                    (key, episode_start), episode_start
+                )
                 if not episode_end:
                     # The recovery of this episode is not inside the window
                     # (a fault that ended after midnight). The row carries the
@@ -1259,14 +1313,16 @@ class DailyReportBuilder:
                         # end of the outage is unknown, so no duration is
                         # invented.
                         duration_text = "跨窗口关闭"
-                    elif episode_end - episode_start > (span + 1) * 86400:
+                    elif episode_end - episode_display_start > (span + 1) * 86400:
                         # close_all wrote the same resolved_ts onto every old
                         # open episode of a rule; pairing the newest alert
                         # with it turned a 5-minute outage into "5 days".
                         duration_text = "跨窗口关闭"
                     else:
-                        duration_text = format_duration(episode_end - episode_start)
-                        if episode_start < window_start_ts:
+                        duration_text = format_duration(
+                            episode_end - episode_display_start
+                        )
+                        if episode_display_start < window_start_ts:
                             # The alert row is rendered (not the recovery
                             # row) when the episode began before the window
                             # but an in-window alert/failed row exists. The
@@ -1279,14 +1335,29 @@ class DailyReportBuilder:
                     episode_open.add(key)
                     duration_text = "进行中"
             # A weekly window spans several days, so a bare "HH:MM" cannot
-            # locate the event inside it.
-            time_format = "%H:%M" if span == 1 else "%m-%d %H:%M"
+            # locate the event inside it. The same applies to a start that
+            # falls on another day: "23:59" under a report for the 9th read as
+            # if it happened that day (2026-11-10 reverse audit).
+            row_time = (
+                display_start.get((key, started_i), started_i)
+                if status in {"alert", "failed"}
+                else started_i
+            )
+            row_dt = datetime.fromtimestamp(row_time, self.tz)
+            time_format = (
+                "%H:%M" if span == 1 and row_dt.date() == day else "%m-%d %H:%M"
+            )
             rendered_keys.add(key)
+            # The time column shows when the interruption actually started,
+            # not when its push happened: the recovery notice and the report
+            # then quote the same moment (v2.20.30). Recovery rows keep their
+            # own ts -- that IS the moment the service came back.
             items.append(
                 {
-                    "time": datetime.fromtimestamp(
-                        safe_int(event.get("ts") or 0), self.tz
-                    ).strftime(time_format),
+                    # Internal sort key: the visible time, not the push ts.
+                    # Removed by the sort right after this loop.
+                    "_sort_ts": row_time,
+                    "time": row_dt.strftime(time_format),
                     "kind": self._kind_text(str(event.get("kind") or "")),
                     "kind_slug": str(event.get("kind") or ""),
                     "name": self.redactor.mask_name(redact_url(name)) if name else "--",
@@ -1319,6 +1390,13 @@ class DailyReportBuilder:
             if status in {"alert", "failed"}:
                 emitted[key] = len(items) - 1
 
+        # The rows were appended in push-ts order, but the time column shows
+        # the start. A push delayed past a later rule's alert (offline retry,
+        # cooldown record, silent-window self-heal) would print a later time
+        # above an earlier one. Re-sort by the visible moment; the unresolved
+        # and whole-window rows are prepended after this and stay on top.
+        items.sort(key=lambda item: item.pop("_sort_ts", 0) or 0)
+
         # An interruption that began before the window and never got a
         # resolved timestamp (e.g. its recovery notice was lost to a reload)
         # would otherwise read as "no anomalies". Surface it explicitly.
@@ -1347,7 +1425,9 @@ class DailyReportBuilder:
                 stale[key] = alert
         unresolved_items: list[dict[str, Any]] = []
         for alert in stale.values():
-            started = datetime.fromtimestamp(safe_int(alert.get("ts") or 0), self.tz)
+            # "Ongoing since ..." must be the first failed probe, not the push
+            # moment, or the row disagrees with the alert text in the chat.
+            started = datetime.fromtimestamp(_event_start(alert), self.tz)
             unresolved_items.append(
                 {
                     "time": started.strftime("%m-%d %H:%M"),

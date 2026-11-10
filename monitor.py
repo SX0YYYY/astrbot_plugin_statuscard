@@ -657,6 +657,7 @@ class ServiceMonitor:
         detail: str,
         status: str,
         item_key: str | None = None,
+        started_ts: float | None = None,
     ) -> None:
         if self.report_store is None:
             return
@@ -687,6 +688,16 @@ class ServiceMonitor:
                 status,
                 redact_url(target),
                 item_key=event_key,
+                # The push can happen (threshold-1)*interval after the first
+                # failed probe; the report must bill the outage from that
+                # first failure so its duration agrees with the recovery
+                # notice (v2.20.30). Recovery rows carry no start: the report
+                # pairs them with their alert row.
+                started_ts=(
+                    (safe_int(started_ts) or None)
+                    if status in {"alert", "failed"}
+                    else None
+                ),
             )
             if status == "recovery":
                 # Close the open alert of the same target so the report can
@@ -1186,6 +1197,7 @@ class ServiceMonitor:
                 "上次告警发送被中断（重载/重启），已按告警中处理",
                 "alert",
                 item_key=key,
+                started_ts=st.get("since"),
             )
 
         if not ok and detail.startswith(CONFIG_ERROR_PREFIX):
@@ -1315,6 +1327,7 @@ class ServiceMonitor:
                         f"{prev_error}（维护静默期内自愈，未推送）",
                         "alert",
                         item_key=key,
+                        started_ts=started,
                     )
                     self._record_event(
                         name,
@@ -1364,6 +1377,7 @@ class ServiceMonitor:
                 f"{prev_error}（维护静默期内自愈，未推送）",
                 "alert",
                 item_key=key,
+                started_ts=silent_since,
             )
             self._record_event(
                 name,
@@ -1468,6 +1482,7 @@ class ServiceMonitor:
                         f"{detail}（冷却窗口内仅记录，未重复推送）",
                         "alert",
                         item_key=key,
+                        started_ts=st.get("since"),
                     )
                     logger.info(
                         "监测项 %s 在冷却窗口内再次异常，已记录事件不重复推送",
@@ -1576,7 +1591,12 @@ class ServiceMonitor:
                         # the key above is the primary match anyway.
                         st["summary_reason"] = push_detail
                         self._record_event(
-                            name, target_text, detail, "alert", item_key=key
+                            name,
+                            target_text,
+                            detail,
+                            "alert",
+                            item_key=key,
+                            started_ts=st.get("since"),
                         )
                     elif delivered:
                         st["last_sent"] = now
@@ -1593,7 +1613,12 @@ class ServiceMonitor:
                         st.pop("summary_key", None)
                         st.pop("summary_reason", None)
                         self._record_event(
-                            name, target_text, detail, "alert", item_key=key
+                            name,
+                            target_text,
+                            detail,
+                            "alert",
+                            item_key=key,
+                            started_ts=st.get("since"),
                         )
                     else:
                         if self._transport_offline() or delivery_offline(result):
@@ -1626,7 +1651,12 @@ class ServiceMonitor:
                             st["retry_count"] = retry_count
                             st["next_attempt"] = now + retry_delay(retry_count)
                         self._record_event(
-                            name, target_text, detail, "failed", item_key=key
+                            name,
+                            target_text,
+                            detail,
+                            "failed",
+                            item_key=key,
+                            started_ts=st.get("since"),
                         )
             elif alerting and pending:
                 next_attempt = safe_float(st.get("next_attempt") or 0)
@@ -1657,7 +1687,12 @@ class ServiceMonitor:
                         st.pop("summary_key", None)
                         st.pop("summary_reason", None)
                         self._record_event(
-                            name, target_text, detail, "alert", item_key=key
+                            name,
+                            target_text,
+                            detail,
+                            "alert",
+                            item_key=key,
+                            started_ts=st.get("since"),
                         )
                     else:
                         if self._transport_offline() or delivery_offline(result):

@@ -1745,7 +1745,9 @@
               "</span>";
             return (
               '<div class="event"><div class="event-time">' +
-              esc(formatDateTime(item.ts)) +
+              // Alert rows carry the first failed probe; older rows (and
+              // recoveries) have no started_ts and keep showing their ts.
+              esc(formatDateTime(item.started_ts || item.ts)) +
               '</div><div class="event-main"><div class="event-title">' +
               badge +
               '<span class="event-name">' +
