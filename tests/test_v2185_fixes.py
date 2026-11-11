@@ -160,7 +160,7 @@ def test_provider_cooldown_suppresses_the_recovery_notice(
     sent: list[str] = []
 
     def fake_streak(_db, _limit):
-        return 5, "error", True
+        return (5, "error", True, None)
 
     monkeypatch.setattr(alerts_module, "provider_recent_streak", fake_streak)
 
@@ -203,7 +203,7 @@ def test_provider_cooldown_suppresses_the_recovery_notice(
 
     # Now the service recovers: no recovery notice must be sent either.
     def fake_completed(_db, _limit):
-        return 0, "completed", True
+        return (0, "completed", True, None)
 
     monkeypatch.setattr(alerts_module, "provider_recent_streak", fake_completed)
     engine._provider_last_check = 0.0

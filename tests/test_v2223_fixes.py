@@ -198,7 +198,9 @@ def test_provider_watch_scalar_does_not_abort_sampling(tmp_path, monkeypatch) ->
     state.data["alerts"] = {"provider_watch": "on"}
     engine._provider_last_check = 0
     monkeypatch.setattr(
-        alerts_module, "provider_recent_streak", lambda *a, **k: (0, "completed", 1)
+        alerts_module,
+        "provider_recent_streak",
+        lambda *a, **k: ((0, "completed", 1, None)),
     )
 
     asyncio.run(engine._check_provider_quality())

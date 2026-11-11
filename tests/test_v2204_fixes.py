@@ -266,7 +266,7 @@ def test_provider_cooldown_retry_is_reachable(tmp_path: Path) -> None:
     }
 
     def _streak(_db, _limit):
-        return 5, "failed", True
+        return (5, "failed", True, None)
 
     original = alerts_mod.provider_recent_streak
     alerts_mod.provider_recent_streak = _streak

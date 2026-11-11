@@ -261,7 +261,7 @@ def test_provider_queued_alert_merged_into_recovery(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda *args, **kwargs: (0, "completed", True),
+        lambda *args, **kwargs: ((0, "completed", True, None)),
     )
     now = time.time()
     state.setdefault("alerts", {})["provider_watch"] = {

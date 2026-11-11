@@ -1091,7 +1091,7 @@ class StatusCardPlugin(Star):
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
         # (issue #1). ``should_call_llm(True)`` alone keeps the LLM out.
-        lines = ["🩺 状态卡诊断", "──────────────"]
+        lines = [tr(self.config, "diag_title"), "──────────────"]
         try:
             # A failing component used to propagate out of the generator:
             # the operator got no reply at all, not even an error. Every
@@ -1102,23 +1102,21 @@ class StatusCardPlugin(Star):
                 platform = str(event.get_platform_name() or "")
             except Exception:
                 pass
-            lines.append(f"平台: {platform or '--'}")
-            lines.append(f"插件: v{__version__}")
+            lines.append(tr(self.config, "diag_platform", platform=platform or "--"))
+            lines.append(tr(self.config, "diag_plugin", version=__version__))
             if platform and not is_supported_platform(platform):
-                lines.append("提示: 当前平台不是 aiocqhttp，查看状态会被拒绝。")
+                lines.append(tr(self.config, "diag_platform_hint"))
 
             platform_id = str(
                 cfg_get(self.config, "alerts.platform_id", "default") or "default"
             )
             client = _get_aiocqhttp_client(self.context, platform_id)
             if client is None:
-                lines.append("OneBot: 未找到 aiocqhttp 客户端")
+                lines.append(tr(self.config, "diag_onebot_missing"))
                 if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
                     self.config, "alerts.offline_notify", True
                 ):
-                    lines.append(
-                        "掉线告警: 已开启，但当前没有可用的 OneBot 连接，无法确认在线状态"
-                    )
+                    lines.append(tr(self.config, "diag_offline_alert_no_conn"))
             else:
                 try:
                     status = _normalize_object(
@@ -1126,14 +1124,19 @@ class StatusCardPlugin(Star):
                     )
                     online = status.get("online")
                     lines.append(
-                        "OneBot: 客户端存在，online="
-                        + ("unknown" if online is None else str(online))
+                        tr(
+                            self.config,
+                            "diag_onebot_client",
+                            online="unknown" if online is None else str(online),
+                        )
                     )
                 except Exception as exc:
                     lines.append(
-                        "OneBot: 客户端存在，get_status 失败（"
-                        + exc.__class__.__name__
-                        + "）"
+                        tr(
+                            self.config,
+                            "diag_onebot_get_status_failed",
+                            error=exc.__class__.__name__,
+                        )
                     )
 
             # Report the targets the alert engine will actually use: a
@@ -1147,41 +1150,50 @@ class StatusCardPlugin(Star):
                 else list(self.alerts.targets)
             )
             lines.append(
-                "告警: "
-                + ("开启" if cfg_bool(self.config, "alerts.enabled", False) else "关闭")
-                + f"，实际生效目标 {len(effective_targets)} 个"
+                tr(
+                    self.config,
+                    "diag_alerts_on"
+                    if cfg_bool(self.config, "alerts.enabled", False)
+                    else "diag_alerts_off",
+                    count=len(effective_targets),
+                )
             )
             daily_time = str(
                 cfg_get(self.config, "alerts.daily_summary.time", "09:00") or "09:00"
             )
             lines.append(
-                "每日定时状态图: "
-                + (
-                    f"开启（{daily_time}）"
+                tr(
+                    self.config,
+                    "diag_daily_card_on"
                     if cfg_bool(self.config, "alerts.daily_summary.enabled", False)
-                    else "关闭"
+                    else "diag_daily_card_off",
+                    time=daily_time,
                 )
             )
             active_rules = notify_rules_active(self.config)
             lines.append(
-                "通知中心: "
-                + (
-                    f"启用（{active_rules} 条有效规则，被勾选的类型改发到规则目标，"
-                    "未勾选的继续用默认推送目标）"
-                    if active_rules
-                    else "未启用（全部使用默认推送目标）"
+                tr(
+                    self.config,
+                    "diag_notify_on" if active_rules else "diag_notify_off",
+                    count=active_rules,
                 )
             )
             monitor_status = self.monitor.status()
-            silence = monitor_status.get("silence_until") or "无"
+            silence = monitor_status.get("silence_until") or tr(
+                self.config, "diag_silence_none"
+            )
             lines.append(
-                "服务监测: "
-                + ("开启" if monitor_status.get("enabled") else "关闭")
-                + f"，{len(self.monitor.items)} 项"
-                + f"，静默: {silence}"
+                tr(
+                    self.config,
+                    "diag_monitor_on"
+                    if monitor_status.get("enabled")
+                    else "diag_monitor_off",
+                    count=len(self.monitor.items),
+                    silence=silence,
+                )
             )
             if monitor_status.get("silenced"):
-                lines.append("服务监测当前处于维护静默，异常/恢复不会推送。")
+                lines.append(tr(self.config, "diag_monitor_silenced"))
 
             cgroup_limit = cgroup_memory_limit()
             if cgroup_limit:
@@ -1191,10 +1203,12 @@ class StatusCardPlugin(Star):
                     host_total = 0
                 if host_total and cgroup_limit < host_total * 0.95:
                     lines.append(
-                        "内存口径: 容器 cgroup 上限 "
-                        f"{cgroup_limit / (1024**3):.1f} GB"
-                        f"（宿主机 {host_total / (1024**3):.1f} GB；"
-                        "内存使用率按宿主机计算，可能偏高）"
+                        tr(
+                            self.config,
+                            "diag_memory_cgroup",
+                            cgroup=f"{cgroup_limit / (1024**3):.1f}",
+                            host=f"{host_total / (1024**3):.1f}",
+                        )
                     )
 
             audit = self.audit_issues()
@@ -1248,27 +1262,44 @@ class StatusCardPlugin(Star):
                 age = max(
                     0, int(time.time() - safe_float(self._diag["last_render_at"]))
                 )
-                ok = "成功" if self._diag.get("last_render_ok") else "失败"
                 lines.append(
-                    f"最近状态卡渲染: {ok}；采集 {self._diag.get('last_collect_ms', '--')}ms，"
-                    f"渲染 {self._diag.get('last_render_ms', '--')}ms，{age}s 前"
+                    tr(
+                        self.config,
+                        "diag_render_ok"
+                        if self._diag.get("last_render_ok")
+                        else "diag_render_fail",
+                        collect=self._diag.get("last_collect_ms", "--"),
+                        render=self._diag.get("last_render_ms", "--"),
+                        age=age,
+                    )
                 )
             else:
-                lines.append("最近状态卡渲染: 尚未渲染")
+                lines.append(tr(self.config, "diag_render_none"))
             if self._diag.get("last_report_render_at"):
                 age = max(
                     0,
                     int(time.time() - safe_float(self._diag["last_report_render_at"])),
                 )
-                ok = "成功" if self._diag.get("last_report_render_ok") else "失败"
                 lines.append(
-                    f"最近日报渲染: {ok}；渲染 "
-                    f"{self._diag.get('last_report_render_ms', '--')}ms，{age}s 前"
+                    tr(
+                        self.config,
+                        "diag_report_render_ok"
+                        if self._diag.get("last_report_render_ok")
+                        else "diag_report_render_fail",
+                        render=self._diag.get("last_report_render_ms", "--"),
+                        age=age,
+                    )
                 )
             else:
-                lines.append("最近日报渲染: 尚未渲染")
+                lines.append(tr(self.config, "diag_report_render_none"))
             if self._diag.get("last_error"):
-                lines.append(f"最近错误: {self._diag.get('last_error')}")
+                lines.append(
+                    tr(
+                        self.config,
+                        "diag_last_error",
+                        error=self._diag.get("last_error"),
+                    )
+                )
 
             # Prefer the last real notification: a dashboard "verify" click used
             # to overwrite the single delivery slot, so the diagnosis showed a
@@ -1278,21 +1309,35 @@ class StatusCardPlugin(Star):
                 age = max(0, int(time.time() - safe_float(delivery["ts"])))
                 uncertain_targets = delivery.get("uncertain_targets") or []
                 if delivery.get("ok"):
-                    push_state = "部分成功" if delivery.get("partial") else "成功"
+                    push_key = (
+                        "diag_push_partial"
+                        if delivery.get("partial")
+                        else "diag_push_ok"
+                    )
                 elif uncertain_targets:
-                    push_state = "未确认（可能未送达）"
+                    push_key = "diag_push_unconfirmed"
                 else:
-                    push_state = "失败"
+                    push_key = "diag_push_failed"
                 lines.append(
-                    "最近主动推送: "
-                    + push_state
-                    + f"（{delivery.get('kind', '?')}，"
-                    + f"来源 {delivery.get('source', '未知')}，{age}s 前）"
+                    tr(
+                        self.config,
+                        push_key,
+                        kind=delivery.get("kind", "?"),
+                        source=delivery.get(
+                            "source", tr(self.config, "diag_source_unknown")
+                        ),
+                        age=age,
+                    )
                 )
                 if uncertain_targets:
                     lines.append(
-                        "未确认目标: "
-                        + "、".join(mask_umo(item) for item in uncertain_targets[:3])
+                        tr(
+                            self.config,
+                            "diag_push_uncertain_targets",
+                            targets=tr(self.config, "diag_list_sep").join(
+                                mask_umo(item) for item in uncertain_targets[:3]
+                            ),
+                        )
                     )
                 failed_targets = [
                     item
@@ -1301,8 +1346,13 @@ class StatusCardPlugin(Star):
                 ]
                 if failed_targets:
                     lines.append(
-                        "失败目标: "
-                        + "、".join(mask_umo(item) for item in failed_targets[:3])
+                        tr(
+                            self.config,
+                            "diag_push_failed_targets",
+                            targets=tr(self.config, "diag_list_sep").join(
+                                mask_umo(item) for item in failed_targets[:3]
+                            ),
+                        )
                     )
                 receipts = delivery.get("receipts") or {}
                 if isinstance(receipts, dict) and receipts:
@@ -1313,27 +1363,45 @@ class StatusCardPlugin(Star):
                         retcode = receipt.get("retcode")
                         message_id = receipt.get("message_id")
                         if receipt.get("ok"):
-                            receipt_state = "成功"
+                            receipt_key = "diag_receipt_ok"
                         elif target in uncertain_targets:
-                            receipt_state = "未确认"
+                            receipt_key = "diag_receipt_unconfirmed"
                         else:
-                            receipt_state = "失败"
+                            receipt_key = "diag_receipt_failed"
                         detail = f"retcode={retcode}"
                         if receipt.get("via") == "framework":
                             # The direct OneBot send was rejected but the
                             # framework path delivered it; printing the direct
                             # retcode next to "成功" read like a contradiction
                             # (v2.20.20).
-                            detail = "经框架发送"
+                            detail = tr(self.config, "diag_receipt_via_framework")
                         if message_id is not None:
-                            detail += f"，message_id={message_id}"
+                            detail += tr(
+                                self.config,
+                                "diag_receipt_message_id",
+                                message_id=message_id,
+                            )
                         # 打码：诊断命令发在群里，完整 UMO 会对全部群成员可见
                         # （与看板 verify 的 _mask_umo 同一口径）。
-                        parts.append(f"{mask_umo(target)}（{receipt_state}，{detail}）")
+                        parts.append(
+                            tr(
+                                self.config,
+                                "diag_receipt_item",
+                                target=mask_umo(target),
+                                state=tr(self.config, receipt_key),
+                                detail=detail,
+                            )
+                        )
                     if parts:
-                        lines.append("OneBot 回执: " + "；".join(parts))
+                        lines.append(
+                            tr(
+                                self.config,
+                                "diag_receipts",
+                                parts=tr(self.config, "diag_receipt_sep").join(parts),
+                            )
+                        )
             else:
-                lines.append("最近主动推送: 暂无记录")
+                lines.append(tr(self.config, "diag_push_none"))
             report_status = await asyncio.to_thread(self.report.status)
             store_stats = report_status.get("store", {})
             if not self.report_store.available:
@@ -1341,62 +1409,91 @@ class StatusCardPlugin(Star):
                 # quote the DB path or a host name, and this line goes to the
                 # group (v2.20.32).
                 lines.append(
-                    "日报数据库: 不可用（"
-                    + audit_redactor.mask_addresses(
-                        str(
-                            getattr(self.report_store, "init_error", None)
-                            or "初始化失败"
-                        )
+                    tr(
+                        self.config,
+                        "diag_report_db_unavailable",
+                        error=audit_redactor.mask_addresses(
+                            str(
+                                getattr(self.report_store, "init_error", None)
+                                or tr(self.config, "diag_db_init_failed")
+                            )
+                        ),
                     )
-                    + "，详见后台日志）"
                 )
             lines.append(
-                "日报数据: "
-                + ("记录中" if report_status.get("enabled") else "未记录")
-                + f"；资源 {store_stats.get('resources', 0)} 条"
-                + f" / 快照 {store_stats.get('snapshots', 0)} 天"
-                + f" / 事件 {store_stats.get('events', 0)} 条"
+                tr(
+                    self.config,
+                    "diag_report_data_on"
+                    if report_status.get("enabled")
+                    else "diag_report_data_off",
+                    resources=store_stats.get("resources", 0),
+                    snapshots=store_stats.get("snapshots", 0),
+                    events=store_stats.get("events", 0),
+                )
             )
             lines.append(
-                "日报扩展: "
-                + f"网站 {store_stats.get('websites', 0)} 条"
-                + f" / 进程 {store_stats.get('processes', 0)} 条"
+                tr(
+                    self.config,
+                    "diag_report_ext",
+                    websites=store_stats.get("websites", 0),
+                    processes=store_stats.get("processes", 0),
+                )
             )
             daily_status = await asyncio.to_thread(self.daily_report.status)
             lines.append(
-                "日报发送: "
-                + ("开启" if daily_status.get("enabled") else "关闭")
-                + f"，时间 {daily_status.get('time', '--')}"
-                + f"，目标 {len(daily_status.get('targets') or [])} 个"
-                + f"，内容 {','.join(daily_status.get('sections') or [])}"
+                tr(
+                    self.config,
+                    "diag_report_send_on"
+                    if daily_status.get("enabled")
+                    else "diag_report_send_off",
+                    time=daily_status.get("time", "--"),
+                    targets=len(daily_status.get("targets") or []),
+                    sections=",".join(daily_status.get("sections") or []),
+                )
             )
             if daily_status.get("next_run"):
-                lines.append("下次日报: " + str(daily_status.get("next_run")))
+                lines.append(
+                    tr(
+                        self.config,
+                        "diag_report_next",
+                        time=str(daily_status.get("next_run")),
+                    )
+                )
             elif daily_status.get("enabled"):
-                lines.append("下次日报: 待排程（任务可能未启动）")
+                lines.append(tr(self.config, "diag_report_next_unscheduled"))
             alarm_status = self.alerts.status()
             if alarm_status.get("daily_summary"):
                 next_daily = alarm_status.get("daily_summary_next")
                 running = alarm_status.get("daily_summary_running")
                 lines.append(
-                    "下次每日状态图: "
-                    + (str(next_daily) if next_daily else "--")
-                    + ("（任务运行中）" if running else "（任务未运行）")
+                    tr(
+                        self.config,
+                        "diag_next_daily_card_running"
+                        if running
+                        else "diag_next_daily_card_stopped",
+                        time=str(next_daily) if next_daily else "--",
+                    )
                 )
             last_run = daily_status.get("last_run")
             if isinstance(last_run, dict):
                 lines.append(
-                    "最近日报: "
-                    + ("成功" if last_run.get("ok") else "失败")
-                    + f"（{last_run.get('day') or '--'}，"
-                    + audit_redactor.mask_addresses(
-                        str(last_run.get("detail") or "无详情")
-                    )[:40]
-                    + "）"
+                    tr(
+                        self.config,
+                        "diag_last_report_ok"
+                        if last_run.get("ok")
+                        else "diag_last_report_fail",
+                        day=last_run.get("day") or "--",
+                        detail=audit_redactor.mask_addresses(
+                            str(
+                                last_run.get("detail")
+                                or tr(self.config, "diag_no_detail")
+                            )
+                        )[:40],
+                    )
                 )
             else:
-                lines.append("最近日报: 暂无发送记录")
-            lines.append("T2I: 由 AstrBot html_render 提供，最近一次结果见上。")
+                lines.append(tr(self.config, "diag_last_report_none"))
+            lines.append(tr(self.config, "diag_t2i"))
         except Exception as exc:
             logger.exception("状态卡诊断构建失败")
             lines.append(tr(self.config, "diag_error", error=exc.__class__.__name__))

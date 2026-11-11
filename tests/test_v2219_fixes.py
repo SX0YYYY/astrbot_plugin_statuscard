@@ -117,7 +117,7 @@ def test_provider_new_outage_folds_the_queued_recovery(tmp_path, monkeypatch) ->
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (6, "error", 20),
+        lambda db_path, limit: ((6, "error", 20, None)),
     )
 
     asyncio.run(engine._check_provider_quality())
@@ -582,7 +582,7 @@ def test_provider_pending_recovery_survives_aborted_and_expires(
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (0, "aborted", 1),
+        lambda db_path, limit: ((0, "aborted", 1, None)),
     )
 
     asyncio.run(engine._check_provider_quality())

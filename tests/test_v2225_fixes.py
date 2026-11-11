@@ -164,7 +164,7 @@ def test_provider_episode_clears_offline_backoff(tmp_path, monkeypatch):
         tmp_path,
         {"alerts": {"provider_watch": {"enabled": True, "threshold": 1}}},
     )
-    streak = {"value": (1, "failed", True)}
+    streak = {"value": (1, "failed", True, None)}
     monkeypatch.setattr(
         alerts_module, "provider_recent_streak", lambda *a, **k: streak["value"]
     )
@@ -177,7 +177,7 @@ def test_provider_episode_clears_offline_backoff(tmp_path, monkeypatch):
         watch = state.data["alerts"]["provider_watch"]
         assert watch.get("offline_retry_count") == 1
         # episode ends: the latest LLM call succeeded
-        streak["value"] = (0, "completed", True)
+        streak["value"] = (0, "completed", True, None)
         engine.plugin.results = [_ok()]
         engine._provider_last_check = 0.0
         await engine._check_provider_quality()
@@ -220,7 +220,7 @@ def test_provider_recovery_retry_survives_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda *a, **k: (0, "completed", True),
+        lambda *a, **k: ((0, "completed", True, None)),
     )
     watch = state.data.setdefault("alerts", {})["provider_watch"] = {
         "alerting": False,
@@ -819,7 +819,7 @@ def test_provider_fold_clears_recovery_offline_ladder(tmp_path, monkeypatch):
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda *a, **k: (5, "failed", True),
+        lambda *a, **k: ((5, "failed", True, None)),
     )
     watch = state.data.setdefault("alerts", {})["provider_watch"] = {
         "pending_recovery": "✅ 已恢复 · LLM 服务",

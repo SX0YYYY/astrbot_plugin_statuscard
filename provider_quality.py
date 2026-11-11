@@ -170,28 +170,81 @@ def error_streak(recent: list[tuple[str, str]]) -> int:
     return streak
 
 
+def _safe_start_time(value: Any) -> float | None:
+    """Coerce the raw ``start_time`` cell to float, or drop a dirty value.
+
+    A non-numeric cell (only hand-edited/external tools can write one) used
+    to raise inside fetch_recent_full, which the caller's blanket except
+    turned into "no evidence" -- one bad row blinded the whole streak probe
+    (reverse audit v2.20.33, P3 #3).
+    """
+
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_recent_full(
+    connection: sqlite3.Connection, limit: int = 20
+) -> list[tuple[str, str, float | None]]:
+    """The newest rows as ``(created_at, status, start_time)`` triples.
+
+    ``start_time`` is the raw FLOAT unixepoch of the call itself (``None``
+    when the column is empty); ``created_at`` stays the naive UTC text the
+    table stores. ``fetch_recent`` keeps its pair shape for the by-day
+    aggregations that only need statuses.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT created_at, status, start_time
+        FROM provider_stats
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    return [(str(r[0] or ""), str(r[1] or ""), _safe_start_time(r[2])) for r in rows]
+
+
 def recent_streak(
     db_path: Path | str | None = None, limit: int = 20
-) -> tuple[int, str, int]:
+) -> tuple[int, str, int, float | None]:
     """Consecutive-error streak over the newest rows.
 
-    Returns ``(streak, latest_status, sampled)``; ``latest_status`` is the
-    status of the newest row (``""`` when the database is missing or the
-    table is empty) so the alert engine can tell "recovered" apart from
-    "no data".
+    Returns ``(streak, latest_status, sampled, first_error_ts)``;
+    ``latest_status`` is the status of the newest row (``""`` when the
+    database is missing or the table is empty) so the alert engine can tell
+    "recovered" apart from "no data". ``first_error_ts`` is the OLDEST
+    non-empty ``start_time`` inside the streak -- the real first failure the
+    alert episode started at, instead of the moment the polling loop noticed
+    it (v2.20.33 mirrors the resource/monitor semantics); ``None`` when the
+    column carries no usable value.
     """
 
     connection = connect_readonly(db_path)
     if connection is None:
-        return 0, "", 0
+        return 0, "", 0, None
     try:
-        recent = fetch_recent(connection, limit)
+        recent = fetch_recent_full(connection, limit)
     except Exception:
-        return 0, "", 0
+        return 0, "", 0, None
     finally:
         connection.close()
     latest = recent[0][1] if recent else ""
-    return error_streak(recent), latest, len(recent)
+    streak = error_streak([(c, s) for c, s, _ts in recent])
+    first_error_ts: float | None = None
+    if streak:
+        for _created, status, start_ts in recent:
+            if status == "error":
+                if start_ts:
+                    first_error_ts = start_ts
+            elif status != "aborted":
+                break
+    return streak, latest, len(recent), first_error_ts
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float | None:

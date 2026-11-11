@@ -540,7 +540,7 @@ def test_provider_recovery_note_and_retry_cap(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (3, "error", 20),
+        lambda db_path, limit: ((3, "error", 20, None)),
     )
     sent: list[str] = []
     engine._send = _async_send(sent, ok=False)  # type: ignore[method-assign]
@@ -555,7 +555,7 @@ def test_provider_recovery_note_and_retry_cap(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (0, "completed", 20),
+        lambda db_path, limit: ((0, "completed", 20, None)),
     )
     asyncio.run(engine._check_provider_quality())
     assert len(sent) == 2 and "异常告警此前未能送达" in sent[-1]

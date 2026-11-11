@@ -206,7 +206,7 @@ def test_provider_queued_alert_is_sent_when_recover_notify_is_off(
         },
         plugin,
     )
-    samples = iter([(5, "failed", True), (0, "completed", True)])
+    samples = iter([(5, "failed", True, None), (0, "completed", True, None)])
     monkeypatch.setattr(
         alerts_module, "provider_recent_streak", lambda *a, **k: next(samples)
     )

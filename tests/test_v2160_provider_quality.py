@@ -196,7 +196,7 @@ def test_fetch_window_and_recent(tmp_path: Path) -> None:
 
 
 def test_recent_streak_missing_database(tmp_path: Path) -> None:
-    assert pq.recent_streak(tmp_path / "nope.db") == (0, "", 0)
+    assert pq.recent_streak(tmp_path / "nope.db") == (0, "", 0, None)
 
 
 def test_recent_streak_reads_newest_rows(tmp_path: Path) -> None:
@@ -209,8 +209,29 @@ def test_recent_streak_reads_newest_rows(tmp_path: Path) -> None:
             (_utc_text(minutes=-4), "completed", "m", "c", 0, 0, 0),
         ],
     )
-    streak, latest, sampled = pq.recent_streak(path)
+    streak, latest, sampled, first_ts = pq.recent_streak(path)
     assert (streak, latest, sampled) == (2, "error", 4)
+    # The rows carry start_time=0, treated as "no usable value" -> None.
+    assert first_ts is None
+
+
+def test_recent_streak_returns_first_error_start_time(tmp_path: Path) -> None:
+    """v2.20.33: the streak's OLDEST non-empty start_time is the start."""
+
+    path = _make_db(
+        tmp_path,
+        [
+            (_utc_text(minutes=-1), "error", "m", "c", 1790000600, 0, 0),
+            (_utc_text(minutes=-2), "aborted", "m", "c", 1790000500, 0, 0),
+            (_utc_text(minutes=-3), "error", "m", "c", 1790000300, 0, 0),
+            (_utc_text(minutes=-4), "completed", "m", "c", 1790000100, 0, 0),
+        ],
+    )
+    streak, _latest, _sampled, first_ts = pq.recent_streak(path)
+    assert streak == 2
+    # The aborted row does not break the streak and its start_time is not
+    # the episode start; the oldest ERROR row inside it is.
+    assert first_ts == 1790000300.0
 
 
 def test_today_overview_counts_today_only(tmp_path: Path) -> None:
@@ -349,7 +370,7 @@ def _watch_state(engine: AlertEngine) -> dict:
 def test_provider_watch_alerts_and_recovers(tmp_path, monkeypatch) -> None:
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
-    fake = lambda db_path, limit: (3, "error", 20)
+    fake = lambda db_path, limit: ((3, "error", 20, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", fake)
 
     asyncio.run(engine._check_provider_quality())
@@ -358,7 +379,7 @@ def test_provider_watch_alerts_and_recovers(tmp_path, monkeypatch) -> None:
     assert "连续失败" in plugin.sent[0][1]
     assert plugin.sent[0][2] == "provider"
 
-    fake = lambda db_path, limit: (0, "completed", 20)
+    fake = lambda db_path, limit: ((0, "completed", 20, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", fake)
     engine._provider_last_check = 0
     asyncio.run(engine._check_provider_quality())
@@ -370,12 +391,12 @@ def test_provider_watch_alerts_and_recovers(tmp_path, monkeypatch) -> None:
 def test_provider_watch_cooldown_gates_realert(tmp_path, monkeypatch) -> None:
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
-    failing = lambda db_path, limit: (5, "error", 20)
+    failing = lambda db_path, limit: ((5, "error", 20, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
     asyncio.run(engine._check_provider_quality())
     assert _watch_state(engine).get("alerting") is True
 
-    recovered = lambda db_path, limit: (0, "completed", 20)
+    recovered = lambda db_path, limit: ((0, "completed", 20, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", recovered)
     engine._provider_last_check = 0
     asyncio.run(engine._check_provider_quality())
@@ -397,7 +418,7 @@ def test_provider_watch_aborted_does_not_resolve(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (2, "aborted", 20),
+        lambda db_path, limit: ((2, "aborted", 20, None)),
     )
     alerts_state = engine.state.setdefault("alerts", {})
     alerts_state.setdefault("provider_watch", {})["alerting"] = True
@@ -413,7 +434,9 @@ def test_provider_watch_no_data_keeps_state(tmp_path, monkeypatch) -> None:
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
     monkeypatch.setattr(
-        alerts_module, "provider_recent_streak", lambda db_path, limit: (0, "", 0)
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: ((0, "", 0, None)),
     )
     asyncio.run(engine._check_provider_quality())
     assert plugin.sent == []
@@ -424,7 +447,9 @@ def test_provider_watch_below_threshold_stays_quiet(tmp_path, monkeypatch) -> No
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
     monkeypatch.setattr(
-        alerts_module, "provider_recent_streak", lambda db_path, limit: (2, "error", 20)
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: ((2, "error", 20, None)),
     )
     asyncio.run(engine._check_provider_quality())
     assert plugin.sent == []
@@ -574,12 +599,12 @@ def test_provider_watch_cooldown_records_event(tmp_path, monkeypatch) -> None:
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
     store = engine.report_store
-    failing = lambda db_path, limit: (5, "error", 30)
+    failing = lambda db_path, limit: ((5, "error", 30, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
     asyncio.run(engine._check_provider_quality())
     assert _watch_state(engine).get("alerting") is True
 
-    recovered = lambda db_path, limit: (0, "completed", 30)
+    recovered = lambda db_path, limit: ((0, "completed", 30, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", recovered)
     engine._provider_last_check = 0
     asyncio.run(engine._check_provider_quality())
@@ -602,7 +627,9 @@ def test_provider_watch_recovery_pending_retry(tmp_path, monkeypatch) -> None:
     plugin = _OkPlugin()
     engine = _engine(tmp_path, plugin)
     monkeypatch.setattr(
-        alerts_module, "provider_recent_streak", lambda db_path, limit: (3, "error", 30)
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: ((3, "error", 30, None)),
     )
     asyncio.run(engine._check_provider_quality())
     assert _watch_state(engine).get("alerting") is True
@@ -610,7 +637,7 @@ def test_provider_watch_recovery_pending_retry(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (0, "completed", 30),
+        lambda db_path, limit: ((0, "completed", 30, None)),
     )
     engine._provider_last_check = 0
     asyncio.run(engine._check_provider_quality())
@@ -630,13 +657,15 @@ def test_provider_watch_recovery_pending_retry(tmp_path, monkeypatch) -> None:
     engine2 = _engine(tmp_path / "sub2", _OkPlugin())
     engine2.plugin = _BrokenPlugin()
     monkeypatch.setattr(
-        alerts_module, "provider_recent_streak", lambda db_path, limit: (3, "error", 30)
+        alerts_module,
+        "provider_recent_streak",
+        lambda db_path, limit: ((3, "error", 30, None)),
     )
     asyncio.run(engine2._check_provider_quality())
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda db_path, limit: (0, "completed", 30),
+        lambda db_path, limit: ((0, "completed", 30, None)),
     )
     engine2._provider_last_check = 0
     asyncio.run(engine2._check_provider_quality())

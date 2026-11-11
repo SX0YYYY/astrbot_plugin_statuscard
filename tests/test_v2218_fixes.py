@@ -403,7 +403,7 @@ def test_provider_cooldown_retry_drops_the_stale_queued_alert(
         ]
     )
     engine = _provider_engine(tmp_path, plugin)
-    failing = lambda db_path, limit: (7, "error", 20)
+    failing = lambda db_path, limit: ((7, "error", 20, None))
     monkeypatch.setattr(alerts_module, "provider_recent_streak", failing)
 
     asyncio.run(engine._check_provider_quality())

@@ -2388,6 +2388,7 @@ class AlertEngine:
                     "Bot 连接",
                     f"离线时长 {format_duration(duration)}",
                     "recovery",
+                    started_ts=now - duration if duration > 0 else None,
                 )
                 # Reports that failed only because the bot was offline are
                 # queued instead of being given up; retry the newest one now
@@ -2528,6 +2529,7 @@ class AlertEngine:
                     "Bot 连接",
                     "连接离线（通知冷却中）" if in_cooldown else "连接离线",
                     "alert",
+                    started_ts=st.get("since"),
                 )
                 if in_cooldown:
                     logger.info(
@@ -2573,12 +2575,22 @@ class AlertEngine:
                 st["alerted"] = True
                 st["last_sent"] = now
                 logger.info("Bot 连接离线告警已发送")
-                self._record_event("offline", "Bot 连接", "连接离线", "alert")
+                self._record_event(
+                    "offline",
+                    "Bot 连接",
+                    "连接离线",
+                    "alert",
+                    started_ts=st.get("since"),
+                )
             else:
                 st["pending_alert_text"] = text
                 logger.warning("Bot 连接离线告警发送失败，已排队，恢复后补发")
                 self._record_event(
-                    "offline", "Bot 连接", "连接离线（推送失败）", "failed"
+                    "offline",
+                    "Bot 连接",
+                    "连接离线（推送失败）",
+                    "failed",
+                    started_ts=st.get("since"),
                 )
 
         # A sustained outage that started inside the notification cooldown
@@ -2626,13 +2638,23 @@ class AlertEngine:
                     st["last_sent"] = now
                     st["pending_alert"] = False
                     logger.info("Bot 连接离线告警已在冷却结束后补发")
-                    self._record_event("offline", "Bot 连接", "连接离线", "alert")
+                    self._record_event(
+                        "offline",
+                        "Bot 连接",
+                        "连接离线",
+                        "alert",
+                        started_ts=st.get("since"),
+                    )
                 else:
                     st["pending_alert_text"] = text
                     st["pending_alert"] = True
                     logger.warning("Bot 连接离线告警补发失败，已排队，恢复后补发")
                     self._record_event(
-                        "offline", "Bot 连接", "连接离线（推送失败）", "failed"
+                        "offline",
+                        "Bot 连接",
+                        "连接离线（推送失败）",
+                        "failed",
+                        started_ts=st.get("since"),
                     )
 
     def _nudge_queued_alerts(self) -> None:
@@ -2721,9 +2743,18 @@ class AlertEngine:
             return
         watch["alerting"] = False
         watch["alerted"] = False
+        # Read before clearing: the recovery row should quote the same start
+        # as its matching alert row (reverse audit v2.20.33, P3 #2).
+        episode_start = _safe_float(watch.get("alert_since")) or None
         watch["alert_since"] = 0
         self.state.save()
-        self._record_event("provider", "LLM 服务", reason, "recovery")
+        self._record_event(
+            "provider",
+            "LLM 服务",
+            reason,
+            "recovery",
+            started_ts=episode_start,
+        )
         logger.info("LLM 服务告警已关闭：%s", reason)
 
     async def _check_provider_quality(self) -> None:
@@ -2751,7 +2782,7 @@ class AlertEngine:
             return
         self._provider_last_check = now
         try:
-            streak, latest, sampled = await asyncio.to_thread(
+            streak, latest, sampled, first_error_ts = await asyncio.to_thread(
                 provider_recent_streak,
                 None,
                 max(30, self.provider_watch_threshold * 3),
@@ -2802,6 +2833,7 @@ class AlertEngine:
                     "LLM 服务",
                     f"连续 {streak} 次 LLM 调用失败",
                     "alert",
+                    started_ts=watch.get("alert_since"),
                 )
                 logger.warning("LLM 服务连续失败 %d 次，补发告警成功", streak)
             elif self._transport_offline() or delivery_offline(result):
@@ -2957,12 +2989,17 @@ class AlertEngine:
                 watch["alerting"] = True
                 watch["alerted"] = False
                 watch["last_streak"] = streak
+                # Episode start = the streak's first failing call, mirroring
+                # the resource rules' first-over-threshold sample (v2.20.33).
+                if not _safe_float(watch.get("alert_since")):
+                    watch["alert_since"] = first_error_ts or now
                 self.state.save()
                 self._record_event(
                     "provider",
                     "LLM 服务",
                     f"连续 {streak} 次 LLM 调用失败（冷却窗口内，未重复推送）",
                     "alert",
+                    started_ts=watch.get("alert_since"),
                 )
                 logger.warning(
                     "LLM 服务冷却窗口内再次连续失败 %d 次，已记录事件不重复推送",
@@ -3012,6 +3049,9 @@ class AlertEngine:
             watch["send_failed"] = not delivered
             watch["last_alert_ts"] = now
             watch["last_streak"] = streak
+            # Episode start = the streak's first failing call (v2.20.33).
+            if not _safe_float(watch.get("alert_since")):
+                watch["alert_since"] = first_error_ts or now
             self.state.save()
             if delivered:
                 # This fresh alert supersedes any copy queued by an earlier
@@ -3030,6 +3070,7 @@ class AlertEngine:
                     "LLM 服务",
                     f"连续 {streak} 次 LLM 调用失败",
                     "alert",
+                    started_ts=watch.get("alert_since"),
                 )
                 logger.warning("LLM 服务连续失败 %d 次，已发送告警", streak)
             else:
@@ -3038,6 +3079,7 @@ class AlertEngine:
                     "LLM 服务",
                     f"连续 {streak} 次 LLM 调用失败（推送失败）",
                     "failed",
+                    started_ts=watch.get("alert_since"),
                 )
                 if self._transport_offline() or delivery_offline(result):
                     # Keep the alert queued instead of giving up: the channel
@@ -3089,12 +3131,25 @@ class AlertEngine:
             # Only announce a recovery for an episode that actually reached
             # the user; a cooldown-suppressed one is logged but silent.
             notified = bool(watch.pop("alerted", True))
+            # Episode duration from the streak's first failing call; the
+            # stale-start guard lives in report_view._event_start, and an
+            # old state file without ``alert_since`` keeps duration=0.
+            duration = now - (
+                _safe_float(watch.get("alert_since")) or now  # 0 == no start
+            )
+            # Clear the episode clock BEFORE the save below: the old draft
+            # cleared it only at the end of the branch, after every save, so
+            # the disk kept the old start and a restart replayed it as the
+            # NEXT episode's start (reverse audit v2.20.33, P1). Offline and
+            # _close_provider_watch already clear before their saves.
+            watch["alert_since"] = 0
             self.state.save()
             self._record_event(
                 "provider",
                 "LLM 服务",
                 "最近一次 LLM 调用成功",
                 "recovery",
+                started_ts=now - duration if duration > 0 else None,
             )
             # The queued alert and the recovery notice are two different
             # messages. ``recover_notify`` only controls the notice: when it
@@ -3112,6 +3167,11 @@ class AlertEngine:
                         "──────────────\n"
                         f"主机: {self._hostname()}\n"
                         + (f"此前连续失败: {last_streak} 次\n" if last_streak else "")
+                        + (
+                            f"本次异常持续: {format_duration(duration)}\n"
+                            if duration > 0
+                            else ""
+                        )
                         + "最近状态: 调用成功\n"
                         + ("（异常告警此前未能送达）\n" if had_failed else "")
                         + f"时间: {_now_text(self.config)}"

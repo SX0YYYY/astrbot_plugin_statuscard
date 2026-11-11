@@ -276,7 +276,7 @@ def test_provider_watch_clears_the_backoff_after_a_delivery(
     monkeypatch.setattr(
         alerts_module,
         "provider_recent_streak",
-        lambda *a, **k: (5, "failed", True),
+        lambda *a, **k: ((5, "failed", True, None)),
     )
 
     async def ok_send(text, source="alert", kind="resource"):
