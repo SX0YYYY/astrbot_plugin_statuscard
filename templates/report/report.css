@@ -160,6 +160,21 @@ body {
   font-size: 10px;
 }
 
+/* A peak above the configured alert threshold: the card must explain why the
+   day has an alert even when the average looks safe. */
+.stat-sub.over-threshold {
+  color: #dc2626;
+}
+
+.over-tag {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 9px;
+}
+
 .chart-block {
   margin-top: 14px;
   padding: 10px 10px 4px;
@@ -294,6 +309,14 @@ body {
   color: #94a3b8;
   font-size: 10px;
   text-align: right;
+}
+
+.event-duration small {
+  display: block;
+  margin-top: 1px;
+  color: #b6c0cc;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .badge {
@@ -542,4 +565,19 @@ body {
 .event-main strong,
 .stat-label {
   overflow-wrap: anywhere;
+}
+
+/* Dark overrides for the peak marker and the recovery time; they must come
+   after the generic dark rules above, which have the same specificity. */
+[data-theme="dark"] .stat-sub.over-threshold {
+  color: #f87171;
+}
+
+[data-theme="dark"] .over-tag {
+  background: #431a1c;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .event-duration small {
+  color: #64748b;
 }

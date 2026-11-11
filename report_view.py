@@ -13,6 +13,7 @@ from astrbot.api import logger
 
 from .collectors import (
     cfg_bool,
+    cfg_float,
     cfg_get,
     cfg_int,
     format_duration,
@@ -148,6 +149,28 @@ def _delta_pct(current: Any, previous: Any) -> float | None:
         return (float(current) - float(previous)) / float(previous) * 100.0
     except (TypeError, ValueError):
         return None
+
+
+def _signed_abs(current: Any, previous: Any, key: str) -> str:
+    """Absolute change for the resource cards.
+
+    A relative percentage is misleading on a low base: CPU going from 7.6%
+    to 10.9% renders as "+44.3%", which reads like a spike while the actual
+    change is 3.4 percentage points. Percentage metrics therefore show the
+    point change ("+3.4pp"); the 1-minute load (no unit) shows the raw delta.
+    """
+
+    if current is None or previous is None:
+        return "--"
+    try:
+        diff = float(current) - float(previous)
+    except (TypeError, ValueError):
+        return "--"
+    if not math.isfinite(diff):
+        return "--"
+    if key == "load1":
+        return f"{diff:+.2f}"
+    return f"{diff:+.1f}pp"
 
 
 def _nice_ceil(value: float) -> float:
@@ -719,7 +742,32 @@ class DailyReportBuilder:
             yesterday[key]["delta_text"] = _signed_pct(
                 _delta_pct(yesterday[key]["avg"], prev[key]["avg"])
             )
+            # The card shows the absolute change; the relative figure stays in
+            # delta_text for callers that want it (text report, dashboard).
+            yesterday[key]["delta_abs_text"] = _signed_abs(
+                yesterday[key]["avg"], prev[key]["avg"], key
+            )
         yesterday["samples"] = len(yesterday_rows)
+
+        # A peak above the configured alert threshold explains why the day has
+        # an alert even when the average looks safe (disk averaging 75.9% while
+        # peaking at 81.4% and firing a two-hour alert). A threshold of 0
+        # disables that rule, so no marker is added then.
+        peak_thresholds = {
+            "cpu": cfg_float(self.config, "alerts.cpu_threshold", 85.0),
+            "ram": cfg_float(self.config, "alerts.mem_threshold", 90.0),
+            "swap": cfg_float(self.config, "alerts.swap_threshold", 90.0),
+            "disk": cfg_float(self.config, "alerts.disk_threshold", 85.0),
+        }
+        for key in RESOURCE_KEYS:
+            # The 1-minute load has a per-core threshold, not a percentage one;
+            # it keeps the fields (with no marker) so every card has the same
+            # shape for the template and the dashboard API.
+            threshold = peak_thresholds.get(key, 0.0)
+            peak = yesterday[key].get("peak")
+            active = threshold > 0 and peak is not None
+            yesterday[key]["peak_threshold"] = threshold if threshold > 0 else None
+            yesterday[key]["peak_over"] = bool(active and float(peak) >= threshold)
 
         if span == 1:
             # 24 hourly buckets for a daily report.
@@ -1237,6 +1285,9 @@ class DailyReportBuilder:
             if status not in {"alert", "recovery", "failed"}:
                 continue
             duration_text = "--"
+            # Recovery moment for the row: a duration alone cannot tell a
+            # reader when a cross-midnight outage actually ended.
+            end_ts: int | None = None
             if status == "recovery":
                 episode = recovery_episode.get((key, started_i))
                 if episode is None:
@@ -1356,6 +1407,12 @@ class DailyReportBuilder:
                 else:
                     episode_open.add(key)
                     duration_text = "进行中"
+                # Only a known, in-range end is shown; "跨窗口关闭" exists
+                # because resolved_ts may be a stale close_all stamp, and
+                # quoting that stamp as the recovery time would repeat the
+                # very error the duration guard avoids.
+                if resolved_ts and episode_end and duration_text not in ("跨窗口关闭",):
+                    end_ts = episode_end
             # A weekly window spans several days, so a bare "HH:MM" cannot
             # locate the event inside it. The same applies to a start that
             # falls on another day: "23:59" under a report for the 9th read as
@@ -1377,6 +1434,19 @@ class DailyReportBuilder:
             time_format = (
                 "%H:%M" if span == 1 and row_dt.date() == day else "%m-%d %H:%M"
             )
+            end_text = None
+            if end_ts:
+                try:
+                    end_dt = datetime.fromtimestamp(end_ts, self.tz)
+                except (OSError, OverflowError, ValueError):
+                    end_dt = None
+                if end_dt is not None:
+                    if end_dt.date() == row_dt.date():
+                        end_text = end_dt.strftime("%H:%M")
+                    elif (end_dt.date() - row_dt.date()).days == 1:
+                        end_text = "次日 " + end_dt.strftime("%H:%M")
+                    else:
+                        end_text = end_dt.strftime("%m-%d %H:%M")
             rendered_keys.add(key)
             # The time column shows when the interruption actually started,
             # not when its push happened: the recovery notice and the report
@@ -1409,6 +1479,10 @@ class DailyReportBuilder:
                         str(event.get("detail") or "")
                     )[:80],
                     "duration": duration_text,
+                    # When it ended ("00:47" / "次日 00:47" / "11-10 00:47"),
+                    # so a cross-midnight episode cannot be mistaken for one
+                    # that ended inside the report day.
+                    "end_time": end_text,
                     # Structured marker so the English dashboard can translate
                     # the Chinese duration words instead of mixing them into
                     # the table: "进行中" (ongoing), "跨窗口关闭"
@@ -1479,6 +1553,7 @@ class DailyReportBuilder:
                     # this row used to show the raw Chinese text there
                     # ("进行中" instead of "Ongoing", v2.20.17).
                     "duration_code": "ongoing",
+                    "end_time": None,
                 }
             )
         # An outage that covered the WHOLE window and recovered only after it
@@ -1568,6 +1643,7 @@ class DailyReportBuilder:
                         "detail": detail,
                         "duration": "跨窗口关闭",
                         "duration_code": "cross_window",
+                        "end_time": None,
                     }
                 )
                 rendered_keys.add(key)
