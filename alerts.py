@@ -33,6 +33,12 @@ from .collectors import (
     swap_stat,
 )
 from .delivery import DeliveryResult
+from .platform_support import (
+    adapter_platform_name,
+    adapter_running,
+    find_adapter,
+    is_official_platform,
+)
 from .provider_quality import recent_streak as provider_recent_streak
 from .redactor import HIDDEN, Redactor, read_rules
 from .state import StateStore
@@ -1996,6 +2002,12 @@ class AlertEngine:
         cfg = cfg_get(self.config, "alerts.offline_broadcast", {}) or {}
         if not isinstance(cfg, dict) or not cfg_bool(cfg, "enabled", False):
             return
+        # The official bot has no group list API, and its group ids are
+        # openids, so the OneBot broadcast below cannot enumerate targets.
+        # Skip instead of posting to nothing or guessing (v2.21.0).
+        if is_official_platform(self._platform_name()):
+            logger.info("掉线广播：QQ 官方机器人暂不支持全群广播，跳过")
+            return
         if not self.offline_notify:
             # The operator turned the offline/recovery notices off, so the
             # broadcast must not resurrect them: it posted a "已恢复" to
@@ -2158,70 +2170,90 @@ class AlertEngine:
         except Exception:
             return False
 
+    def _platform_name(self) -> str:
+        """Adapter type of the configured platform instance (e.g. qq_official)."""
+
+        adapter = find_adapter(self.plugin.context, None, self.platform_id)
+        return adapter_platform_name(adapter) if adapter is not None else ""
+
     async def _check_offline(self) -> None:
         # Without a self_id filter a multi-bot instance could probe another
         # bot's connection and report the wrong one as offline.
         self_id = str(cfg_get(self.config, "alerts.self_id", "") or "").strip()
-        client = _get_aiocqhttp_client(
-            self.plugin.context, self.platform_id, self_id or None
-        )
-        if client is None:
-            # The client is missing for two very different reasons:
-            #
-            # 1. The bot has not connected yet. Right after a start-up the
-            #    reverse WebSocket of NapCat is still coming up, so the
-            #    first sample lands before the client exists. That is the
-            #    normal case, and it says nothing about the configuration.
-            # 2. The ``platform_id`` does not match an AstrBot platform
-            #    instance. Then the disconnect detection and the OneBot
-            #    direct sends silently no-op forever.
-            #
-            # The old code reported both as a warning about the
-            # configuration, so every restart produced a scary "掉线告警
-            # 与 OneBot 直发不可用" line even though the configuration was
-            # perfectly fine and the bot connected a second later. The
-            # first samples are now expected, and only a client that stays
-            # missing is reported (v2.20.12).
-            if self._started_at and time.time() - self._started_at < 120:
-                # Still inside the start-up grace period: wait for the
-                # connection instead of warning about it. The warning flag
-                # stays untouched so a client that never shows up is still
-                # reported once the grace period is over.
-                return
-            if not self._client_missing_warned:
-                self._client_missing_warned = True
-                logger.warning(
-                    "掉线检测：未找到 aiocqhttp 客户端（platform_id=%s、self_id=%s），"
-                    "掉线告警与 OneBot 直发不可用；请确认「告警平台 ID」与 AstrBot "
-                    "平台实例 ID 一致（或留空 self_id）",
-                    self.platform_id,
-                    self_id or "（空）",
-                )
-            return
-
+        adapter = find_adapter(self.plugin.context, None, self.platform_id)
+        platform_name = adapter_platform_name(adapter) if adapter is not None else ""
         online: bool | None = None
-        try:
-            status = _normalize_object(
-                await _call_action(client, "get_status", timeout=5)
+        if is_official_platform(platform_name):
+            # The official bot is hosted by Tencent: the adapter status only
+            # says whether the adapter task is running, not whether Tencent's
+            # websocket is healthy. A stopped/errored adapter is a real
+            # outage, "running" counts as online, and a missing status is
+            # unknown -- the state machine below then keeps its previous
+            # value instead of inventing one.
+            online = adapter_running(adapter)
+            if online is None:
+                logger.debug("QQ 官方机器人状态未知，跳过本次掉线采样")
+                return
+        else:
+            client = _get_aiocqhttp_client(
+                self.plugin.context, self.platform_id, self_id or None
             )
-            if "online" in status:
-                online = bool(status.get("online"))
-            else:
-                online = True
-        except Exception as exc:
-            # Distinguish "nothing is connected" from "we cannot tell".
-            # aiocqhttp raises ApiNotAvailable when no reverse-WS client is
-            # registered: that is a confirmed offline bot, not an unknown
-            # state. A timeout or a closed socket stays unknown so a
-            # restarting NapCat does not raise a false alarm.
-            name = exc.__class__.__name__
-            if name in ("ApiNotAvailable", "InvalidURL"):
-                online = False
-            elif name == "ActionFailed":
-                online = True
-            else:
-                online = None
-            logger.debug("OneBot get_status 调用失败（%s）: %s", name, exc)
+            if client is None:
+                # The client is missing for two very different reasons:
+                #
+                # 1. The bot has not connected yet. Right after a start-up the
+                #    reverse WebSocket of NapCat is still coming up, so the
+                #    first sample lands before the client exists. That is the
+                #    normal case, and it says nothing about the configuration.
+                # 2. The ``platform_id`` does not match an AstrBot platform
+                #    instance. Then the disconnect detection and the OneBot
+                #    direct sends silently no-op forever.
+                #
+                # The old code reported both as a warning about the
+                # configuration, so every restart produced a scary "掉线告警
+                # 与 OneBot 直发不可用" line even though the configuration was
+                # perfectly fine and the bot connected a second later. The
+                # first samples are now expected, and only a client that stays
+                # missing is reported (v2.20.12).
+                if self._started_at and time.time() - self._started_at < 120:
+                    # Still inside the start-up grace period: wait for the
+                    # connection instead of warning about it. The warning flag
+                    # stays untouched so a client that never shows up is still
+                    # reported once the grace period is over.
+                    return
+                if not self._client_missing_warned:
+                    self._client_missing_warned = True
+                    logger.warning(
+                        "掉线检测：未找到 aiocqhttp 客户端（platform_id=%s、self_id=%s），"
+                        "掉线告警与 OneBot 直发不可用；请确认「告警平台 ID」与 AstrBot "
+                        "平台实例 ID 一致（或留空 self_id）",
+                        self.platform_id,
+                        self_id or "（空）",
+                    )
+                return
+
+            try:
+                status = _normalize_object(
+                    await _call_action(client, "get_status", timeout=5)
+                )
+                if "online" in status:
+                    online = bool(status.get("online"))
+                else:
+                    online = True
+            except Exception as exc:
+                # Distinguish "nothing is connected" from "we cannot tell".
+                # aiocqhttp raises ApiNotAvailable when no reverse-WS client is
+                # registered: that is a confirmed offline bot, not an unknown
+                # state. A timeout or a closed socket stays unknown so a
+                # restarting NapCat does not raise a false alarm.
+                name = exc.__class__.__name__
+                if name in ("ApiNotAvailable", "InvalidURL"):
+                    online = False
+                elif name == "ActionFailed":
+                    online = True
+                else:
+                    online = None
+                logger.debug("OneBot get_status 调用失败（%s）: %s", name, exc)
 
         alerts = self.state.setdefault("alerts", {})
         if not isinstance(alerts, dict):

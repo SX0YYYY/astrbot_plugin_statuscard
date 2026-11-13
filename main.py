@@ -39,6 +39,13 @@ from .i18n import tr
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
 from .page_api import PageApi
+from .platform_support import (
+    adapter_running,
+    astrbot_data_db,
+    find_official_adapter,
+    is_official_platform,
+    known_group_session_ids,
+)
 from .redactor import Redactor, read_rules
 from .report import DailyReporter, ReportCollector
 from .report_store import ReportStore
@@ -144,6 +151,10 @@ class StatusCardPlugin(Star):
         # event loop on an unreachable NFS host (v2.20.0).
         self._audit_issues: list[AuditIssue] = []
         self._audit_failed = False
+        # AstrBot initialises platform adapters after plugins, so the first
+        # audit cannot see the instance table. One delayed pass closes that
+        # gap (v2.21.0 audit).
+        self._audit_task: asyncio.Task[None] | None = None
         self._check_config_permissions()
 
     def audit_issues(self) -> list[AuditIssue]:
@@ -286,7 +297,12 @@ class StatusCardPlugin(Star):
             # plugin looked loaded while every background task stayed off
             # (same symptom as the v2.20.3 state-shape crash). v2.20.5.
             self._audit_issues = await asyncio.wait_for(
-                asyncio.to_thread(run_audit, self.config, monitor=self.monitor),
+                asyncio.to_thread(
+                    run_audit,
+                    self.config,
+                    monitor=self.monitor,
+                    platform_instances=self._platform_instances(),
+                ),
                 timeout=15,
             )
         except TimeoutError:
@@ -316,6 +332,24 @@ class StatusCardPlugin(Star):
                 start()
             except Exception:
                 logger.exception("%s 启动失败，已跳过（其余功能继续运行）", name)
+        self._log_audit_issues()
+        if self._audit_task is None or self._audit_task.done():
+            try:
+                self._audit_task = asyncio.create_task(
+                    self._refresh_audit_after_platforms()
+                )
+            except Exception as exc:
+                logger.debug("延迟配置体检任务创建失败: %s", exc)
+        logger.info(
+            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, "
+            "monitors_enabled=%s, daily_report_enabled=%s)",
+            self.data_dir,
+            cfg_bool(self.config, "alerts.enabled", False),
+            cfg_bool(self.config, "monitors.enabled", False),
+            cfg_bool(self.config, "daily_report.enabled", False),
+        )
+
+    def _log_audit_issues(self) -> None:
         if self._audit_issues:
             for issue in self._audit_issues:
                 if issue.level == "error":
@@ -331,16 +365,38 @@ class StatusCardPlugin(Star):
             logger.warning("配置体检未完成（执行失败或超时），本次未检查配置")
         else:
             logger.info("配置体检：未发现问题")
-        logger.info(
-            "StatusCard plugin initialized (data_dir=%s, alerts_enabled=%s, "
-            "monitors_enabled=%s, daily_report_enabled=%s)",
-            self.data_dir,
-            cfg_bool(self.config, "alerts.enabled", False),
-            cfg_bool(self.config, "monitors.enabled", False),
-            cfg_bool(self.config, "daily_report.enabled", False),
-        )
+
+    async def _refresh_audit_after_platforms(self) -> None:
+        """Re-run the audit once platform adapters exist.
+
+        ``initialize()`` runs before AstrBot creates platform instances, so
+        the first audit sees an empty instance table and cannot flag a stale
+        ``alerts.platform_id``. One delayed pass covers the common "switched
+        bot, every scheduled push fails" case (v2.21.0 audit).
+        """
+
+        try:
+            await asyncio.sleep(60)
+            issues = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_audit,
+                    self.config,
+                    monitor=self.monitor,
+                    platform_instances=self._platform_instances(),
+                ),
+                timeout=15,
+            )
+            self._audit_issues = issues
+            self._audit_failed = False
+            self._log_audit_issues()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("延迟配置体检失败: %s", exc)
 
     async def terminate(self):
+        if self._audit_task is not None and not self._audit_task.done():
+            self._audit_task.cancel()
         # Isolate each stop: one component raising used to skip every cleanup
         # after it (tasks kept running against a half-unloaded plugin).
         for name, stop in (
@@ -365,10 +421,18 @@ class StatusCardPlugin(Star):
     # status card
     # ------------------------------------------------------------------
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("查看状态")
     async def cmd_status(self, event: AstrMessageEvent):
         """生成并发送当前设备的系统状态图片。"""
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         # Only ``should_call_llm(True)`` here -- never ``stop_event()``.
         #
         # ``stop_event()`` sets ``_force_stopped`` on the event, and
@@ -809,8 +873,78 @@ class StatusCardPlugin(Star):
         return max(650, min(1600, round(render_width / 1.8)))
 
     # ------------------------------------------------------------------
+    # operator check
+    # ------------------------------------------------------------------
+
+    def _is_operator(self, event: AstrMessageEvent) -> bool:
+        """Whether the sender may run the admin-only commands.
+
+        aiocqhttp keeps the original rule: only AstrBot admins pass. QQ
+        official senders are openids, and AstrBot 4.29.4 could leave an
+        openid present in ``admins_id`` unapplied at runtime (the event role
+        stayed "member" even after a restart). Relying on that alone would
+        lock the operator out of every command, so
+        ``access.official_admin_ids`` is an exact-match allowlist used only
+        on the official platform. The security boundary stays explicit.
+        """
+
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+        platform_name = ""
+        try:
+            platform_name = str(event.get_platform_name() or "")
+        except Exception:
+            pass
+        if not is_official_platform(platform_name):
+            return False
+        allowed = cfg_get(self.config, "access.official_admin_ids", []) or []
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        sender = ""
+        try:
+            sender = str(event.get_sender_id() or "")
+        except Exception:
+            pass
+        wanted = {str(item).strip() for item in allowed if str(item).strip()}
+        return bool(sender) and sender in wanted
+
+    # ------------------------------------------------------------------
     # text / image helpers used by the alert engine
     # ------------------------------------------------------------------
+
+    def _platform_instances(self) -> dict[str, str]:
+        """Live platform instance id -> adapter name, used by the config audit."""
+
+        out: dict[str, str] = {}
+        try:
+            manager = getattr(self.context, "platform_manager", None)
+            if manager is None:
+                return out
+            insts = (
+                manager.get_insts()
+                if hasattr(manager, "get_insts")
+                else getattr(manager, "platform_insts", [])
+            )
+            for inst in insts or []:
+                try:
+                    meta = (
+                        inst.meta()
+                        if callable(getattr(inst, "meta", None))
+                        else getattr(inst, "meta", None)
+                    )
+                except Exception as exc:
+                    logger.debug("读取平台元数据失败: %s", exc)
+                    continue
+                inst_id = str(getattr(meta, "id", "") or "")
+                name = str(getattr(meta, "name", "") or "")
+                if inst_id:
+                    out[inst_id] = name
+        except Exception as exc:
+            logger.debug("枚举平台实例失败: %s", exc)
+        return out
 
     def _delivery_service(self) -> DeliveryService:
         """The service that pushes messages to a chat."""
@@ -925,11 +1059,19 @@ class StatusCardPlugin(Star):
     # admin diagnostics
     # ------------------------------------------------------------------
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("测试通知")
     async def cmd_alert_test(self, event: AstrMessageEvent):
         """发送一条测试通知到当前会话与实际推送目标，验证投递链路。"""
 
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
@@ -968,11 +1110,19 @@ class StatusCardPlugin(Star):
             message = tr(self.config, "test_failed")
         yield event.plain_result(message)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("立即检测")
     async def cmd_monitor_test(self, event: AstrMessageEvent):
         """立即探测全部服务监测项，不影响告警状态。"""
 
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
@@ -1083,10 +1233,18 @@ class StatusCardPlugin(Star):
             text = str(getattr(issue, "message", "") or "")
         return redactor.mask_address_tokens(text)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("状态卡诊断")
     async def cmd_diag(self, event: AstrMessageEvent):
         """Return a compact diagnostic summary without rendering an image."""
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         event.should_call_llm(True)
         # No ``stop_event()`` here: it would make the framework skip the
         # result chain, so this command's reply would never be sent
@@ -1107,37 +1265,103 @@ class StatusCardPlugin(Star):
             if platform and not is_supported_platform(platform):
                 lines.append(tr(self.config, "diag_platform_hint"))
 
-            platform_id = str(
+            configured_platform_id = str(
                 cfg_get(self.config, "alerts.platform_id", "default") or "default"
             )
-            client = _get_aiocqhttp_client(self.context, platform_id)
-            if client is None:
-                lines.append(tr(self.config, "diag_onebot_missing"))
-                if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
-                    self.config, "alerts.offline_notify", True
-                ):
-                    lines.append(tr(self.config, "diag_offline_alert_no_conn"))
-            else:
+            event_platform_id = ""
+            try:
+                event_platform_id = str(event.get_platform_id() or "")
+            except Exception:
+                event_platform_id = ""
+            platform_id = event_platform_id or configured_platform_id
+            if is_official_platform(platform):
+                lines.append(
+                    tr(self.config, "diag_platform_id", platform_id=platform_id)
+                )
+                # Prefer the instance that delivered this event: with two
+                # platforms configured, alerts.platform_id may still point at
+                # the old OneBot instance (v2.21.0 audit).
+                adapter = find_official_adapter(
+                    self.context, event_platform_id or None
+                ) or find_official_adapter(self.context, configured_platform_id)
+                if adapter is None:
+                    lines.append(tr(self.config, "diag_official_missing"))
+                else:
+                    running = adapter_running(adapter)
+                    lines.append(
+                        tr(
+                            self.config,
+                            "diag_official_status",
+                            status=(
+                                "running"
+                                if running
+                                else "unknown"
+                                if running is None
+                                else "stopped"
+                            ),
+                        )
+                    )
+                sender = ""
                 try:
-                    status = _normalize_object(
-                        await _call_action(client, "get_status", timeout=3)
+                    sender = str(event.get_sender_id() or "")
+                except Exception:
+                    pass
+                if sender:
+                    # A group reply is visible to every member, so the full
+                    # openid is only printed in a private chat.
+                    shown_sender = (
+                        sender
+                        if getattr(event, "is_private_chat", lambda: False)()
+                        else sender[:8] + "…"
                     )
-                    online = status.get("online")
                     lines.append(
-                        tr(
-                            self.config,
-                            "diag_onebot_client",
-                            online="unknown" if online is None else str(online),
-                        )
+                        tr(self.config, "diag_official_sender", sender=shown_sender)
                     )
-                except Exception as exc:
-                    lines.append(
-                        tr(
-                            self.config,
-                            "diag_onebot_get_status_failed",
-                            error=exc.__class__.__name__,
+                # Full group ids are only printed in a private chat: the same
+                # reply in a group would show the openid to every member.
+                if getattr(event, "is_private_chat", lambda: False)():
+                    db_path = astrbot_data_db()
+                    if db_path is not None:
+                        group_ids = await asyncio.to_thread(
+                            known_group_session_ids, db_path, platform_id
                         )
-                    )
+                        for group_id in group_ids[:5]:
+                            lines.append(
+                                tr(
+                                    self.config,
+                                    "diag_official_group",
+                                    umo=f"{platform_id}:GroupMessage:{group_id}",
+                                )
+                            )
+            else:
+                client = _get_aiocqhttp_client(self.context, platform_id)
+                if client is None:
+                    lines.append(tr(self.config, "diag_onebot_missing"))
+                    if cfg_bool(self.config, "alerts.enabled", False) and cfg_bool(
+                        self.config, "alerts.offline_notify", True
+                    ):
+                        lines.append(tr(self.config, "diag_offline_alert_no_conn"))
+                else:
+                    try:
+                        status = _normalize_object(
+                            await _call_action(client, "get_status", timeout=3)
+                        )
+                        online = status.get("online")
+                        lines.append(
+                            tr(
+                                self.config,
+                                "diag_onebot_client",
+                                online="unknown" if online is None else str(online),
+                            )
+                        )
+                    except Exception as exc:
+                        lines.append(
+                            tr(
+                                self.config,
+                                "diag_onebot_get_status_failed",
+                                error=exc.__class__.__name__,
+                            )
+                        )
 
             # Report the targets the alert engine will actually use: a
             # notification-center rule overrides alerts.targets per kind, so
@@ -1499,7 +1723,7 @@ class StatusCardPlugin(Star):
             lines.append(tr(self.config, "diag_error", error=exc.__class__.__name__))
         yield event.plain_result("\n".join(lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("预览日报")
     async def cmd_preview_report(self, event: AstrMessageEvent):
         """Build and send yesterday's daily report to the current chat.
@@ -1507,6 +1731,14 @@ class StatusCardPlugin(Star):
         Accepts an optional ``YYYY-MM-DD`` to re-send an older report (for
         example one that was never delivered while the bot was offline).
         """
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         event.should_call_llm(True)
         # No ``stop_event()`` before the first yield: it would make the
         # framework skip the result chain, so this command's reply would
@@ -1582,10 +1814,18 @@ class StatusCardPlugin(Star):
         # nothing. The calls that broke issue #1 sat BEFORE the first yield.
         event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("预览周报")
     async def cmd_preview_weekly(self, event: AstrMessageEvent):
         """Build and send the last-7-days weekly report to the current chat."""
+        if not self._is_operator(event):
+            # The MEMBER filter already let the event through, so without
+            # this flag the refusal text would also trigger a default LLM
+            # answer (v2.21.0 reverse audit). Never stop_event() here: it
+            # would drop the refusal from the result chain (issue #1).
+            event.should_call_llm(True)
+            yield event.plain_result(tr(self.config, "admin_only"))
+            return
         event.should_call_llm(True)
         # No ``stop_event()`` before the first yield: it would make the
         # framework skip the result chain, so this command's reply would

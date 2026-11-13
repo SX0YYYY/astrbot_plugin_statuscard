@@ -84,6 +84,9 @@ def _install_command_layer_stubs() -> None:
 
         class _PermissionType:
             ADMIN = "ADMIN"
+            MEMBER = "MEMBER"
+            GROUP_ADMIN = "GROUP_ADMIN"
+            SHARED_GROUP_ADMIN = "SHARED_GROUP_ADMIN"
 
         _perm_type = _PermissionType
 

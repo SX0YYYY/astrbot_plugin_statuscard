@@ -30,6 +30,7 @@ from .collectors import (
 )
 from .delivery import DeliveryResult
 from .i18n import tr
+from .platform_support import is_official_platform
 from .report_store import ReportStore
 from .report_view import (
     DEFAULT_SECTIONS,
@@ -478,16 +479,30 @@ class ReportCollector:
         friends = bot.get("friends")
         groups = bot.get("groups")
         members = bot.get("members")
+        official = is_official_platform(str(bot.get("platform_name") or ""))
         if friends == 0 and groups == 0 and members == 0:
             # get_friend_list/get_group_list answering with an empty payload
-            # yields 0 rather than None. Storing that pair locked the day's
+            # yields 0 rather than None. Storing that triple locked the day's
             # snapshot at 0/0/0 (``complete=1`` stopped the retries and the
             # UPSERT kept the zeros), so the report showed no friends/groups
             # for a day that actually had them (v2.20.8). Treat all-zero as
             # "not collected yet" and retry; a bot with genuinely zero of
             # all three is not a real deployment.
             friends = groups = members = None
-        complete = all(value is not None for value in (friends, groups, members))
+        if official:
+            # The official bot has no friend list at all: friends is None by
+            # design and must not keep the snapshot incomplete forever.
+            if groups == 0 and members == 0:
+                groups = members = None
+            complete = all(value is not None for value in (groups, members))
+            if not complete and attempts >= 12:
+                # AstrBot 4.26/4.27 has neither umo_senders nor the
+                # group-info helper, so these values can never arrive. Freeze
+                # the snapshot after an hour instead of retrying all day
+                # (288 times) and warning every 30 minutes.
+                complete = True
+        else:
+            complete = all(value is not None for value in (friends, groups, members))
         await asyncio.to_thread(
             self.store.record_snapshot,
             day,

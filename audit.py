@@ -24,6 +24,7 @@ from .collectors import (
     resolve_targets,
 )
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
+from .platform_support import is_official_platform
 from .redactor import RULES as REDACT_RULES
 from .utils import mask_chat_ids, normalize_targets, redact_url
 
@@ -175,11 +176,20 @@ def _monitor_unsupported_types(config: Any) -> list[dict[str, str]]:
     return problems
 
 
-def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
+def run_audit(
+    config: Any,
+    *,
+    monitor: Any = None,
+    platform_instances: dict[str, str] | None = None,
+) -> list[AuditIssue]:
     """Collect configuration findings; called once at plugin start-up.
 
     ``monitor`` (if given) supplies the already-normalized items so the
     audit and the probe loop cannot disagree about what is broken.
+    ``platform_instances`` maps live AstrBot platform ids to adapter names; a
+    mismatch with ``alerts.platform_id`` makes every scheduled push fail with
+    "no matching platform" (the usual state after switching from NapOneBot to
+    the QQ official bot), so it is reported here.
     """
 
     issues: list[AuditIssue] = []
@@ -827,8 +837,10 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                     )
                 )
     # A mistyped target is the most common "alerts never arrive" cause and
-    # previously only produced a runtime log line.
-    target_pattern = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z]+:[^:\s]+$")
+    # previously only produced a runtime log line. The prefix may be any
+    # non-space text: QQ official instances are often named in Chinese
+    # (e.g. 小辞), and the old ASCII-only pattern flagged them as suspicious.
+    target_pattern = re.compile(r"^[^:\s]+:[A-Za-z]+:[^:\s]+$")
     # Notification-center rules are the recommended way to route since
     # v2.18.0, and a wrong target there is exactly where a per-group setup
     # goes wrong -- so their targets run through the same sanity check.
@@ -866,4 +878,79 @@ def run_audit(config: Any, *, monitor: Any = None) -> list[AuditIssue]:
                 {"label": label, "target": _safe_label(text)},
             )
         )
+    # Platform-instance mismatch: the first UMO segment must equal a live
+    # platform id. Switching from aiocqhttp to the QQ official bot leaves the
+    # old ``default`` targets in place, and every scheduled push then fails
+    # with "no matching platform" (2026-11-13 实测：每日定时状态图发送失败).
+    # Only warn when a push is actually configured: a user who only runs the
+    # status-card command does not care about a stale alert platform id.
+    push_enabled = alerts_on or monitors_on or daily_on or weekly_on
+    if platform_instances and push_enabled:
+        if platform_id and platform_id not in platform_instances:
+            instances = ", ".join(sorted(platform_instances))
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "platform_id_mismatch",
+                    f"「告警平台 ID」当前为 {platform_id}，但 AstrBot 中没有这个平台实例"
+                    f"（现有：{instances}）。定时状态卡、日报与告警会因找不到平台而发送失败。",
+                    {
+                        "platform_id": platform_id,
+                        "instances": sorted(platform_instances),
+                    },
+                )
+            )
+        official_ids = {
+            inst_id
+            for inst_id, name in platform_instances.items()
+            if is_official_platform(name)
+        }
+        numeric_hint = (
+            "OneBot 群号；QQ 官方机器人的群 ID 是 openid，请在「状态卡诊断」里"
+            "查看已知群并改用完整 UMO。"
+        )
+        for text, label in rule_targets:
+            if not text:
+                continue
+            if ":" not in text:
+                # A bare number is the documented way to target a group on
+                # OneBot; on the official bot it is silently turned into
+                # ``<instance>:GroupMessage:<number>`` and can never match a
+                # group openid. This is the most common migration leftover.
+                if text.isdigit() and official_ids:
+                    issues.append(
+                        AuditIssue(
+                            "warning",
+                            "official_group_id_numeric",
+                            f"{label}「{_safe_label(text)}」是{numeric_hint}",
+                            {"label": label, "target": _safe_label(text)},
+                        )
+                    )
+                continue
+            segments = text.split(":")
+            if len(segments) != 3:
+                continue
+            prefix = segments[0]
+            if prefix not in platform_instances:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "target_platform_missing",
+                        f"{label}「{_safe_label(text)}」的平台前缀 {prefix} "
+                        "不是当前运行的平台实例，发送会提示「未找到匹配平台」。",
+                        {"label": label, "target": _safe_label(text)},
+                    )
+                )
+                continue
+            tail = text.rsplit(":", 1)[-1]
+            if prefix in official_ids and "GroupMessage" in text and tail.isdigit():
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "official_group_id_numeric",
+                        f"{label}「{_safe_label(text)}」是{numeric_hint}"
+                        "（若这是 QQ 频道目标可忽略本条）。",
+                        {"label": label, "target": _safe_label(text)},
+                    )
+                )
     return issues

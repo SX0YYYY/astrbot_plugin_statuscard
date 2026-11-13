@@ -17,20 +17,20 @@
       <div class="badge-row">
         <span class="badge badge-blue">AstrBot {{ v.bot.astrbot_version }}</span>
         {% if v.bot.protocol_name %}
-        <span class="badge badge-purple">{{ v.bot.protocol_name }} {{ v.bot.protocol_version }}</span>
+        <span class="badge badge-purple">{{ v.bot.protocol_name }}{% if v.bot.protocol_version %} {{ v.bot.protocol_version }}{% endif %}</span>
         {% endif %}
       </div>
       <div class="runtime-line">🕐 Bot已运行 <b>{{ v.bot.run_time }}</b><span class="dot">·</span>{{ v.bot.online_text }}</div>
       <div class="stat-chips">
         <span class="chip">👥 {{ num(v.bot.friends) }} 好友</span>
-        <span class="chip">💬 {{ num(v.bot.groups) }} 群聊</span>
+        <span class="chip">💬 {{ num(v.bot.groups) }} {% if v.bot.official_platform %}已知群{% else %}群聊{% endif %}</span>
         <span class="chip">🧑 {{ num(v.bot.members) }} 群员</span>
         <span class="chip chip-recv">📥 {{ num(v.bot.recv) }} 收</span>
         <span class="chip chip-sent">📤 {{ num(v.bot.sent) }} 发</span>
       </div>
     </div>
   </div>
-  <div class="scope-note">统计口径：收 = {{ v.bot.recv_scope }} · 发 = {{ v.bot.sent_scope }} · 累计流量按本次开机以来，月流量按自然月累计（重启保留），每月 1 日重置</div>
+  <div class="scope-note">统计口径：收 = {{ v.bot.recv_scope }} · 发 = {{ v.bot.sent_scope }} · 累计流量按本次开机以来，月流量按自然月累计（重启保留），每月 1 日重置{% if v.bot.official_platform %} · 官方机器人无好友/群列表：群聊为已知群，群员为已知群之和{% endif %}</div>
 </div>
 {% endmacro %}
 

@@ -1,4 +1,20 @@
 {
+  "access": {
+    "description": "访问控制",
+    "type": "object",
+    "hint": "管理命令的额外权限来源。AstrBot 管理员始终可用；这里只补充 QQ 官方机器人场景。",
+    "items": {
+      "official_admin_ids": {
+        "description": "官方机器人管理员 openid",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "hint": "仅对 QQ 官方机器人（qq_official / qq_official_webhook）生效：把发送者 openid 完整填入后，该发送者可使用「查看状态」「状态卡诊断」「预览日报」等管理命令。发送者 ID 可在「状态卡诊断」输出里看到。留空则只认 AstrBot 管理员（admins_id）。"
+      }
+    }
+  },
   "display": {
     "description": "状态卡显示",
     "type": "object",

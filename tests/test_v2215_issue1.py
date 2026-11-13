@@ -218,6 +218,12 @@ class _Event:
         # the "forbid the default LLM" flag passed by the commands.
         self.call_llm = False
         self.stopped_calls = 0
+        # Commands are admin-only; play the operator so the handler reaches
+        # the send path this test covers.
+        self.role = "admin"
+
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
     def set_result(self, result):
         self._result = result

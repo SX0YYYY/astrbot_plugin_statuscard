@@ -20,6 +20,7 @@ from .collectors import (
     get_timezone,
     now_in_timezone,
 )
+from .platform_support import send_stats_platform_ids
 from .provider_quality import (
     aggregate as aggregate_provider_rows,
 )
@@ -1974,20 +1975,30 @@ class DailyReportBuilder:
         if connection is None:
             return {}, None, False
         try:
+            # AstrBot writes the adapter name into platform_id and leaves
+            # platform_type as "unknown" (4.29.4). The old SQL only accepted
+            # aiocqhttp, so a QQ official bot reported zero sends.
+            stats_ids = send_stats_platform_ids()
+            marks = ",".join("?" for _ in stats_ids)
+            platform_clause = (
+                f"(platform_id IN ({marks}) OR platform_type IN ({marks}))"
+            )
+            stats_params = tuple(stats_ids) + tuple(stats_ids)
             server_offset = datetime.now().astimezone().utcoffset()
             tz_offset = datetime.now(self.tz).utcoffset()
             if server_offset == tz_offset:
                 # Same offset: grouping by the timestamp text is exact and
                 # keeps the primary-key index usable.
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT substr(timestamp, 1, 10) AS day, SUM(count)
                     FROM platform_stats
-                    WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
+                    WHERE {platform_clause}
                       AND timestamp >= ? AND timestamp < ?
                     GROUP BY day
                     """,
-                    (
+                    stats_params
+                    + (
                         f"{start_day.isoformat()} 00:00:00",
                         f"{(end_day + timedelta(days=1)).isoformat()} 00:00:00",
                     ),
@@ -1999,12 +2010,13 @@ class DailyReportBuilder:
                 # display.timezone. When the two offsets differ the day
                 # boundary was hours off, so re-bucket here instead.
                 raw = connection.execute(
-                    """
+                    f"""
                     SELECT timestamp, count FROM platform_stats
-                    WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
+                    WHERE {platform_clause}
                       AND timestamp >= ? AND timestamp < ?
                     """,
-                    (
+                    stats_params
+                    + (
                         f"{(start_day - timedelta(days=1)).isoformat()} 00:00:00",
                         f"{(end_day + timedelta(days=2)).isoformat()} 00:00:00",
                     ),
@@ -2019,11 +2031,12 @@ class DailyReportBuilder:
                     if start_day.isoformat() <= key <= end_day.isoformat():
                         mapping[key] = mapping.get(key, 0) + int(count or 0)
             min_row = connection.execute(
-                """
+                f"""
                 SELECT MIN(timestamp)
                 FROM platform_stats
-                WHERE (platform_id = 'aiocqhttp' OR platform_type = 'aiocqhttp')
-                """
+                WHERE {platform_clause}
+                """,
+                stats_params,
             ).fetchone()
         except Exception:
             return {}, None, False

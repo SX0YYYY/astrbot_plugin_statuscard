@@ -144,15 +144,17 @@ def system_name() -> str:
 
 
 def is_supported_platform(name: object) -> bool:
-    """Only QQ/OneBot (aiocqhttp) has the data the status card needs.
+    """Whether the status card can collect enough data on this platform.
 
-    An empty name is allowed so tests and internal callers without a platform
-    context can still render a degraded card; a named non-aiocqhttp platform is
-    rejected explicitly.
+    Empty is allowed so tests and internal callers without a platform context
+    can still render a degraded card. ``aiocqhttp`` and the QQ official bot
+    (``qq_official`` / ``qq_official_webhook``) are supported; the detailed
+    platform rules live in ``platform_support``.
     """
 
-    text = str(name or "").strip().lower()
-    return not text or text == "aiocqhttp"
+    from .platform_support import is_supported_platform as _is_supported
+
+    return _is_supported(name)
 
 
 RETRY_DELAYS = (30.0, 120.0, 600.0)
@@ -339,7 +341,19 @@ def mask_umo(target: object) -> str:
 
     text = str(target or "")
     head, _, tail = text.rpartition(":")
+    # Official-bot openids are 32-char hex strings. Detect that shape
+    # specifically: a short alphabetic tail is a word in an error message
+    # ("abc"), and the v2.19.0 rule deliberately left those alone.
+    hex_openid = (
+        len(tail) >= 16
+        and any(ch.isalpha() for ch in tail)
+        and all(ch in "0123456789abcdefABCDEF" for ch in tail)
+    )
     digits = "".join(ch for ch in tail if ch.isdigit())
+    if hex_openid:
+        keep = 4
+        masked_opaque = "*" * (len(tail) - keep) + tail[-keep:]
+        return f"{head}:{masked_opaque}" if head else masked_opaque
     # Short IDs used to pass through untouched, which leaked the UMO the
     # callers promise never to expose; mask anything digit-bearing.
     if not digits:
@@ -368,8 +382,21 @@ def mask_chat_ids(text: str) -> str:
         keep = min(2, len(digits) - 1)
         return "*" * (len(digits) - keep) + digits[len(digits) - keep :]
 
+    def _mask_opaque(match: re.Match[str]) -> str:
+        value = match.group(0)
+        if value.isdigit():
+            # Pure digits are handled by the digit rule below at its original
+            # strength (keep 2, not 4); do not weaken it here.
+            return value
+        keep = min(4, len(value) - 1)
+        return "*" * (len(value) - keep) + value[len(value) - keep :]
+
+    # Official-bot openids are 32-char uppercase hex strings; the digit rule
+    # below would leave the letters readable and still leak the chat. Mask
+    # them first, before the digit rule chews their numeric segments.
+    text = re.sub(r"\b[0-9A-F]{16,}\b", _mask_opaque, str(text or ""))
     # 5 digits too: early QQ accounts (10000-99999) are real chat ids and
     # slipped through the old 6-digit floor (v2.20.32). This is a redaction
     # helper -- over-masking a bare 5-digit number in an error string is
     # cheaper than leaking an id.
-    return re.sub(r"\d{5,}", _mask, str(text or ""))
+    return re.sub(r"\d{5,}", _mask, text)

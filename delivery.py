@@ -24,6 +24,8 @@ from typing import Any
 from astrbot.api import logger
 
 from .onebot_receipt import is_action_rejected, send_direct, should_retry_send
+from .platform_support import ensure_group_scene, find_adapter, parse_umo
+from .utils import mask_umo
 
 # Failures that happen before the request can reach the platform: a broken
 # message chain (Comp.Image on a missing file), a framework signature change,
@@ -223,6 +225,11 @@ class DeliveryService:
         result = DeliveryResult()
         offline_hits = False
         for target in targets:
+            primed, prime_error = self._prime_official_target(target)
+            if not primed:
+                logger.warning("目标 %s：%s，跳过发送", mask_umo(target), prime_error)
+                result.failed_targets.append(target)
+                continue
             receipt = None
             if direct_ok:
                 receipt = await send_direct(
@@ -301,6 +308,30 @@ class DeliveryService:
         result.transport_offline = offline_hits and not result.ok
         self.record(kind, targets, result, source=source)
         return result
+
+    def _prime_official_target(self, target: str) -> tuple[bool, str]:
+        """Prime the official adapter's group scene cache before sending.
+
+        AstrBot's official adapter drops a group send when its in-memory scene
+        map has no entry -- the normal state right after a restart, before
+        that group posts again -- and reports success anyway. Priming the
+        cache keeps a scheduled report from being silently lost. Non-official
+        platforms and unknown targets pass through unchanged.
+        """
+
+        parsed = parse_umo(target)
+        if parsed is None:
+            return True, ""
+        platform_id = parsed[0]
+        adapter = find_adapter(self.context, None, platform_id)
+        if adapter is None:
+            # No live instance for this UMO prefix: let the framework report
+            # "no matching platform" instead of hiding a configuration bug.
+            return True, ""
+        ok, _failed = ensure_group_scene(adapter, [target])
+        if ok:
+            return True, ""
+        return False, "官方机器人场景缓存注入失败（目标可能不是群 UMO）"
 
     async def _send_via_astrbot(
         self, target: str, payload: dict[str, Any]

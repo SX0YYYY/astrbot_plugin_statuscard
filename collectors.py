@@ -28,6 +28,16 @@ import psutil
 from astrbot.api import logger
 
 from .bg_provider import shrink_image_bytes
+from .platform_support import (
+    adapter_platform_name,
+    adapter_running,
+    astrbot_data_db,
+    find_adapter,
+    find_official_adapter,
+    group_member_total,
+    is_official_platform,
+    known_group_session_ids,
+)
 from .redactor import Redactor, read_rules
 from .utils import (
     CpuFreq,
@@ -1295,6 +1305,12 @@ async def _call_action(client: Any, action: str, timeout: float = 5.0) -> Any:
     return await asyncio.wait_for(client.call_action(action), timeout=timeout)
 
 
+def _astrbot_data_db() -> Path | None:
+    """Read-only path to AstrBot's data_v4.db, or None when unavailable."""
+
+    return astrbot_data_db()
+
+
 def query_sent_total() -> int | None:
     """Return the lifetime outgoing message count from platform_stats.
 
@@ -1383,32 +1399,58 @@ async def collect_bot_info(
     def store(name: str, value: Any) -> None:
         cache[name] = (now, value)
 
-    client = _get_aiocqhttp_client(context, platform_id, self_id)
-    if client is None and platform_id:
-        # The scheduled status card has no event to carry the real platform
-        # id, so it falls back to alerts.platform_id. When the operator
-        # renamed the platform instance (e.g. "default" -> "qq1") that lookup
-        # misses and the Bot block rendered "--" while a manual card (which
-        # uses the event's id) showed the real numbers. Fall back to any
-        # aiocqhttp instance rather than leaving the block empty.
-        client = _get_aiocqhttp_client(context, None, self_id)
-    if client is None and self_id:
-        # The configured self_id is not connected (stale alert setting). A
-        # strict match then leaves the whole Bot block at "--"; fall back to
-        # the first instance on the platform and say so, so the operator can
-        # correct the value instead of staring at an empty card. The platform
-        # id may be stale too (renamed instance), so the last attempt drops
-        # both filters.
-        client = _get_aiocqhttp_client(context, platform_id, None)
-        if client is None:
-            client = _get_aiocqhttp_client(context, None, None)
-        if client is not None:
-            logger.warning(
-                "未找到 self_id=%s（platform_id=%s）的 aiocqhttp 客户端，"
-                "状态卡回退到同平台第一个实例",
-                self_id,
-                platform_id or "（空）",
-            )
+    platform_name = ""
+    try:
+        platform_name = (
+            str(event.get_platform_name() or "") if event is not None else ""
+        )
+    except Exception:
+        platform_name = ""
+    if not platform_name:
+        # The scheduled card and the daily snapshot have no event. Resolve
+        # the platform from the configured instance id instead of assuming
+        # OneBot, or an official-bot deployment would render no group data.
+        configured_adapter = find_adapter(context, None, platform_id)
+        platform_name = (
+            adapter_platform_name(configured_adapter)
+            if configured_adapter is not None
+            else ""
+        )
+    official_platform = is_official_platform(platform_name)
+    official_adapter = (
+        find_official_adapter(context, platform_id) if official_platform else None
+    )
+    client = (
+        None
+        if official_platform
+        else _get_aiocqhttp_client(context, platform_id, self_id)
+    )
+    if not official_platform:
+        if client is None and platform_id:
+            # The scheduled status card has no event to carry the real platform
+            # id, so it falls back to alerts.platform_id. When the operator
+            # renamed the platform instance (e.g. "default" -> "qq1") that lookup
+            # misses and the Bot block rendered "--" while a manual card (which
+            # uses the event's id) showed the real numbers. Fall back to any
+            # aiocqhttp instance rather than leaving the block empty.
+            client = _get_aiocqhttp_client(context, None, self_id)
+        if client is None and self_id:
+            # The configured self_id is not connected (stale alert setting). A
+            # strict match then leaves the whole Bot block at "--"; fall back to
+            # the first instance on the platform and say so, so the operator can
+            # correct the value instead of staring at an empty card. The platform
+            # id may be stale too (renamed instance), so the last attempt drops
+            # both filters.
+            client = _get_aiocqhttp_client(context, platform_id, None)
+            if client is None:
+                client = _get_aiocqhttp_client(context, None, None)
+            if client is not None:
+                logger.warning(
+                    "未找到 self_id=%s（platform_id=%s）的 aiocqhttp 客户端，"
+                    "状态卡回退到同平台第一个实例",
+                    self_id,
+                    platform_id or "（空）",
+                )
     data: dict[str, Any] = {
         "self_id": "",
         "nick": "",
@@ -1432,6 +1474,59 @@ async def collect_bot_info(
         ok, value = cached(field)
         if ok:
             data[field] = value
+
+    # QQ official bot: no OneBot client, no friend/group list API. Group
+    # count comes from the sessions AstrBot has seen, member count from the
+    # per-group info API. A group that never posted is invisible here, so the
+    # card labels the number as "known groups" instead of pretending it is
+    # the full list.
+    if official_platform:
+
+        async def fetch_official() -> None:
+            data["protocol_name"] = "QQ 官方机器人"
+            data["protocol_version"] = ""
+            store("protocol_name", data["protocol_name"])
+            store("protocol_version", "")
+            ok_online, _ = cached("online")
+            if not ok_online:
+                running = adapter_running(official_adapter)
+                data["online"] = running
+                store("online", running)
+            ok_groups, _ = cached("groups")
+            ok_members, _ = cached("members")
+            if ok_groups and ok_members:
+                return
+            ids: list[str] | None = None
+            if not ok_groups:
+                db_path = _astrbot_data_db()
+                ids = (
+                    await asyncio.to_thread(
+                        known_group_session_ids, db_path, platform_id
+                    )
+                    if db_path is not None
+                    else []
+                )
+                # An empty/failed DB read must not overwrite a still-useful
+                # value with None (the card would flip to "--" for 30s).
+                data["groups"] = len(ids) if ids else data.get("groups")
+                store("groups", data["groups"])
+            if not ok_members:
+                if ids is None:
+                    # groups is fresh; the API still needs the ids.
+                    db_path = _astrbot_data_db()
+                    ids = (
+                        await asyncio.to_thread(
+                            known_group_session_ids, db_path, platform_id
+                        )
+                        if db_path is not None
+                        else []
+                    )
+                data["members"] = (
+                    await group_member_total(official_adapter, ids) if ids else None
+                )
+                store("members", data["members"])
+
+        await fetch_official()
 
     if client is not None:
         # The five OneBot calls used to run serially, so a slow NapCat could
@@ -1559,8 +1654,15 @@ async def collect_bot_info(
     except Exception:
         event_adapter = ""
     bot["adapter"] = (
-        "aiocqhttp" if bot.get("has_client") else (event_adapter or "aiocqhttp")
+        "aiocqhttp"
+        if bot.get("has_client")
+        else (event_adapter or ("qq_official" if official_platform else "aiocqhttp"))
     )
+    # The card uses these to label the numbers honestly: the official bot has
+    # no friend/group list, so "群聊" is really "known groups" and friends are
+    # unavailable.
+    bot["platform_name"] = event_adapter or ("qq_official" if official_platform else "")
+    bot["official_platform"] = official_platform
 
     nick_cfg = cfg_get(config, "avatar.avatar_text", "")
     nick_cfg = nick_cfg.strip() if isinstance(nick_cfg, str) else ""

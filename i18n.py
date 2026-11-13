@@ -14,7 +14,13 @@ _INVALID_LANGUAGE_WARNED: set[str] = set()
 
 MESSAGES: dict[str, dict[str, str]] = {
     "zh-CN": {
-        "platform_unsupported": "当前平台不受支持：状态卡仅支持 QQ/OneBot（aiocqhttp）。",
+        "platform_unsupported": "当前平台不受支持：状态卡支持 OneBot（aiocqhttp）与 QQ 官方机器人（qq_official / qq_official_webhook）。",
+        "admin_only": "该命令仅限管理员使用。QQ 官方机器人请在插件配置的「访问控制 → 官方机器人管理员 openid」中填入你的发送者 ID。",
+        "diag_official_status": "QQ 官方机器人：{status}",
+        "diag_official_missing": "未找到 QQ 官方机器人适配器（请确认「告警平台 ID」与 AstrBot 平台实例 ID 一致）",
+        "diag_official_sender": "当前发送者 ID：{sender}（若要使用管理命令，请填入配置「访问控制 → 官方机器人管理员 openid」）",
+        "diag_official_group": "已知群（可填入「推送目标」）：{umo}",
+        "diag_platform_id": "平台实例 ID：{platform_id}",
         "generating": "状态卡正在生成，请稍候。",
         "cooldown": "状态卡冷却中，请 {seconds} 秒后再试。",
         "privacy_notice": "提示：状态图包含主机名/进程等信息，并会发送到 T2I 服务渲染。",
@@ -72,7 +78,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "summary_recv": "收发",
     },
     "en-US": {
-        "platform_unsupported": "Unsupported platform: the status card only supports QQ/OneBot (aiocqhttp).",
+        "platform_unsupported": "Unsupported platform: the status card supports OneBot (aiocqhttp) and the QQ official bot (qq_official / qq_official_webhook).",
+        "admin_only": "This command is admin-only. For the QQ official bot, add your sender id to “Access → Official bot admin openids” in the plugin settings.",
+        "diag_official_status": "QQ official bot: {status}",
+        "diag_official_missing": "QQ official adapter not found (check that “Alert platform id” matches the AstrBot platform instance id)",
+        "diag_official_sender": "Current sender id: {sender} (to use admin commands, add it to “Access → Official bot admin openids”)",
+        "diag_official_group": "Known group (usable as a push target): {umo}",
+        "diag_platform_id": "Platform instance id: {platform_id}",
         "generating": "The status card is being generated, please wait.",
         "cooldown": "Status card cooldown, try again in {seconds} seconds.",
         "privacy_notice": "Note: the status image includes the hostname/processes and is sent to the configured T2I service for rendering.",

@@ -1,8 +1,8 @@
-![Version](https://img.shields.io/badge/version-2.20.33-blue)
+![Version](https://img.shields.io/badge/version-2.21.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
-![Platform](https://img.shields.io/badge/platform-aiocqhttp-00A1D6)
+![Platform](https://img.shields.io/badge/platform-aiocqhttp%20%7C%20qq_official-00A1D6)
 
 # 服务器状态卡
 
@@ -10,7 +10,7 @@
 
 把服务器的 CPU、内存、磁盘、网络、进程做成一张状态图发到 QQ 群；需要时还能在资源过高、Bot 掉线或每天固定时间主动通知，并发送趋势日报与周报。
 
-> **适用范围**：仅支持 QQ / OneBot（aiocqhttp，推荐 NapCat）；所有命令仅 AstrBot 管理员可用；出图依赖 AstrBot 配置的 T2I 服务（把页面渲染成图片的远程服务，默认即可，不需要自建）。
+> **适用范围**：支持 QQ / OneBot（aiocqhttp，推荐 NapCat）与 QQ 官方机器人（qq_official / qq_official_webhook）；所有命令仅 AstrBot 管理员可用（官方机器人可另配 openid 白名单）；出图依赖 AstrBot 配置的 T2I 服务（把页面渲染成图片的远程服务，默认即可，不需要自建）。
 >
 > **默认就能用。** 安装并重载插件后，管理员发送 `查看状态` 即可出图；头像默认用 QQ 头像，背景默认用内置背景，不需要先配置任何东西。
 
@@ -87,9 +87,18 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM �
 
 ## 平台支持
 
-本插件面向 **QQ / OneBot（aiocqhttp，推荐 NapCat）**。
+本插件支持 **QQ / OneBot（aiocqhttp，推荐 NapCat）** 与 **QQ 官方机器人（qq_official / qq_official_webhook）**，按消息事件的平台自动识别，同一份配置可双平台共存。
 
-好友数、群聊数、群员数、Bot 头像、NapCat 版本等数据都依赖 OneBot 接口；Telegram、Discord、飞书、WebChat 等平台没有适配，`查看状态` 会直接提示“不支持”，不再生成缺数据的卡片。`状态卡诊断` 仍可在这些平台用于检查插件状态（仅管理员）。
+| | OneBot（aiocqhttp） | QQ 官方机器人 |
+|---|---|---|
+| 好友 / 群聊 / 群员 | 全部可用 | 好友 `--`；群聊 = **已知群**（AstrBot 见过的群）；群员 = 已知群人数之和 |
+| Bot 头像 / 昵称 | QQ 头像与昵称 | 需在配置里上传头像或填昵称；官方接口不提供 |
+| 协议徽章 | NapCat.Onebot 版本 | `QQ 官方机器人` |
+| 掉线/恢复告警 | OneBot `get_status` | 适配器状态（只能发现适配器崩溃/停止） |
+| 主动推送（日报/告警/定时图） | OneBot 直发 + 回执 | 框架发送，**无回执**；群发送前自动预热场景缓存 |
+| 命令权限 | 仅 AstrBot 管理员 | AstrBot 管理员，或配置 `访问控制 → 官方机器人管理员 openid` |
+
+官方机器人注意：**群数与群员需要 AstrBot 4.29.0 及以上**（4.26/4.27 没有群信息接口与 `umo_senders` 表，会显示 `--` 并跳过快照重试）；「已知群」按 AstrBot 见过的 `GroupMessage` 会话统计，**同一群只算一次，频道也会计入**；发送者 ID 是 **openid**（不是 QQ 号），群 ID 也是 openid。`推送目标` 要填 **完整 UMO**，例如 `Q官弗洛洛:GroupMessage:<群 openid>`；完整值可在**私聊**里发送 `状态卡诊断` 查看「已知群」。Telegram、Discord、飞书、WebChat 等平台没有适配，`查看状态` 会提示“不支持”；`状态卡诊断` 仍可用于检查插件状态（仅管理员）。
 
 ## 安装
 
@@ -206,8 +215,8 @@ AstrBot WebUI 插件页内嵌的「服务器状态看板」：概览（含 LLM �
 - **告警聚合窗口（秒）**：默认 120。第一项告警立即推送，窗口内集中出现的后续告警合并为一条汇总；设为 0 关闭聚合。
 - **掉线恢复全群广播**：默认关闭。开启后 Bot 恢复上线时向它加入的全部群广播一条含掉线时间、恢复时间与离线时长的通知；支持排除群列表、逐群间隔与群数上限（用于降低风控风险）。掉线期间无法发消息，广播只在恢复后发送一次。
 - **LLM 服务告警**：默认关闭。开启后按 AstrBot 的 provider_stats 记录监测 LLM 调用质量，连续失败达到阈值时推送、恢复后通知；失败 = 调用返回错误（计入成功率、累计连续失败），中断 = 调用被取消（aborted，不一定是人为中止，不计入失败、不进成功率、不打断连续链）。
-- **平台实例 ID**：多机器人时指定平台实例，默认 `default`。
-- **机器人 QQ 号（`alerts.self_id`）**：多机器人时进一步指定 QQ 号；留空表示按平台实例选择。掉线检测和卡片数据都会按这个组合选择客户端。
+- **平台实例 ID**：多机器人时指定平台实例，默认 `default`。切换机器人后必须改成当前实例 ID（QQ 官方机器人的实例 ID 常是中文名，如 `Q官弗洛洛`）；`状态卡诊断` 会显示实际 ID。
+- **机器人 QQ 号（`alerts.self_id`）**：多机器人时进一步指定 QQ 号；留空表示按平台实例选择。掉线检测和卡片数据都会按这个组合选择客户端（仅 OneBot 生效）。
 - **Komari Webhook**：见下方“接入 Komari Webhook”。
 
 > 只需要填写这一处；通知中心只用于分群，不填也能正常工作。
@@ -634,7 +643,13 @@ journalctl -u astrbot -n 100 --no-pager | grep -i statuscard
 
 ### 其他平台能用吗 / 为什么提示不受支持
 
-本插件只支持 QQ / OneBot（aiocqhttp）。其他平台发送 `查看状态` 会直接收到“当前平台不受支持”，不再生成缺数据的卡片；`状态卡诊断` 仍可用于检查插件状态（仅管理员）。
+本插件支持 QQ / OneBot（aiocqhttp）与 QQ 官方机器人（qq_official / qq_official_webhook）。其他平台发送 `查看状态` 会收到“当前平台不受支持”；`状态卡诊断` 仍可用于检查插件状态（仅管理员）。
+
+### QQ 官方机器人下命令没反应
+
+官方机器人的发送者是 openid，AstrBot 的 `admins_id` 未必能匹配。请私聊机器人发送 `状态卡诊断`（若命令被拒，先看日志里的 `sender=` 值），把该 openid 填入插件配置的 **访问控制 → 官方机器人管理员 openid**，或加入 AstrBot 的 `admins_id`。
+
+> 命令权限由插件内部控制（AstrBot 管理员，或官方 openid 白名单）；AstrBot WebUI 的「指令权限」覆盖（`alter_cmd`）对这些命令不生效。
 
 ### 网站延迟 / Top 进程为什么是空的
 

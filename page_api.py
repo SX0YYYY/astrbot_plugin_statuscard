@@ -39,6 +39,7 @@ from .collectors import (
     swap_stat,
 )
 from .i18n import tr
+from .platform_support import adapter_platform_name, find_adapter
 from .provider_quality import today_overview
 from .redactor import Redactor, read_rules
 from .report_view import DailyReportBuilder, detect_resource_gaps
@@ -424,9 +425,15 @@ class PageApi:
         }
 
     def _platform(self) -> str:
-        return str(
+        instance_id = str(
             cfg_get(self.plugin.config, "alerts.platform_id", "default") or "default"
         )
+        # Show the adapter type (qq_official / aiocqhttp) instead of the
+        # instance id: after switching bots the dashboard otherwise still
+        # said "default" while every push went through the official adapter.
+        adapter = find_adapter(self.plugin.context, None, instance_id)
+        name = adapter_platform_name(adapter) if adapter is not None else ""
+        return name or instance_id
 
     def _astrbot_version(self) -> str:
         try:

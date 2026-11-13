@@ -210,8 +210,10 @@ def test_sysinfo_cache_roundtrip(tmp_path: Path) -> None:
     assert _load_sysinfo_cache(None) == {}
 
 
-def test_supported_platform_only_aiocqhttp() -> None:
+def test_supported_platform_aiocqhttp_and_official_bot() -> None:
     assert is_supported_platform("aiocqhttp")
+    assert is_supported_platform("qq_official")
+    assert is_supported_platform("qq_official_webhook")
     assert is_supported_platform("")
     assert is_supported_platform(None)
     assert not is_supported_platform("webchat")
