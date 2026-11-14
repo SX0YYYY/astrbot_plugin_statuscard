@@ -3518,7 +3518,7 @@ class AlertEngine:
             logger.warning(
                 "每日定时状态图已启用，但推送目标为空（通知中心无 daily_image "
                 "规则，alerts.targets 也未填写），跳过发送；配置好目标后重载插件"
-                "即可当天补发"
+                "生效（当天已过发送时间且此前有发送记录时会立即补发）"
             )
             return True
         # Record the attempt before sending: if the process is reloaded right

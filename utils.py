@@ -30,7 +30,10 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # SQLite/JSON can hold an integer far beyond the float range (a
+        # hand-edited or externally written row); ``float()`` raises
+        # OverflowError for those, which used to abort a whole report.
         return default
 
 

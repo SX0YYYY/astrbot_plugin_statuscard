@@ -361,13 +361,24 @@ class AlertAggregator:
         total = len(pending)
         dropped = bucket.dropped_count
         lines = [f"⚠️ 告警汇总 · {total} 项异常", "──────────────"]
+        # A rule can enter the buffer twice in one window (alert -> recover ->
+        # alert again). Printing both entries produced two identical lines
+        # under a headline that said "3 项异常" while only two names were
+        # visible; group identical (label, reason) pairs and disclose the
+        # repeat count instead of looking like a duplicate/bug (v2.21.2
+        # audit). The headline keeps the raw entry count.
+        grouped: dict[tuple[str, str], int] = {}
         for item in pending[: self.max_items]:
             label, reason = item[0], item[1]
             # Fourth element (when present) is chat-facing only; the
             # callbacks still receive the raw label above.
             if len(item) >= 4 and item[3]:
                 label = item[3]
-            lines.append(f"• {label}: {reason}")
+            group_key = (str(label), str(reason))
+            grouped[group_key] = grouped.get(group_key, 0) + 1
+        for (label, reason), occurrences in grouped.items():
+            suffix = f"（{occurrences} 次）" if occurrences > 1 else ""
+            lines.append(f"• {label}: {reason}{suffix}")
         extra = total - self.max_items
         if extra > 0:
             lines.append(f"… 另有 {extra} 项未列出")

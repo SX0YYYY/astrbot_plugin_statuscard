@@ -234,7 +234,16 @@ class ServiceMonitor:
         # "the operator disabled this item" apart from "the entry is gone"
         # -- both drop the state key, but the event text differs
         # (2026-11-08 audit).
-        self._configured_items = list(cfg_get(config, "monitors.items", []) or [])
+        #
+        # A hand-edited scalar (``items: 1`` / ``true``) used to reach
+        # ``list()`` here and raise during StatusCardPlugin.__init__, so the
+        # whole plugin failed to load -- every command, the sampler, alerts
+        # and reports disappeared because of one malformed config value.
+        # ``_normalize_items`` already treats a non-list as empty; mirror it.
+        configured_raw = cfg_get(config, "monitors.items", [])
+        self._configured_items = (
+            configured_raw if isinstance(configured_raw, list) else []
+        )
         self._task: asyncio.Task | None = None
         self._running = False
         self._silence_warned = False

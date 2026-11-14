@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-2.21.1-blue)
+![Version](https://img.shields.io/badge/version-2.21.2-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.7%2C%3C5-6f42c1)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
@@ -423,7 +423,7 @@ Webhook 是一个 HTTP 接口，配置不当会让外部的人往你的 QQ 群�
 - **累计上传 / 累计下载**：直接取 `psutil.net_io_counters` 的计数，范围是**服务器本次开机以来**，重启清零。它和「本月流量」的窗口不同——本月流量跨重启累加，所以重启后「本月」可能大于「累计」，不是算错
 - **网络折线**：只出现在看板（资源趋势同源的 `report.db` 采样，间隔由 `daily_report.resource_sample_seconds` 决定）与 QQ 状态卡（`state.json` 最近 60 个采样点，间隔由 `display.sample_seconds` 决定，默认约 1 小时）；**日报/周报图片里没有网络折线**。看板在关闭「记录日报历史数据」或尚无采样时回退到这 60 个点并在图注中注明。曲线支持悬停查看具体数值
 - **网站延迟**：每 5 分钟探测一次“网站测试目标”，记录请求耗时和状态；可用率按响应状态码 **2xx/3xx** 统计（4xx/5xx 视为不可用，与“服务在应答但接口坏了”的实际含义一致），平均/峰值只统计成功请求
-- **Top 进程**：每 5 分钟记录 CPU 和内存各自的 Top 进程；日报按进程名聚合昨日采样峰值，同一程序的多进程会合并显示
+- **Top 进程**：每 5 分钟记录 CPU 和内存各自的 Top 进程；日报按进程名聚合昨日采样峰值，同一时刻的同名进程合并计算
 - **LLM 服务质量**：只读聚合 AstrBot 数据库 `data_v4.db` 的 `provider_stats` 表（插件不写入）；成功率 = 完成 / (完成 + 失败)，其中失败 = 调用返回错误；中断（aborted）= 调用被取消（不一定是人为中止），单列、不计入失败、不进成功率；延迟与首字延迟（TTFT）只统计成功调用；按会话分布只展示会话 ID 前 8 位
 
 ### 时间窗口：看板的「最近 24 小时」和日报的「昨日」不是一回事

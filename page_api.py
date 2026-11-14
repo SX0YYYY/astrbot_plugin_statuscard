@@ -1483,6 +1483,18 @@ class PageApi:
                 # this instead of the push moment so it matches the alert
                 # text; rows from <=2.20.29 carry null.
                 "started_ts": event.get("started_ts"),
+                # The moment this row should be positioned at on a timeline.
+                # An alert row describes a fault that began at ``started_ts``;
+                # a recovery row describes the moment it ended, which is its
+                # own ``ts``. Using ``started_ts`` for recovery rows too made a
+                # long outage's recovery appear at the same minute as its
+                # alert (and, when that start was older than neighbouring
+                # rows, visibly out of order in the events list).
+                "display_ts": (
+                    safe_int(event.get("ts"))
+                    if str(event.get("status") or "") == "recovery"
+                    else safe_int(event.get("started_ts") or event.get("ts"))
+                ),
             }
             for event in events
         ]
@@ -1498,6 +1510,12 @@ class PageApi:
             key = str(item.get("status") or "unknown")
             counts[key] = counts.get(key, 0) + 1
         page_size = 200
+        # Keep the API's historical push-time order for the newest 200 rows;
+        # the dashboard sorts the visible page by ``display_ts``. Sorting here
+        # instead made a still-cached OLD app.js (which shows ``started_ts``)
+        # render new-order rows with old timestamps and look shuffled during
+        # the deploy window (v2.21.2 reverse audit). Counts still cover the
+        # full capped query above.
         return jsonify(
             {
                 "ok": True,

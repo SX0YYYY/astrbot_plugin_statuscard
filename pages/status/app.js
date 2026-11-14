@@ -1825,7 +1825,20 @@
       );
       return;
     }
-    const items = data.items || [];
+    // The API keeps push-time order; sort the visible page by the moment
+    // each row describes (recovery = its own ts, alert = first failed
+    // probe). A still-cached older app.js ignores display_ts and keeps its
+    // old order, so the deploy transition never mixes new order with old
+    // timestamps.
+    const items = (data.items || []).slice().sort((a, b) => {
+      const at = Number(a.display_ts || a.started_ts || a.ts || 0);
+      const bt = Number(b.display_ts || b.started_ts || b.ts || 0);
+      if (bt !== at) return bt - at;
+      return (
+        Number(b.ts || 0) - Number(a.ts || 0) ||
+        Number(b.id || 0) - Number(a.id || 0)
+      );
+    });
     const counts = data.counts || {};
     const summary =
       ["alert", "recovery", "failed"]
@@ -1853,9 +1866,11 @@
               "</span>";
             return (
               '<div class="event"><div class="event-time">' +
-              // Alert rows carry the first failed probe; older rows (and
-              // recoveries) have no started_ts and keep showing their ts.
-              esc(formatDateTime(item.started_ts || item.ts)) +
+              // The API sends the moment this row describes: the first
+              // failed probe for an alert, the recovery moment for a
+              // recovery. Falling back to started_ts||ts keeps an older
+              // bridge usable.
+              esc(formatDateTime(item.display_ts || item.started_ts || item.ts)) +
               '</div><div class="event-main"><div class="event-title">' +
               badge +
               '<span class="event-name">' +

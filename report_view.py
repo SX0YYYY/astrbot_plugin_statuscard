@@ -99,6 +99,35 @@ def _fmt_num(value: Any) -> str:
         return "--"
 
 
+def _sample_day_text(ts: Any, tz: Any) -> str | None:
+    """Local day of a sample timestamp, or None when the row is corrupt.
+
+    ``report.db`` is a real SQLite file: a hand-edited or externally written
+    ``ts`` can be 10**18, for which ``datetime.fromtimestamp`` raises
+    OSError/OverflowError. The website/process sections did not guard it and
+    one such row aborted the whole report (v2.21.2 audit); the resource
+    section already had the same guard inline.
+    """
+
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _local_dt(ts: Any, tz: Any) -> datetime | None:
+    """Local datetime for a stored timestamp, or None when it is invalid."""
+
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
 def _fmt_seconds(value: Any) -> str:
     """Human seconds for latency/TTFT: ``--``, ``1.23s``, ``12.3s``, ``123s``."""
 
@@ -181,17 +210,31 @@ def _nice_ceil(value: float) -> float:
     base = value / (10**exp)
     for step in (1, 2, 5, 10):
         if base <= step:
-            return step * (10**exp)
-    return 10 ** (exp + 1)
+            # Return a float, not ``step * 10**exp``: a huge finite input
+            # (a hand-edited REAL column) made that int exceed the float
+            # range, and the next ``value / maximum`` raised OverflowError,
+            # taking the whole daily report down (v2.21.2 audit).
+            try:
+                result = float(step) * (10.0**exp)
+            except OverflowError:
+                return 1e308
+            return result if math.isfinite(result) else 1e308
+    return 1e308
 
 
 def _numeric(value: Any) -> float | None:
-    """Best-effort float for chart input; non-numeric values become gaps."""
+    """Best-effort float for chart input; non-numeric values become gaps.
+
+    ``OverflowError`` is real: SQLite is dynamically typed, so a corrupted
+    row can hold a 400-digit integer and ``float()`` raises. One such value
+    used to abort the whole report build (v2.21.2 audit).
+    """
 
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _line_chart(
@@ -234,6 +277,9 @@ def _line_chart(
         }
 
     maximum = float(y_max) if y_max is not None else _nice_ceil(max(values) * 1.15)
+    if not math.isfinite(maximum) or maximum <= 0:
+        # A caller-supplied 0/NaN must not divide by zero in ``xy``.
+        maximum = 1.0
     n = len(labels)
     denom = max(1, n - 1)
 
@@ -656,11 +702,14 @@ class DailyReportBuilder:
         rows = [
             row
             for row in self.store.list_resources(start_ts, limit=100000)
-            if int(row.get("ts") or 0) < end_ts
+            if safe_int(row.get("ts") or 0) < end_ts
         ]
         by_day: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
-            local = datetime.fromtimestamp(int(row["ts"]), self.tz)
+            local = _local_dt(row.get("ts"), self.tz)
+            if local is None:
+                # A corrupt timestamp must not take the whole report down.
+                continue
             by_day.setdefault(local.strftime("%Y-%m-%d"), []).append(row)
 
         first_day = min(by_day) if by_day else None
@@ -684,9 +733,7 @@ class DailyReportBuilder:
         if not rows:
             first_ts = self.store.first_resource_ts()
             if first_ts is not None:
-                first_day = datetime.fromtimestamp(first_ts, self.tz).strftime(
-                    "%Y-%m-%d"
-                )
+                first_day = _sample_day_text(first_ts, self.tz) or "--"
                 empty_reason = (
                     f"资源采样从 {first_day} 开始，暂无 {day.isoformat()} 数据"
                 )
@@ -703,10 +750,9 @@ class DailyReportBuilder:
             # report; keep the window value in that case.
             try:
                 first_ts = self.store.first_resource_ts()
-                if first_ts is not None:
-                    first_day = datetime.fromtimestamp(first_ts, self.tz).strftime(
-                        "%Y-%m-%d"
-                    )
+                parsed_first = _sample_day_text(first_ts, self.tz) if first_ts else None
+                if parsed_first:
+                    first_day = parsed_first
             except (OSError, OverflowError, ValueError):
                 pass
             if span == 1:
@@ -850,7 +896,19 @@ class DailyReportBuilder:
             y_formatter=lambda value: f"{value:.0f}%",
         )
         days_with_data = sum(1 for item in days if by_day.get(item.isoformat()))
-        if first_day and first_day > chart_start.isoformat():
+        retention_days = max(
+            7, min(365, cfg_int(self.config, "daily_report.retention_days", 30))
+        )
+        if retention_days < history_days:
+            # "仍在积累" is wrong here: older days are actively pruned every
+            # day, so the chart can never fill. Say so instead of implying
+            # that waiting will eventually produce a full trend (v2.21.2
+            # audit).
+            history_note = (
+                f"受保留期限制（{retention_days} 天），趋势图仅展示最近 "
+                f"{retention_days} 天；可在「日报 → 数据保留天数」调大。"
+            )
+        elif first_day and first_day > chart_start.isoformat():
             history_note = (
                 f"资源历史从 {first_day} 开始，{history_days} 天趋势仍在积累。"
             )
@@ -1257,9 +1315,13 @@ class DailyReportBuilder:
                             episode_of[(key, real_start)] = (real_start, stamp)
                             recovery_episode[(key, stamp)] = (real_start, stamp)
 
-        # Keys whose episode started inside the window and is still open; the
-        # unresolved count below reads this set.
-        episode_open: set[tuple[str, str, str, str]] = set()
+        # For an open in-window episode, the moment it actually began (the
+        # first failed probe). A pre-window "stale" row for the SAME episode
+        # must not be rendered as a second row: a fault that outlives a
+        # plugin reload has a pre-window alert row plus an in-window re-push
+        # row carrying the same ``started_ts`` (v2.21.2 audit). This is also
+        # the source of the unresolved count below.
+        open_episode_start: dict[tuple[str, str, str, str], int] = {}
         # Row index of the last alert/failed row per key. A recovery that
         # belongs to a row already shown must not append a second line: an
         # outage that started AND ended inside the window used to appear twice
@@ -1275,6 +1337,10 @@ class DailyReportBuilder:
             key = _pair_key(event, name)
             resolved_ts = event.get("resolved_ts")
             started_i = safe_int(event.get("ts") or 0)
+            if _local_dt(started_i, self.tz) is None:
+                # A corrupt event timestamp must not abort the whole report;
+                # skip the row before any pairing/counting side effect.
+                continue
             outside = str(event.get("day") or "") not in window_days
             if outside:
                 # Rendering skips events outside the window. Their EPISODE
@@ -1318,7 +1384,7 @@ class DailyReportBuilder:
                 # The episode is over: a later alert with the same key is a
                 # new one and must count again.
                 seen_ids = {sid for sid in seen_ids if sid[0] != key}
-                episode_open.discard(key)
+                open_episode_start.pop(key, None)
                 if start_display:
                     if started_i - start_display > (span + 1) * 86400:
                         # Same guard as the alert branch below. The recovery
@@ -1381,7 +1447,7 @@ class DailyReportBuilder:
                     # event belongs to the next day, but resolved_ts was
                     # written back). It is complete, so it must not inflate
                     # "未恢复 N 项" while showing a finished duration.
-                    episode_open.discard(key)
+                    open_episode_start.pop(key, None)
                     if not episode_end:
                         # Neither a recovery event nor a resolved_ts: the real
                         # end of the outage is unknown, so no duration is
@@ -1406,7 +1472,7 @@ class DailyReportBuilder:
                             # (v2.20.19).
                             duration_text += "（窗口前开始）"
                 else:
-                    episode_open.add(key)
+                    open_episode_start.setdefault(key, episode_display_start)
                     duration_text = "进行中"
                 # Only a known, in-range end is shown; "跨窗口关闭" exists
                 # because resolved_ts may be a stale close_all stamp, and
@@ -1431,7 +1497,9 @@ class DailyReportBuilder:
                     (key, started_i),
                     display_start.get((key, episode_start), episode_start),
                 )
-            row_dt = datetime.fromtimestamp(row_time, self.tz)
+            row_dt = _local_dt(row_time, self.tz) or _local_dt(started_i, self.tz)
+            if row_dt is None:
+                continue
             time_format = (
                 "%H:%M" if span == 1 and row_dt.date() == day else "%m-%d %H:%M"
             )
@@ -1529,10 +1597,21 @@ class DailyReportBuilder:
             if key not in stale:
                 stale[key] = alert
         unresolved_items: list[dict[str, Any]] = []
-        for alert in stale.values():
+        unresolved_pairs: set[tuple[tuple[str, str, str, str], int]] = set()
+        for key, alert in stale.items():
             # "Ongoing since ..." must be the first failed probe, not the push
             # moment, or the row disagrees with the alert text in the chat.
-            started = datetime.fromtimestamp(_event_start(alert), self.tz)
+            start = safe_int(_event_start(alert) or 0)
+            if open_episode_start.get(key) == start:
+                # The same episode already has an in-window row (a re-push or
+                # reload-latch rewrote it). Rendering the pre-window row again
+                # made one still-unrecovered fault appear twice, once as
+                # "未恢复/可能已恢复" and once as "进行中" (v2.21.2 audit).
+                continue
+            started = _local_dt(start, self.tz)
+            if started is None:
+                continue
+            unresolved_pairs.add((key, start))
             unresolved_items.append(
                 {
                     "time": started.strftime("%m-%d %H:%M"),
@@ -1655,7 +1734,18 @@ class DailyReportBuilder:
             # after the in-window events made the table read out of order.
             items[:0] = covering_rows
         raw_total = len(items)
-        unresolved_total = len(unresolved_items)
+        # One row per distinct (rule, episode start). A pre-window stale row
+        # with the same recorded start as an in-window open row is the same
+        # incident (typically a reload-latch re-push) and counts once. Two
+        # truly independent episodes of one rule require a recovery event
+        # between them; without one, the state machine (and this pairing)
+        # treats them as one ongoing episode -- there is no writer-side
+        # sentinel that could tell them apart.
+        unresolved_total = len(unresolved_pairs | set(open_episode_start.items()))
+        # Rows that will actually be prepended (before the display cap); the
+        # merged ``total`` counts these once even though an open in-window
+        # row is already part of ``raw_total``.
+        unresolved_stale_count = len(unresolved_items)
         hidden_unresolved = 0
         dropped_in_window = 0
         if unresolved_items:
@@ -1694,12 +1784,12 @@ class DailyReportBuilder:
             else None,
             "count": count,
             # Episodes that started inside the window and never recovered are
-            # shown as "进行中" but were not counted here, so the headline said
-            # "未恢复 0 项" right above a row that said otherwise.
-            "unresolved": unresolved_total + len(episode_open - set(stale.keys())),
+            # included in this union too, so the headline cannot say
+            # "未恢复 0 项" right above a row that says otherwise.
+            "unresolved": unresolved_total,
             # Count before the display cut: with unresolved rows prepended the
             # old total became 20 and the "另有 N 条未列出" disclosure vanished.
-            "total": raw_total + unresolved_total,
+            "total": raw_total + unresolved_stale_count,
             "truncated": dropped_in_window + hidden_unresolved,
             # Rows the per-day query could not read (the day exceeded the row
             # cap), so the count above may be smaller than reality.
@@ -2087,7 +2177,9 @@ class DailyReportBuilder:
         names = sorted({str(row.get("name") or "") for row in rows if row.get("name")})
         by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in rows:
-            local = datetime.fromtimestamp(int(row["ts"]), self.tz)
+            local = _local_dt(row.get("ts"), self.tz)
+            if local is None:
+                continue
             key = (local.strftime("%Y-%m-%d"), str(row.get("name") or ""))
             by_key.setdefault(key, []).append(row)
         window_keys = [(day - timedelta(days=i)).isoformat() for i in range(span)]
@@ -2161,11 +2253,7 @@ class DailyReportBuilder:
         )
 
         first_ts = self.store.first_sample_ts("website_samples")
-        first_day = (
-            datetime.fromtimestamp(first_ts, self.tz).strftime("%Y-%m-%d")
-            if first_ts
-            else None
-        )
+        first_day = _sample_day_text(first_ts, self.tz) if first_ts else None
         available = bool(targets)
         empty_reason_code = None
         empty_reason_vars: dict[str, Any] = {}
@@ -2181,7 +2269,15 @@ class DailyReportBuilder:
             empty_reason = "暂无网站延迟采样数据"
             empty_reason_code = "website_none"
         history_note = None
-        if first_day and first_day > days[0].isoformat():
+        retention_days = max(
+            7, min(365, cfg_int(self.config, "daily_report.retention_days", 30))
+        )
+        if retention_days < history_days:
+            history_note = (
+                f"受保留期限制（{retention_days} 天），网站延迟趋势仅展示最近 "
+                f"{retention_days} 天；可在「日报 → 数据保留天数」调大。"
+            )
+        elif first_day and first_day > days[0].isoformat():
             history_note = (
                 f"网站延迟历史从 {first_day} 开始，{history_days} 天趋势仍在积累。"
             )
@@ -2223,7 +2319,12 @@ class DailyReportBuilder:
         mem_rows = self.store.list_process_samples(start_ts, end_ts, "mem")
 
         def aggregate(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
-            values: dict[str, dict[str, Any]] = {}
+            # Merge every process that shares a name AT THE SAME SAMPLE, then
+            # take that group's peak over the window. The old per-row ``max``
+            # silently reported one process of a multi-process program
+            # (gunicorn/celery/chrome) instead of the program's total, while
+            # the note said the processes were "merged" (v2.21.2 audit).
+            per_sample: dict[tuple[int, str], dict[str, Any]] = {}
             for row in rows:
                 name = str(row.get("name") or "").strip()
                 if not name:
@@ -2239,18 +2340,28 @@ class DailyReportBuilder:
                 raw_mem = safe_float(row.get("mem_mb"), 0.0)
                 if not math.isfinite(raw_mem) or abs(raw_mem) > 1e9:
                     raw_mem = 0.0
-                item = values.setdefault(
-                    name,
+                sample_key = (safe_int(row.get("ts") or 0), name)
+                item = per_sample.setdefault(
+                    sample_key,
+                    {"name": name, "cpu": 0.0, "mem_mb": 0.0, "samples": 0},
+                )
+                item["cpu"] += raw_cpu
+                item["mem_mb"] += raw_mem
+                item["samples"] += 1
+            values: dict[str, dict[str, Any]] = {}
+            for item in per_sample.values():
+                merged = values.setdefault(
+                    item["name"],
                     {
-                        "name": name,
+                        "name": item["name"],
                         "cpu": 0.0,
                         "mem_mb": 0.0,
                         "samples": 0,
                     },
                 )
-                item["cpu"] = max(float(item["cpu"]), raw_cpu)
-                item["mem_mb"] = max(float(item["mem_mb"]), raw_mem)
-                item["samples"] += 1
+                merged["cpu"] = max(float(merged["cpu"]), float(item["cpu"]))
+                merged["mem_mb"] = max(float(merged["mem_mb"]), float(item["mem_mb"]))
+                merged["samples"] += int(item["samples"])
             return sorted(values.values(), key=lambda item: item[key], reverse=True)[
                 :top_n
             ]
@@ -2275,11 +2386,7 @@ class DailyReportBuilder:
         cpu_top = render(aggregate(cpu_rows, "cpu"))
         mem_top = render(aggregate(mem_rows, "mem_mb"))
         first_ts = self.store.first_sample_ts("process_samples")
-        first_day = (
-            datetime.fromtimestamp(first_ts, self.tz).strftime("%Y-%m-%d")
-            if first_ts
-            else None
-        )
+        first_day = _sample_day_text(first_ts, self.tz) if first_ts else None
         available = bool(cpu_top or mem_top)
         empty_reason_code = None
         empty_reason_vars: dict[str, Any] = {}
@@ -2295,9 +2402,9 @@ class DailyReportBuilder:
             empty_reason = "暂无进程采样数据"
             empty_reason_code = "process_none"
         note = (
-            f"按进程名聚合{day_label}采样峰值；同一程序的多进程会合并显示。"
+            f"按进程名聚合{day_label}采样峰值；同一时刻的同名进程合并计算。"
             if span == 1
-            else f"按进程名聚合近 {span} 天采样峰值；同一程序的多进程会合并显示。"
+            else f"按进程名聚合近 {span} 天采样峰值；同一时刻的同名进程合并计算。"
         )
         return {
             "available": available,

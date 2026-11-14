@@ -163,6 +163,12 @@ class ReportCollector:
             ),
         )
         self._task: asyncio.Task | None = None
+        # Separate from ``_task``: with collect=false only the retention loop
+        # runs. Sharing the slot made a same-instance switch back to
+        # collect=true see a live task and skip creating the collection loop
+        # (v2.21.2 reverse audit).
+        self._prune_task: asyncio.Task | None = None
+        self._prune_running = False
         self._running = False
         self._last_resource = 0.0
         self._last_website = 0.0
@@ -173,8 +179,33 @@ class ReportCollector:
 
     def start(self) -> None:
         if not cfg_bool(self.config, "daily_report.collect", True):
-            logger.info("日报数据收集未启用（daily_report.collect=false）")
+            # Data collection is off, but alerts and service monitoring still
+            # append event rows. Without any prune path ``event_retention_days``
+            # / ``retention_days`` stop working and report.db grows forever
+            # (v2.21.2 audit). Keep a slow retention-only loop alive.
+            if self._prune_task is not None and not self._prune_task.done():
+                return
+            # A same-instance switch from collect=true to false must stop the
+            # old collection loop; otherwise both loops write after a reload.
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+            self._task = None
+            self._running = False
+            self._prune_running = True
+            self._prune_task = asyncio.create_task(self._prune_loop())
+            logger.info(
+                "日报数据收集未启用（daily_report.collect=false）；"
+                "仅保留每 24 小时的保留期清理"
+            )
             return
+        # Switched back to collect=true: stop the retention-only task so it
+        # cannot hold ``_task``/``_running`` and suppress the collection loop
+        # (v2.21.2 reverse audit).
+        if self._prune_task is not None:
+            self._prune_running = False
+            if not self._prune_task.done():
+                self._prune_task.cancel()
+            self._prune_task = None
         if self._task is not None and not self._task.done():
             # A second initialize() (config reload) used to create a second
             # sampling loop; terminate() only cancels the last one, so the
@@ -197,12 +228,21 @@ class ReportCollector:
 
     async def stop(self) -> None:
         self._running = False
+        self._prune_running = False
         task = self._task
         self._task = None
         if task and not task.done():
             task.cancel()
             try:
                 await task
+            except asyncio.CancelledError:
+                pass
+        prune_task = self._prune_task
+        self._prune_task = None
+        if prune_task and not prune_task.done():
+            prune_task.cancel()
+            try:
+                await prune_task
             except asyncio.CancelledError:
                 pass
 
@@ -232,6 +272,44 @@ class ReportCollector:
                 logger.exception("日报数据采集失败")
             await asyncio.sleep(60)
 
+    async def _prune_loop(self) -> None:
+        """Retention cleanup for ``daily_report.collect=false`` deployments."""
+
+        await asyncio.sleep(2)
+        while self._prune_running:
+            try:
+                if not self.store.ensure_ready():
+                    await asyncio.sleep(60)
+                    continue
+                await self._prune(time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A transient SQLite lock must not postpone cleanup for a
+                # whole day; mirror the collection loop's 60s retry.
+                logger.exception("日报数据保留期清理失败")
+                await asyncio.sleep(60)
+                continue
+            await asyncio.sleep(86400)
+
+    async def _prune(self, now: float) -> None:
+        try:
+            local_start = (
+                now_in_timezone(self.config)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .timestamp()
+            )
+        except Exception:
+            local_start = None
+        await asyncio.to_thread(
+            self.store.prune,
+            self.retention_days,
+            self.event_retention_days,
+            int(now),
+            local_start,
+        )
+        self._last_prune = now
+
     async def _tick(self) -> None:
         now = time.time()
         if now - self._last_resource >= self.resource_interval:
@@ -245,22 +323,7 @@ class ReportCollector:
             self._last_process = now
         await self._maybe_snapshot()
         if now - self._last_prune >= 86400:
-            try:
-                local_start = (
-                    now_in_timezone(self.config)
-                    .replace(hour=0, minute=0, second=0, microsecond=0)
-                    .timestamp()
-                )
-            except Exception:
-                local_start = None
-            await asyncio.to_thread(
-                self.store.prune,
-                self.retention_days,
-                self.event_retention_days,
-                int(now),
-                local_start,
-            )
-            self._last_prune = now
+            await self._prune(now)
 
     async def _sample_resource(self, now: float) -> None:
         cpu = cached_cpu_percent()
@@ -549,7 +612,10 @@ class ReportCollector:
 
     def status(self) -> dict[str, Any]:
         return {
-            "enabled": self._running,
+            # ``_running`` is also true for the retention-only prune loop
+            # started with collect=false; the diagnostic must keep reporting
+            # the operator's collection switch, not the pruning task.
+            "enabled": cfg_bool(self.config, "daily_report.collect", True),
             "resource_interval": self.resource_interval,
             "retention_days": self.retention_days,
             "event_retention_days": self.event_retention_days,
