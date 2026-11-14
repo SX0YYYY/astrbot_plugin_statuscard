@@ -1419,6 +1419,15 @@ class AlertEngine:
             st.pop("summary_key", None)
             st.pop("summary_reason", None)
             st.pop("recovery_awaits_summary", None)
+            # ``send_inflight`` MUST go: a leftover True here means the next
+            # restart replays the "send interrupted" repair branch, which
+            # re-latches ``alerting`` on a rule the operator just disabled
+            # and pushes a phantom alert (guardrail G5, v2.21.3). The
+            # abandon marker and the stale mark ride along: both are
+            # episode-scoped and meaningless for a rule that is now off.
+            st.pop("send_inflight", None)
+            st.pop("summary_abandoned", None)
+            st.pop("stale", None)
             # A queued recovery from the disabled rule must not survive:
             # after re-enabling it would be delivered as a stale notice.
             for stale_key in (

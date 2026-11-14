@@ -2110,6 +2110,12 @@ class ServiceMonitor:
             "summary_buffered",
             "summary_key",
             "summary_reason",
+            # send_inflight must go with the episode: a leftover True replays
+            # the send-interrupted repair on the next start, re-latching a
+            # rule whose config just broke (guardrail G5, v2.21.3).
+            "send_inflight",
+            # Same episode-scoping: a stale abandon marker has no owner left.
+            "summary_abandoned",
             "send_exhausted",
             "stale",
             "silent_since",

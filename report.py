@@ -790,7 +790,12 @@ class DailyReporter:
 
         self._last_sent_day = self._sanitize_sent_day(saved.get("last_sent_day"))
         self._last_attempt_day = saved.get("last_attempt_day") or None
-        self._daily_given_up_day = saved.get("daily_given_up_day") or None
+        # A hand-edited state can hold ANY type here, and the consumer below
+        # calls date.fromisoformat on it: a truthy non-str (a dirty int) used
+        # to raise TypeError PAST the ValueError guard and abort the whole
+        # restore (guardrail G2, v2.21.3).
+        given_up = saved.get("daily_given_up_day")
+        self._daily_given_up_day = given_up if isinstance(given_up, str) else None
         # When the report database had to be rebuilt during a report day,
         # that day's data is gone; sending an all-"--" report would lock the
         # day. Persist across restarts (the store flag is in-memory only).
@@ -822,7 +827,7 @@ class DailyReporter:
                     self._daily_given_up_day = (
                         date.fromisoformat(self._daily_given_up_day) - timedelta(days=1)
                     ).isoformat()
-                except ValueError:
+                except (ValueError, TypeError):
                     self._daily_given_up_day = None
             today_text = self._today()
             if self._last_attempt_day == today_text:
