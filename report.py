@@ -501,6 +501,20 @@ class ReportCollector:
                 # the snapshot after an hour instead of retrying all day
                 # (288 times) and warning every 30 minutes.
                 complete = True
+                if recv_total is None:
+                    # ``snapshot_ready`` additionally requires recv_total, so
+                    # freezing the bot fields alone did not stop the loop: a
+                    # deployment without the message_stats plugin kept calling
+                    # the group-info API and writing an ineffective UPSERT
+                    # every 5 minutes until the 288-attempt ceiling (v2.21.1
+                    # audit). With no receive counter after a full hour it is
+                    # not coming back today; stop the day here.
+                    self._snapshot_attempts[day] = 288
+                    logger.warning(
+                        "日报每日快照 %s 已冻结：官方群数据与接收累计均不可用，"
+                        "今天不再重试",
+                        day,
+                    )
         else:
             complete = all(value is not None for value in (friends, groups, members))
         await asyncio.to_thread(

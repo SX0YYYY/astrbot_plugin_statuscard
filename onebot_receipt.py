@@ -290,13 +290,28 @@ async def send_direct(
     kind_lower = kind.lower()
     if kind_lower not in ("groupmessage", "privatemessage", "friendmessage"):
         return OnebotReceipt(ok=False, error=f"不支持的目标类型: {kind}")
-    if not str(session_id).isdigit():
+    session_text = str(session_id)
+    if kind_lower == "groupmessage":
+        # AstrBot's ``unique_session`` prefixes the sender number
+        # ("sender_group"). The official adapter restores the group id with
+        # rsplit("_", 1)[-1]; without the same rule here every group target
+        # skipped the direct path and silently lost its retcode/message_id
+        # (v2.21.1 audit). A plain numeric group id is unaffected.
+        #
+        # Only ``digits_digits`` is accepted: an unconditional rsplit turned
+        # "foo_123456" into 123456 and would have sent a message to a group
+        # that was never addressed (v2.21.1 reverse audit). Anything else
+        # keeps failing isdigit() and falls back to the framework path.
+        sender, sep, group = session_text.rpartition("_")
+        if sep and sender.isdigit() and group.isdigit():
+            session_text = group
+    if not session_text.isdigit():
         return OnebotReceipt(ok=False, error=f"会话 ID 不是数字: {session_id}")
     action = "send_group_msg" if kind_lower == "groupmessage" else "send_private_msg"
     key = "group_id" if kind_lower == "groupmessage" else "user_id"
     try:
         payload = await asyncio.wait_for(
-            client.call_action(action, **{key: int(session_id), "message": segments}),
+            client.call_action(action, **{key: int(session_text), "message": segments}),
             timeout=timeout,
         )
     except Exception as exc:

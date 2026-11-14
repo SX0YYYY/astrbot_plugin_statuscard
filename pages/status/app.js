@@ -3110,9 +3110,14 @@
       }
     }
     bindTheme();
-    if (typeof bridge.ready === "function") {
+    // The retry above may have found the bridge after ``waitForBridge``
+    // timed out, in which case ``bridge`` is still null: ``typeof
+    // bridge.ready`` then threw (reading a property of null) and the page
+    // stayed on its static skeleton (v2.21.1 audit).
+    const activeBridge = bridge || getBridge();
+    if (activeBridge && typeof activeBridge.ready === "function") {
       try {
-        await bridge.ready();
+        await activeBridge.ready();
       } catch (error) {
         // The page still works if the initial context is delayed.
       }

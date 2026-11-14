@@ -274,6 +274,12 @@ class AlertEngine:
         self._disk_warned: set[str] = set()
         self._daily_last_sent_day: str | None = None
         self._daily_last_attempt_day: str | None = None
+        # A day whose scheduled card was skipped because no push target was
+        # configured. It must not consume the day's attempt marker: the
+        # operator may fix the target and reload, and the catch-up path then
+        # sends the image immediately. The marker is memory-only on purpose
+        # (a reload is exactly when we want it gone).
+        self._daily_skip_day: str | None = None
         self._next_daily_text: str | None = None
         try:
             alerts_state = self.state.get("alerts", {}) or {}
@@ -305,6 +311,10 @@ class AlertEngine:
         already sent, so it is not re-sent.
         """
 
+        if self._daily_skip_day == today_text:
+            # Already warned today that no target is configured; do not
+            # re-enter the catch-up branch every loop iteration.
+            return False
         return (
             self._daily_last_attempt_day is not None
             and self._daily_last_attempt_day != today_text
@@ -1134,6 +1144,41 @@ class AlertEngine:
                         disk_path,
                         exc,
                     )
+                # A timeout or a permission error is NOT proof that the mount
+                # is gone: a hung NFS/CIFS mount and a chmod accident both
+                # leave the alert true. Closing the episode here announced
+                # "已拔出或掉线", then the mount answered again and the still
+                # full disk raised a second alert (v2.21.1 audit). Only a
+                # definite "path does not exist" closes the episode; the
+                # transient case leaves the state untouched and the report
+                # keeps showing the episode as unresolved, which matches what
+                # the probe actually observed.
+                probe_error = str(exc or "")
+                transient_error = not probe_error or any(
+                    token in probe_error.lower()
+                    for token in (
+                        "读取超时",
+                        "timeout",
+                        "timed out",
+                        "permission",
+                        "denied",
+                        "stale file handle",
+                        "input/output error",
+                        "transport endpoint",
+                        "device is not ready",
+                        "设备未就绪",
+                    )
+                )
+                if transient_error:
+                    # The once-per-path warning above already told the
+                    # operator; the loop runs every sample, so keep this at
+                    # debug level instead of filling the journal.
+                    logger.debug(
+                        "磁盘挂载点 %s 暂时无法读取（%s），告警状态保持不变",
+                        disk_path,
+                        probe_error[:120],
+                    )
+                    continue
                 # A rule left alerting by a vanished mount used to hang in
                 # the daily report's "unresolved" list for 30 days with no
                 # recovery event (U-disk unplugged, NFS gone). Close the
@@ -1551,9 +1596,16 @@ class AlertEngine:
                         # from a >24h sampling gap (the alert itself reset the
                         # episode's "was the user told?" state).
                         st.pop("stale", None)
-                        if not alerting:
-                            # A cooldown-retry keeps the episode's original
-                            # start; only a fresh episode sets it.
+                        if not _safe_float(st.get("alert_since")):
+                            # Keep the first over-threshold sample the run-up
+                            # recorded. A cooldown-retry and a fresh episode
+                            # both already carry it; only a reload-recovery
+                            # path without one sets the start here. The old
+                            # "if not alerting" overwrote the run-up start for
+                            # every buffered first push, under-reporting the
+                            # recovery duration by (sustain-1)*interval
+                            # (v2.21.1 audit; same rule as the delivered
+                            # branch and monitor.py).
                             st["alert_since"] = now
                         st["count"] = 0
                         # The summary did reach the chat, so the cooldown
@@ -1718,7 +1770,11 @@ class AlertEngine:
                 _safe_int(st.get("retry_count")) > 0
                 or st.get("last_error") == "send_failed"
             ):
-                duration = now - _safe_float(st.get("alert_since"), now)
+                # ``alert_since`` uses 0 as the "no episode" sentinel. Passing
+                # ``now`` as the converter's default only covers a type error,
+                # so a leftover 0 produced a 19675-day duration (v2.21.1
+                # audit; the offline branch already used ``or now``).
+                duration = now - (_safe_float(st.get("alert_since")) or now)
                 self._record_event(
                     "resource",
                     name,
@@ -1881,7 +1937,11 @@ class AlertEngine:
                 # Keeping it made the next fault of this rule start at the
                 # slow hourly step (v2.20.24 audit).
                 st.pop("offline_retry_count", None)
-                duration = now - _safe_float(st.get("alert_since"), now)
+                # ``alert_since`` uses 0 as the "no episode" sentinel. Passing
+                # ``now`` as the converter's default only covers a type error,
+                # so a leftover 0 produced a 19675-day duration (v2.21.1
+                # audit; the offline branch already used ``or now``).
+                duration = now - (_safe_float(st.get("alert_since")) or now)
                 st["alert_since"] = 0
                 # Persist the closed episode *before* the slow send: a
                 # reload/crash during delivery used to leave "alerting=True"
@@ -3420,9 +3480,13 @@ class AlertEngine:
                     # attempts" path, so the loop retried the whole collect +
                     # T2I cycle every 60 seconds for the rest of the day.
                     logger.exception("每日定时状态图发送异常，今天不再重试")
-                if now_in_timezone(self.config).strftime("%Y-%m-%d") == attempt_day:
+                if (
+                    now_in_timezone(self.config).strftime("%Y-%m-%d") == attempt_day
+                    and self._daily_skip_day != attempt_day
+                ):
                     # Only mark the day the attempt started on; a cross-midnight
-                    # break must not consume the new day's scheduled run.
+                    # break must not consume the new day's scheduled run. A
+                    # "no target configured" skip is not an attempt either.
                     self._mark_daily_attempt(attempt_day)
                 last_logged = None
             except asyncio.CancelledError:
@@ -3444,9 +3508,17 @@ class AlertEngine:
             return True
         targets = self._targets_for("daily_image")
         if not targets:
+            # A configuration problem, not a delivery attempt. Remember the
+            # day so the loop does not spin, but do NOT consume the attempt
+            # marker: after the operator fills in a target and reloads, the
+            # catch-up path sends today's image immediately (v2.21.1 audit;
+            # the old "return True" let the loop mark the day as attempted,
+            # so the fixed target only took effect the next day).
+            self._daily_skip_day = today
             logger.warning(
                 "每日定时状态图已启用，但推送目标为空（通知中心无 daily_image "
-                "规则，alerts.targets 也未填写），跳过发送"
+                "规则，alerts.targets 也未填写），跳过发送；配置好目标后重载插件"
+                "即可当天补发"
             )
             return True
         # Record the attempt before sending: if the process is reloaded right

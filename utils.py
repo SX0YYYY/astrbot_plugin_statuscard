@@ -212,18 +212,39 @@ def clean_report_sections(sections: Any) -> list[str] | None:
     return cleaned if cleaned != sections else None
 
 
+# Free-form text (monitor details, audit messages) can contain a URL plus
+# prose. The whole line used to be treated as ONE URL, so
+# "连接 http://h/x?token=1 超时" became "连接 http://h/x" and a plain
+# "提醒 @运维 查看" lost everything before "@" (v2.21.1 audit).
+# Splitting on whitespace keeps the prose intact while every token still
+# goes through the full credential/query stripping -- a regex that only
+# recognised scheme/dotted-host tokens dropped "user:pass@host/x?token=x",
+# i.e. it leaked the password (reverse audit of the same change).
+_WHITESPACE = re.compile(r"(\s+)")
+
+
 def redact_url(url: Any) -> str:
     """Strip credentials, query strings and fragments from a probe target.
 
     Monitor URLs may carry credentials either in the ``user:password@host``
     part or in ``?token=`` style parameters, so only the scheme, host, port
     and path are kept for ``report.db`` and reports. Non-URL text is returned
-    unchanged.
+    unchanged; in free-form text every whitespace-separated token is
+    rewritten on its own, so the prose around it survives.
     """
 
     text = str(url or "").strip()
     if not text:
         return ""
+    if _WHITESPACE.search(text):
+        return "".join(
+            part if part.isspace() else _redact_url_token(part)
+            for part in _WHITESPACE.split(text)
+        )
+    return _redact_url_token(text)
+
+
+def _redact_url_token(text: str) -> str:
     try:
         parts = urlsplit(text)
     except Exception:
@@ -268,13 +289,13 @@ def redact_url(url: Any) -> str:
         bare = head
         if "@" in bare:
             userinfo, _, tail = bare.rpartition("@")
-            # Credentials only when the part before "@" looks like userinfo
-            # (no slashes); otherwise the "@" is just part of the path. A
-            # "user:" prefix is indistinguishable from a scheme here, but a
-            # scheme-less URL with a netloc-less "@" is a userinfo in
-            # practice -- and over-stripping a hypothetical mailto: probe
-            # only mangles the display, it never leaks.
-            if userinfo and "/" not in userinfo:
+            # A password is what must never survive: "user:pass@host". A
+            # bare "user@host" has no password, and "admin@example.com" is an
+            # e-mail address, not a credential -- stripping their local part
+            # mangled ordinary audit text (v2.21.1 reverse audit). Only a
+            # userinfo that actually carries a colon is treated as
+            # credentials.
+            if userinfo and "/" not in userinfo and ":" in userinfo:
                 return tail
         return bare
     host = parts.hostname or ""

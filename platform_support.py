@@ -246,12 +246,14 @@ def known_group_session_ids(
             f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2
         )
         try:
-            # Deduplicate in SQL before LIMIT: one busy group writes one row
-            # per sender, so a plain LIMIT 500 could return only that group
-            # and hide every other group (v2.21.0 audit).
+            # Deduplicate in Python, not with ``GROUP BY umo``: AstrBot's
+            # ``unique_session`` makes the UMO ``...:sender_group``, so
+            # grouping by the full UMO kept one row per sender and a single
+            # busy group could fill LIMIT 200, hiding every other group
+            # (v2.21.1 audit). 4000 recent rows are a few hundred KB at most.
             rows = connection.execute(
                 "SELECT umo FROM umo_senders WHERE umo LIKE ? ESCAPE '\\' "
-                "GROUP BY umo ORDER BY MAX(rowid) DESC LIMIT 200",
+                "ORDER BY rowid DESC LIMIT 4000",
                 (pattern,),
             ).fetchall()
         finally:
@@ -267,6 +269,8 @@ def known_group_session_ids(
         session_id = group_session_id(parsed[2])
         if session_id and session_id not in seen:
             seen.append(session_id)
+            if len(seen) >= 200:
+                break
     return seen
 
 

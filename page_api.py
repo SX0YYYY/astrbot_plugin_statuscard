@@ -154,7 +154,13 @@ def _normalize_range(raw: Any, default: str) -> str:
         return key
     match = re.match(r"^(\d+)\s*([hd])$", key)
     if match:
-        seconds = int(match.group(1)) * (86400 if match.group(2) == "d" else 3600)
+        try:
+            seconds = int(match.group(1)) * (86400 if match.group(2) == "d" else 3600)
+        except (TypeError, ValueError):
+            # Python 3.12 raises for integer strings longer than 4300
+            # digits; a crafted ?range=999…d turned /history and /export
+            # into a 500 before the gate (v2.21.1 audit).
+            return default
         return min(
             RANGE_SECONDS,
             key=lambda item: abs(RANGE_SECONDS[item] - seconds),
@@ -223,6 +229,13 @@ class PageApi:
         # send a real message every click, so a stuck retry loop in the page
         # could spam the chat (v2.20.5).
         self._verify_last: dict[str, float] = {}
+        # A verify request that is still running, keyed by kind with its
+        # start time. The cooldown is charged on completion now, so two clicks
+        # (or the page's own retry after its 90-second timeout) could both
+        # pass the timestamp check and send the same real message twice
+        # (v2.21.1 audit). The timestamp also bounds a leaked entry: after
+        # 120 seconds it is treated as stale instead of locking the kind out.
+        self._verify_inflight: dict[str, float] = {}
         # Strong references for the fire-and-forget recovery tasks: asyncio
         # may garbage-collect an unreferenced task mid-flight.
         self._recovery_tasks: set[asyncio.Task] = set()
@@ -381,7 +394,7 @@ class PageApi:
             if isinstance(value, (list, tuple)):
                 return [mask_value(inner) for inner in value]
             if isinstance(value, str):
-                return redactor.mask_address_tokens(redact_url(value))
+                return redactor.mask_address_tokens(mask_chat_ids(redact_url(value)))
             return value
 
         masked: list[dict[str, Any]] = []
@@ -390,8 +403,11 @@ class PageApi:
             # Strip URL credentials and query tokens FIRST: the token replacer
             # stops at the first non-URL character, so "?token=…" after an
             # already-masked host used to survive in the banner text.
+            # ``mask_chat_ids`` covers a platform id / target prefix that was
+            # mistakenly filled with an openid or group number (v2.21.1
+            # audit): audit messages interpolate those verbatim.
             item["message"] = redactor.mask_address_tokens(
-                redact_url(str(item.get("message") or ""))
+                mask_chat_ids(redact_url(str(item.get("message") or "")))
             )
             item["params"] = mask_value(item.get("params") or {})
             masked.append(item)
@@ -764,6 +780,15 @@ class PageApi:
                 }
             )
         now = time.time()
+        inflight_at = self._verify_inflight.get(kind)
+        if inflight_at is not None and now - inflight_at < 120:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "上一次验证仍未完成，请稍后再试（避免重复发送消息）",
+                    "error_code": "verify_too_frequent",
+                }
+            )
         if now - self._verify_last.get(kind, 0.0) < 30:
             return jsonify(
                 {
@@ -833,18 +858,28 @@ class PageApi:
             # every other chat text; it used to be hard-coded Chinese
             # (v2.20.20).
             text = tr(plugin.config, "verify_targets_message")
+            # Claim the kind before the first await: a second request (or the
+            # page retrying after its own timeout) must not send the same
+            # real message again. The cooldown is charged on completion so a
+            # slow send cannot expire before it returns.
+            self._verify_inflight[kind] = time.time()
+            delivered = False
             try:
                 result = await plugin.send_text(merged, text, source="verify_targets")
+                delivered = True
             except Exception as exc:
                 # A raising send used to escape the route as a 500 AND keep
                 # the cooldown it had already charged, locking the operator
                 # out for 30 seconds right after fixing the environment.
-                # Charge the cooldown only after an actual send attempt.
+                # Charge the cooldown only after an actual successful send.
                 logger.exception("验证推送目标发送失败")
                 return jsonify(
                     {"ok": False, "kind": kind, "error": exc.__class__.__name__}
                 )
-            self._verify_last[kind] = now
+            finally:
+                self._verify_inflight.pop(kind, None)
+                if delivered:
+                    self._verify_last[kind] = time.time()
             per_target = []
             for target in merged:
                 receipt = (result.receipts or {}).get(target) or {}
@@ -860,7 +895,12 @@ class PageApi:
                 # only the bare session id ("会话 ID 不是数字: 461961169") or
                 # embed it in an exception message, so the full-UMO
                 # replacement alone was not enough.
-                error_text = str(receipt.get("error") or "")
+                # A target that was delivered through the framework keeps the
+                # direct-path receipt error in ``receipts`` (delivery records
+                # ``ok: True, via: framework`` over the old entry). Printing
+                # it on a green row read as "delivered (error)" and made
+                # operators chase a send that actually worked (v2.21.1 audit).
+                error_text = "" if state == "ok" else str(receipt.get("error") or "")
                 if target:
                     error_text = error_text.replace(target, _mask_umo(target))
                 error_text = mask_chat_ids(error_text)
@@ -905,7 +945,7 @@ class PageApi:
                         ),
                     }
                 )
-            self._verify_last[kind] = now
+            self._verify_inflight[kind] = time.time()
 
             # Dozens of monitor targets used to be probed at once on a
             # single click, which spikes the sites being watched and keeps the
@@ -939,7 +979,14 @@ class PageApi:
             # the backend kept probing. Bound the whole batch and report the
             # items that did not finish (v2.20.21).
             tasks = [asyncio.create_task(probe_one(item)) for item in items]
-            _done, pending = await asyncio.wait(tasks, timeout=80)
+            try:
+                _done, pending = await asyncio.wait(tasks, timeout=80)
+            except asyncio.CancelledError:
+                # A disconnected client cancels this coroutine; without the
+                # cleanup the kind stayed "in flight" for 120 seconds and
+                # rejected every legitimate retry (v2.21.1 reverse audit).
+                self._verify_inflight.pop(kind, None)
+                raise
             for task in pending:
                 task.cancel()
             # ``asyncio.wait`` returns sets, so iterating ``done`` made the
@@ -984,6 +1031,10 @@ class PageApi:
                     "code": "monitor_verify_timeout",
                     "count": timed_out,
                 }
+            # The cooldown starts on completion: a batch that took 80 seconds
+            # must not leave a timestamp that expired while it was running.
+            self._verify_inflight.pop(kind, None)
+            self._verify_last[kind] = time.time()
             return jsonify(payload)
         if kind == "webhook":
             cfg = cfg_get(plugin.config, "alerts.komari_webhook", {}) or {}
@@ -1008,7 +1059,7 @@ class PageApi:
                         "message_code": "webhook_not_running",
                     }
                 )
-            self._verify_last[kind] = now
+            self._verify_inflight[kind] = time.time()
             port = max(1, min(65535, cfg_int(cfg, "port", 9968)))
             path = str(cfg_get(cfg, "path", "/webhook") or "/webhook")
             if not path.startswith("/"):
@@ -1043,7 +1094,12 @@ class PageApi:
                         return resp.status_code
 
                 status = await asyncio.wait_for(_post(), timeout=15)
+            except asyncio.CancelledError:
+                self._verify_inflight.pop(kind, None)
+                raise
             except Exception as exc:
+                self._verify_inflight.pop(kind, None)
+                self._verify_last[kind] = time.time()
                 return jsonify(
                     {
                         "ok": True,
@@ -1053,6 +1109,8 @@ class PageApi:
                         "message": f"请求失败: {exc.__class__.__name__}",
                     }
                 )
+            self._verify_inflight.pop(kind, None)
+            self._verify_last[kind] = time.time()
             return jsonify(
                 {
                     "ok": True,

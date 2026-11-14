@@ -293,7 +293,9 @@ def test_verify_cooldown_is_not_charged_for_empty_targets() -> None:
         encoding="utf-8"
     )
     empty_branch = source.index('"未配置任何推送目标"')
-    charge = source.index("self._verify_last[kind] = now")
+    # The cooldown is written on completion (time.time(), v2.21.1) so a slow
+    # send cannot expire before it returns.
+    charge = source.index("self._verify_last[kind] = time.time()")
     assert charge > empty_branch, "cooldown must be charged after the guard"
 
 

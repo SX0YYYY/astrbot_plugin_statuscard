@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -56,6 +56,7 @@ from .utils import (
     clamp_config,
     clean_report_sections,
     is_supported_platform,
+    mask_chat_ids,
     mask_umo,
     redact_url,
     safe_float,
@@ -812,7 +813,9 @@ class StatusCardPlugin(Star):
                     if uploaded.stat().st_size > MAX_IMAGE_BYTES:
                         logger.warning("上传背景超过 10 MB，已跳过: %s", uploaded)
                     else:
-                        bg_bytes = uploaded.read_bytes() or None
+                        # A 10 MB upload read on the event loop stalls every
+                        # concurrent command/render (v2.21.1 audit).
+                        bg_bytes = await asyncio.to_thread(uploaded.read_bytes) or None
                 except Exception as exc:
                     logger.warning("读取上传背景失败 %s: %s", uploaded, exc)
             if bg_bytes is None:
@@ -903,6 +906,11 @@ class StatusCardPlugin(Star):
         allowed = cfg_get(self.config, "access.official_admin_ids", []) or []
         if isinstance(allowed, str):
             allowed = [allowed]
+        elif not isinstance(allowed, (list, tuple, set)):
+            # A hand-edited int/bool used to raise before the first yield, so
+            # the framework reported a plugin exception instead of the
+            # operator-only refusal (v2.21.1 audit).
+            allowed = []
         sender = ""
         try:
             sender = str(event.get_sender_id() or "")
@@ -1231,7 +1239,7 @@ class StatusCardPlugin(Star):
             # "{label}" placeholders. Every current key/param pair matches;
             # this guards future audit codes (v2.20.32).
             text = str(getattr(issue, "message", "") or "")
-        return redactor.mask_address_tokens(text)
+        return redactor.mask_address_tokens(mask_chat_ids(text))
 
     @filter.permission_type(filter.PermissionType.MEMBER)
     @filter.command("状态卡诊断")
@@ -1275,8 +1283,16 @@ class StatusCardPlugin(Star):
                 event_platform_id = ""
             platform_id = event_platform_id or configured_platform_id
             if is_official_platform(platform):
+                # The instance id is normally a readable name, but a migration
+                # mistake can paste a group openid here; mask_chat_ids only
+                # touches openid/number shapes, so names stay readable
+                # (v2.21.1 audit).
                 lines.append(
-                    tr(self.config, "diag_platform_id", platform_id=platform_id)
+                    tr(
+                        self.config,
+                        "diag_platform_id",
+                        platform_id=mask_chat_ids(platform_id),
+                    )
                 )
                 # Prefer the instance that delivered this event: with two
                 # platforms configured, alerts.platform_id may still point at
@@ -1763,7 +1779,7 @@ class StatusCardPlugin(Star):
                 today = now_in_timezone(self.config).date()
             except Exception:
                 today = date.today()
-            if parsed <= today:
+            if parsed <= today and parsed >= today - timedelta(days=365 * 30):
                 day_arg = parsed.isoformat()
                 break
             invalid_date = True

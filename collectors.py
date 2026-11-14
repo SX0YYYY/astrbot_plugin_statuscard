@@ -55,6 +55,10 @@ _TZ_WARNED: set[str] = set()
 _IMG_WARNED: set[str] = set()
 # Dedup keys for the avatar-upload fallback warnings above (v2.20.32).
 _AVATAR_FALLBACK_WARNED: set[str] = set()
+# A notification rule whose ``kinds`` is not a list is reported once, not on
+# every target resolution (alerts, monitors, the daily report and the
+# dashboard verify all call this several times a minute).
+_BAD_KINDS_WARNED: set[str] = set()
 
 
 def _dt_now() -> datetime:
@@ -1492,7 +1496,7 @@ async def collect_bot_info(
                 running = adapter_running(official_adapter)
                 data["online"] = running
                 store("online", running)
-            ok_groups, _ = cached("groups")
+            ok_groups, cached_groups = cached("groups")
             ok_members, _ = cached("members")
             if ok_groups and ok_members:
                 return
@@ -1506,10 +1510,17 @@ async def collect_bot_info(
                     if db_path is not None
                     else []
                 )
-                # An empty/failed DB read must not overwrite a still-useful
-                # value with None (the card would flip to "--" for 30s).
-                data["groups"] = len(ids) if ids else data.get("groups")
-                store("groups", data["groups"])
+                # A transient DB read failure must not turn a known group
+                # count into "--": keep the last known value without
+                # refreshing its TTL, so the next sample retries. The old
+                # ``data.get("groups")`` was always None here -- the cache
+                # backfill loop above only writes when the entry is fresh
+                # (v2.21.1 audit).
+                if ids:
+                    data["groups"] = len(ids)
+                    store("groups", data["groups"])
+                else:
+                    data["groups"] = cached_groups
             if not ok_members:
                 if ids is None:
                     # groups is fresh; the API still needs the ids.
@@ -1803,6 +1814,24 @@ def resolve_targets(config: Any, kind: str) -> list[str] | None:
         kinds = cfg_get(rule, "kinds", []) or []
         if isinstance(kinds, str):
             kinds = [kinds]
+        elif not isinstance(kinds, (list, tuple, set)):
+            # A hand-edited int/bool/dict used to raise TypeError here. The
+            # exception escaped every caller that resolves targets (audit,
+            # monitor.start, daily_report.start, alerts._send, the dashboard
+            # verify button), so one bad rule could disable service
+            # monitoring and the daily report entirely (v2.21.1 audit).
+            warn_key = str(
+                cfg_get(rule, "name", "") or cfg_get(rule, "target", "") or "(未命名)"
+            )[:120]
+            if warn_key not in _BAD_KINDS_WARNED:
+                if len(_BAD_KINDS_WARNED) > 200:
+                    _BAD_KINDS_WARNED.clear()
+                _BAD_KINDS_WARNED.add(warn_key)
+                logger.warning(
+                    "通知中心规则 %s 的 kinds 不是列表，已按空规则处理",
+                    warn_key,
+                )
+            kinds = []
         # Normalize before comparing: audit.py strips (and validates after
         # stripping), so a hand-edited " resource" passed the config check
         # but matched nothing here and the rule silently never fired
@@ -1974,7 +2003,11 @@ async def fetch_avatar_bytes(
                         _AVATAR_FALLBACK_WARNED.add(warn_key)
                         logger.warning("上传头像超过 10 MB，回退 QQ 头像: %s", uploaded)
                 else:
-                    data = uploaded.read_bytes()
+                    # Reading a 10 MB upload on the event loop blocked every
+                    # command and dashboard request for the disk latency
+                    # (v2.21.1 audit); the compression already ran in a
+                    # thread.
+                    data = await asyncio.to_thread(uploaded.read_bytes)
                     if data:
                         _warn_if_undecodable_image(data, "头像", uploaded)
                         prepared = await _prepare_avatar(data)

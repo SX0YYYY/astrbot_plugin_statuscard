@@ -201,6 +201,12 @@ def run_audit(
     alerts_targets = normalize_targets(
         cfg_get(config, "alerts.targets", []), platform_id
     )
+    # The daily card and the LLM provider watch run their own loops and are
+    # independent of alerts.enabled (alerts.start()), so a stale platform id
+    # breaks them while the alerts switch is off. A deployment that only uses
+    # one of those still needs the platform checks (v2.21.1 audit).
+    daily_image_on = cfg_bool(config, "alerts.daily_summary.enabled", False)
+    provider_watch_on = cfg_bool(config, "alerts.provider_watch.enabled", False)
     resource_targets = resolve_targets(config, "resource")
     if resource_targets is None:
         resource_targets = alerts_targets
@@ -720,6 +726,18 @@ def run_audit(
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, (list, tuple, set)):
+            # ``normalize_rules`` silently drops a dict/int/bool, so every
+            # rule is off while the switch still looks configured. This is a
+            # privacy failure: the audit used to stay quiet (v2.21.1 audit).
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "redact_rules_invalid",
+                    f"{label}的配置值类型不正确（应为列表），"
+                    "当前所有脱敏规则都不会生效。",
+                    {"label": label},
+                )
+            )
             continue
         unknown = [
             str(item).strip()
@@ -850,8 +868,10 @@ def run_audit(
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
-            enabled = rule.get("enabled", True)
-            if enabled is False or enabled == 0 or enabled == "":
+            # cfg_bool understands "false"/"off"/"0" from a hand-edited
+            # config; the old literal check treated those as enabled and
+            # flagged a disabled rule's target (v2.21.1 audit).
+            if not cfg_bool(rule, "enabled", True):
                 continue
             text = str(rule.get("target") or "").strip()
             if text:
@@ -866,8 +886,30 @@ def run_audit(
             raw = [raw]
         if isinstance(raw, (list, tuple, set)):
             rule_targets.extend((str(item or "").strip(), label) for item in raw)
+    # On the official bot a bare group openid is a valid target: the runtime
+    # turns it into ``<instance>:GroupMessage:<openid>``. Only OneBot's bare
+    # number keeps the "just use a group number" hint; a 16+ hex openid must
+    # not be called malformed (v2.21.1 audit).
+    configured_official = is_official_platform(
+        (platform_instances or {}).get(platform_id, "")
+    )
+
+    def _looks_like_openid(value: str) -> bool:
+        return len(value) >= 16 and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
     for text, label in rule_targets:
-        if not text or text.isdigit() or target_pattern.match(text):
+        if not text or text.isdigit():
+            continue
+        if configured_official and _looks_like_openid(text):
+            continue
+        # AstrBot builds the session with ``MessageType(value)``, whose values
+        # are case-sensitive. A hand-written "groupmessage" passed the regex
+        # and then failed at send time (v2.21.1 audit).
+        if target_pattern.match(text) and text.split(":", 2)[1] in (
+            "GroupMessage",
+            "FriendMessage",
+            "OtherMessage",
+        ):
             continue
         issues.append(
             AuditIssue(
@@ -884,7 +926,14 @@ def run_audit(
     # with "no matching platform" (2026-11-13 实测：每日定时状态图发送失败).
     # Only warn when a push is actually configured: a user who only runs the
     # status-card command does not care about a stale alert platform id.
-    push_enabled = alerts_on or monitors_on or daily_on or weekly_on
+    push_enabled = (
+        alerts_on
+        or monitors_on
+        or daily_on
+        or weekly_on
+        or daily_image_on
+        or provider_watch_on
+    )
     if platform_instances and push_enabled:
         if platform_id and platform_id not in platform_instances:
             instances = ", ".join(sorted(platform_instances))
@@ -897,14 +946,13 @@ def run_audit(
                     {
                         "platform_id": platform_id,
                         "instances": sorted(platform_instances),
+                        # A ready-to-print string: the i18n template fills
+                        # ``{instances_text}``; formatting the list itself
+                        # printed ['a', 'b'] on the dashboard.
+                        "instances_text": instances,
                     },
                 )
             )
-        official_ids = {
-            inst_id
-            for inst_id, name in platform_instances.items()
-            if is_official_platform(name)
-        }
         numeric_hint = (
             "OneBot 群号；QQ 官方机器人的群 ID 是 openid，请在「状态卡诊断」里"
             "查看已知群并改用完整 UMO。"
@@ -917,7 +965,10 @@ def run_audit(
                 # OneBot; on the official bot it is silently turned into
                 # ``<instance>:GroupMessage:<number>`` and can never match a
                 # group openid. This is the most common migration leftover.
-                if text.isdigit() and official_ids:
+                # Only warn when the configured instance really is official:
+                # in a dual-platform deployment the same value is a perfectly
+                # valid OneBot group (v2.21.1 audit).
+                if text.isdigit() and configured_official:
                     issues.append(
                         AuditIssue(
                             "warning",
@@ -938,12 +989,20 @@ def run_audit(
                         "target_platform_missing",
                         f"{label}「{_safe_label(text)}」的平台前缀 {prefix} "
                         "不是当前运行的平台实例，发送会提示「未找到匹配平台」。",
-                        {"label": label, "target": _safe_label(text)},
+                        {
+                            "label": label,
+                            "target": _safe_label(text),
+                            "prefix": prefix,
+                        },
                     )
                 )
                 continue
             tail = text.rsplit(":", 1)[-1]
-            if prefix in official_ids and "GroupMessage" in text and tail.isdigit():
+            if (
+                is_official_platform(platform_instances.get(prefix, ""))
+                and segments[1] == "GroupMessage"
+                and tail.isdigit()
+            ):
                 issues.append(
                     AuditIssue(
                         "warning",
