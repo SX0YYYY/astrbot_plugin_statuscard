@@ -7,6 +7,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .utils import mask_umo
+
 TARGET_RE = re.compile(r"^(?P<platform>[^:]+):(?P<kind>[A-Za-z_]+):(?P<id>.+)$")
 
 
@@ -272,7 +274,9 @@ async def send_direct(
 
     parsed = parse_target(target)
     if parsed is None:
-        return OnebotReceipt(ok=False, error=f"无法解析目标: {target}")
+        # Mask the raw value: the error lands in receipts (state.json, the
+        # dashboard) and must not carry a full UMO (v2.21.3).
+        return OnebotReceipt(ok=False, error=f"无法解析目标: {mask_umo(target)}")
     platform, kind, session_id = parsed
     allowed = {"", "default", "aiocqhttp"}
     if platform_id:
@@ -306,7 +310,9 @@ async def send_direct(
         if sep and sender.isdigit() and group.isdigit():
             session_text = group
     if not session_text.isdigit():
-        return OnebotReceipt(ok=False, error=f"会话 ID 不是数字: {session_id}")
+        return OnebotReceipt(
+            ok=False, error=f"会话 ID 不是数字: {mask_umo(session_id)}"
+        )
     action = "send_group_msg" if kind_lower == "groupmessage" else "send_private_msg"
     key = "group_id" if kind_lower == "groupmessage" else "user_id"
     try:
@@ -320,7 +326,7 @@ async def send_direct(
             logger.warning(
                 "OneBot 直发被拒绝 %s -> %s：retcode=%s，%s",
                 action,
-                target,
+                mask_umo(target),
                 receipt.retcode,
                 receipt.error,
             )
@@ -329,7 +335,9 @@ async def send_direct(
         if is_definitely_not_sent(exc):
             # The request provably never reached OneBot, so re-sending is
             # safe: the caller may fall back to the normal AstrBot path.
-            logger.warning("OneBot 直发未送达 %s -> %s: %s", action, target, detail)
+            logger.warning(
+                "OneBot 直发未送达 %s -> %s: %s", action, mask_umo(target), detail
+            )
             return OnebotReceipt(ok=False, error=detail, attempted=False)
         # The request frame was already written to the WebSocket, so the
         # message may be in the chat even though the receipt was lost.
@@ -337,7 +345,7 @@ async def send_direct(
         logger.warning(
             "OneBot 直发回执丢失 %s -> %s（消息可能已送达，不重发）: %s",
             action,
-            target,
+            mask_umo(target),
             detail,
         )
         return OnebotReceipt(ok=False, error=detail, attempted=True)
@@ -346,7 +354,7 @@ async def send_direct(
         logger.info(
             "OneBot 直发成功 %s -> %s（message_id=%s，retcode=%s）",
             action,
-            target,
+            mask_umo(target),
             receipt.message_id,
             receipt.retcode,
         )
@@ -354,7 +362,7 @@ async def send_direct(
         logger.warning(
             "OneBot 直发被拒绝 %s -> %s：retcode=%s，%s",
             action,
-            target,
+            mask_umo(target),
             receipt.retcode,
             receipt.error,
         )

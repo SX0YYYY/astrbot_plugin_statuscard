@@ -256,7 +256,9 @@ class AlertEngine:
         self._webhook_site: Any = None
         # Body hash of the last successfully delivered webhook request: Komari
         # retries the same payload after a timeout, which used to post the
-        # event to the group twice.
+        # event to the group twice. The window covers Komari's own HTTP
+        # timeout scale (10-30s): a 5s window let a retried copy through when
+        # only the response packet was lost (v2.21.3).
         self._webhook_last: tuple[str, float] = ("", 0.0)
         self._webhook_inflight: set[str] = set()
         self._broadcast_task: asyncio.Task | None = None
@@ -1271,10 +1273,10 @@ class AlertEngine:
             # A latch created before the switch was turned off would stay
             # "unresolved" in the daily report forever.
             self._close_provider_watch("LLM 服务监控已关闭")
-        self._prune_rules(valid_keys)
+        await self._prune_rules(valid_keys)
         self.state.save()
 
-    def _prune_rules(self, valid_keys: set[str]) -> None:
+    async def _prune_rules(self, valid_keys: set[str]) -> None:
         """Drop state for rules that no longer exist and close their episodes.
 
         A removed disk mount or a renamed rule kept ``alerting=True`` in
@@ -1300,6 +1302,7 @@ class AlertEngine:
             "load": "系统负载",
             "disk": "磁盘使用率",
         }
+        close_notices: list[str] = []
         for key in stale:
             state = rules.pop(key, None)
             if not isinstance(state, dict) or not state.get("alerting"):
@@ -1309,8 +1312,24 @@ class AlertEngine:
             if suffix:
                 name = f"{name} ({suffix})"
             self._record_event("resource", name, "规则已移除，自动关闭", "recovery")
+            # The user saw this rule's alert: tell them the episode is now
+            # closed, instead of going silent while the red entry disappears
+            # from the card (v2.21.3, same gap as the threshold=0 branch).
+            # Best-effort like every close notice; async because _send is.
+            if bool(state.get("alerted")) and self.recover_notify:
+                close_notices.append(
+                    "✅ 告警已关闭 · 规则已移除\n"
+                    "──────────────\n"
+                    f"规则: {name}\n"
+                    "原因: 规则已从配置中移除，之前的告警已自动关闭。\n"
+                    f"时间: {_now_text(self.config)}"
+                )
         self.state.save()
         logger.info("资源告警清理了 %d 个已失效规则状态", len(stale))
+        for text in close_notices:
+            result = await self._send(text, source="resource", kind="resource")
+            if not self._delivered(result):
+                logger.warning("规则移除的关闭通知未送达")
 
     async def _evaluate(
         self,
@@ -1381,6 +1400,7 @@ class AlertEngine:
             # open interruption matters: without a recovery event the alert
             # stayed "unresolved" in the daily report for up to 30 days.
             was_alerting = alerting
+            notified = bool(st.get("alerted"))
             st["count"] = 0
             st["alerting"] = False
             st["alerted"] = False
@@ -1420,6 +1440,23 @@ class AlertEngine:
                     "阈值改为 0，规则已停用",
                     "recovery",
                 )
+                # The user saw the alert (``notified`` read above): mirror
+                # the disk-mount branch and say the rule is off, instead of
+                # going silent while a red episode just vanished from the
+                # card (v2.21.3). Best-effort like every close notice.
+                if notified and self.recover_notify:
+                    close_text = (
+                        "✅ 告警已关闭 · 规则已停用\n"
+                        "──────────────\n"
+                        f"规则: {name}\n"
+                        "原因: 阈值改为 0，规则已停用，之前的告警已自动关闭。\n"
+                        f"时间: {_now_text(self.config)}"
+                    )
+                    result = await self._send(
+                        close_text, source="resource", kind="resource"
+                    )
+                    if not self._delivered(result):
+                        logger.warning("规则 %s 的停用关闭通知未送达", name)
             return
 
         if value >= threshold:
@@ -1805,7 +1842,10 @@ class AlertEngine:
                         st["pending_recovery"] = text
                         st["recovery_retry_count"] = 1
                         st["recovery_next_attempt"] = now + retry_delay(1)
-                        st["recovery_awaits_summary"] = False
+                        # pop, not False: the queued copy is no longer held
+                        # behind a summary, and a stale False key only leaves
+                        # noise in state.json (v2.21.3).
+                        st.pop("recovery_awaits_summary", None)
                         logger.warning("告警 %s 的恢复通知未送达，已排队稍后补发", name)
             # A new episode starts with a clean retry budget. Leaving the
             # counter behind meant a later failure could give up on its first
@@ -2036,7 +2076,7 @@ class AlertEngine:
                         st["recovery_next_attempt"] = now + retry_delay(1)
                         # This notice does not depend on a buffered summary:
                         # an abandoned summary must not withdraw it.
-                        st["recovery_awaits_summary"] = False
+                        st.pop("recovery_awaits_summary", None)
                         logger.warning("告警 %s 恢复通知未送达，已排队稍后补发", name)
             else:
                 # The episode never latched (``alerting`` stayed False),
@@ -2104,6 +2144,16 @@ class AlertEngine:
             groups = envelope.get("data") or envelope.get("groups") or []
         if isinstance(groups, dict):
             groups = groups.get("data") or groups.get("groups") or []
+        if not isinstance(groups, list):
+            # An error envelope like {"data": "text"} yields a scalar here;
+            # iterating it would crash the broadcast task mid-pass
+            # (v2.21.3). Zero groups is the honest outcome for a broken
+            # response.
+            logger.warning(
+                "掉线广播：群列表响应格式异常（%s），本轮扫描 0 个群",
+                type(groups).__name__,
+            )
+            groups = []
         exclude = {
             str(item).strip()
             for item in (cfg.get("exclude_groups") or [])
@@ -2236,6 +2286,35 @@ class AlertEngine:
         adapter = find_adapter(self.plugin.context, None, self.platform_id)
         return adapter_platform_name(adapter) if adapter is not None else ""
 
+    def _touch_offline_seen(self) -> None:
+        """Record that the detector ran even when this sample bailed early.
+
+        The three early-return paths (official adapter status unknown,
+        start-up grace period, missing OneBot client) never reach the
+        ``last_seen`` write at the bottom of ``_check_offline``. A day of
+        "cannot tell" then looked like a day of "not sampling" to
+        ``_mark_stale_rules`` after a restart, and the stale mark swallowed
+        the recovery notice of an episode that was still alerting (v2.21.3).
+        """
+
+        with self.state.section("alerts") as alerts:
+            if not isinstance(alerts, dict):
+                return
+            st = alerts.get("offline")
+            if not isinstance(st, dict):
+                st = {}
+                alerts["offline"] = st
+            now = time.time()
+            old = _safe_float(st.get("last_seen"))
+            st["last_seen"] = now
+        # The in-memory value advances every sample; persist it at most once
+        # per interval so a deployment stuck in "unknown status" does not
+        # gain a full JSON write per tick (reverse audit v2.21.3). A crash
+        # right after an unsaved touch only falls back to the previous
+        # tick's last_seen -- still far away from the 24h stale mark.
+        if not old or now - old >= self.interval:
+            self.state.save()
+
     async def _check_offline(self) -> None:
         # Without a self_id filter a multi-bot instance could probe another
         # bot's connection and report the wrong one as offline.
@@ -2253,6 +2332,7 @@ class AlertEngine:
             online = adapter_running(adapter)
             if online is None:
                 logger.debug("QQ 官方机器人状态未知，跳过本次掉线采样")
+                self._touch_offline_seen()
                 return
         else:
             client = _get_aiocqhttp_client(
@@ -2280,6 +2360,7 @@ class AlertEngine:
                     # connection instead of warning about it. The warning flag
                     # stays untouched so a client that never shows up is still
                     # reported once the grace period is over.
+                    self._touch_offline_seen()
                     return
                 if not self._client_missing_warned:
                     self._client_missing_warned = True
@@ -2290,6 +2371,7 @@ class AlertEngine:
                         self.platform_id,
                         self_id or "（空）",
                     )
+                self._touch_offline_seen()
                 return
 
             try:
@@ -2543,6 +2625,10 @@ class AlertEngine:
                 "unreachable_warned"
             ):
                 st["unreachable_warned"] = True
+                # Persist the warn flag before the send: a crash during
+                # delivery would otherwise replay the same notice after
+                # the restart (v2.21.3).
+                self.state.save()
                 logger.warning(
                     "OneBot 状态查询连续 %d 次失败，暂时无法确认 Bot 在线状态",
                     unreachable + 1,
@@ -2659,6 +2745,12 @@ class AlertEngine:
             )
             if had_pending_recovery:
                 text += "\n（上一次的恢复通知未送达，已并入本条）"
+            # Latch before the slow send: a crash or reload inside the 20-60s
+            # delivery used to lose the in-memory ``alerting`` flag, and the
+            # next start replayed the whole offline alert -- a duplicate in
+            # the chat. The recovery branch has persisted its closed episode
+            # since v2.20.5; this is the alert-side twin (v2.21.3).
+            self.state.save()
             result = await self._send(text, kind="offline")
             delivered = self._delivered(result)
             st["pending_alert"] = not delivered
@@ -3672,8 +3764,8 @@ class AlertEngine:
                 )
             body_key = hashlib.sha256(raw).hexdigest()
             last_key, last_ts = self._webhook_last
-            if body_key == last_key and time.time() - last_ts < 5.0:
-                logger.info("Komari Webhook 重复请求（5 秒内相同内容），已忽略")
+            if body_key == last_key and time.time() - last_ts < 30.0:
+                logger.info("Komari Webhook 重复请求（30 秒内相同内容），已忽略")
                 return web.json_response({"status": "ok", "duplicate": True})
             # Register the body as in-flight before the await so two identical
             # requests arriving while one send is still running cannot both
@@ -3711,18 +3803,27 @@ class AlertEngine:
 
         app.router.add_post(path, handle)
         runner = web.AppRunner(app)
+        # Assign before setup/start: a cancel landing between setup() and
+        # start() used to leave the runner set up but unreachable by
+        # stop_webhook() (CancelledError is a BaseException, so the except
+        # below never ran) -- the port listener leaked and the next start
+        # collided with it (v2.21.3). stop_webhook() now always sees the
+        # runner, and a start failure cleans it up here.
+        self._webhook_runner = runner
         try:
             await runner.setup()
             site = web.TCPSite(runner, host, port)
             await site.start()
-        except Exception as exc:
-            logger.error("Komari Webhook 启动失败 %s:%s: %s", host, port, exc)
+        except BaseException as exc:
+            self._webhook_runner = None
             try:
                 await runner.cleanup()
             except Exception:
                 pass
-            return
-        self._webhook_runner = runner
+            if isinstance(exc, Exception):
+                logger.error("Komari Webhook 启动失败 %s:%s: %s", host, port, exc)
+                return
+            raise
         self._webhook_site = site
         logger.info("Komari Webhook 已监听 http://%s:%s%s", host, port, path)
 

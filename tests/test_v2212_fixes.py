@@ -570,6 +570,9 @@ def test_the_missing_client_warning_waits_for_the_grace_period(
     engine._started_at = time.time()
     engine.plugin = SimpleNamespace(context=None)
     engine.state = StateStore(tmp_path / "state.json")
+    # _touch_offline_seen (v2.21.3) reads the sampling interval to rate-limit
+    # its saves; object.__new__ skips __init__ so set it here.
+    engine.interval = 60
 
     monkeypatch.setattr(alerts_module, "_get_aiocqhttp_client", lambda *a, **k: None)
     asyncio.run(engine._check_offline())
@@ -727,8 +730,10 @@ def test_both_engines_clear_the_recovery_marker_on_delivery() -> None:
         assert marker >= 3, (name, marker)
         # It is set when the recovery is queued behind a summary.
         assert 'st["recovery_awaits_summary"] = True' in source, name
-        # And it is cleared when the recovery does not depend on a summary.
-        assert 'st["recovery_awaits_summary"] = False' in source, name
+        # And it is never written back as False anywhere: a recovery that
+        # stops depending on a summary pops the marker (v2.21.3), so a bare
+        # `= False` write would leave a stale key in state.json.
+        assert 'st["recovery_awaits_summary"] = False' not in source, name
 
 
 # ----------------------------------------------------------------------

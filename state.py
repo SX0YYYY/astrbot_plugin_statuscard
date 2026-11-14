@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import shutil
 import threading
@@ -14,6 +15,24 @@ from typing import Any
 from astrbot.api import logger
 
 SCHEMA_VERSION = 1
+
+
+def _scrub_floats(value: Any) -> Any:
+    """Replace non-finite floats with ``None`` for strict JSON output.
+
+    ``json.dumps`` silently emits ``NaN``/``Infinity`` (invalid JSON) unless
+    ``allow_nan=False``. Every reader in this plugin goes through safe_float,
+    but an external parser of state.json does not -- scrub and retry instead
+    of failing the whole save (v2.21.3).
+    """
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _scrub_floats(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_floats(v) for v in value]
+    return value
 
 
 class StateStore:
@@ -240,18 +259,28 @@ class StateStore:
                             time.sleep(0.002)
                 if snapshot is None:  # pragma: no cover - defensive
                     raise RuntimeError("state snapshot unavailable")
-                payload = json.dumps(snapshot, ensure_ascii=False, indent=1)
-                backup = self.path.with_name(self.path.name + ".bak")
                 try:
-                    # Only refresh .bak with a file that still parses. After a
-                    # recovery state.json is valid again, but if a bad write
-                    # ever leaves it broken this keeps the last good copy
-                    # instead of overwriting it with garbage.
-                    if self.path.is_file() and self._is_readable_state(self.path):
-                        shutil.copy2(self.path, backup)
+                    payload = json.dumps(
+                        snapshot, ensure_ascii=False, indent=1, allow_nan=False
+                    )
+                except ValueError:
+                    # A NaN/Infinity slipped into the state from a bad
+                    # collector value. Scrub and retry once; the cleaned
+                    # values are read back through safe_float anyway.
+                    payload = json.dumps(
+                        _scrub_floats(snapshot), ensure_ascii=False, indent=1
+                    )
+                backup = self.path.with_name(self.path.name + ".bak")
+                self._write_payload(payload)
+                # Refresh .bak AFTER the write succeeded: the old order
+                # copied state.json before it was replaced, so .bak always
+                # held the NEXT-TO-LAST state and an external corruption of
+                # the fresh file lost one save of data (v2.21.3). The payload
+                # just written parsed here, so no re-read guard is needed.
+                try:
+                    shutil.copy2(self.path, backup)
                 except Exception:
                     pass
-                self._write_payload(payload)
         except Exception as exc:
             logger.warning("写入状态文件失败 %s: %s", self.path, exc)
 

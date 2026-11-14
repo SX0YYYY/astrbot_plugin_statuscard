@@ -193,6 +193,16 @@
   }
 
   function applyStaticI18n() {
+    // The data-i18n pass below rewrites every button label, which resets an
+    // armed verify button's "再点一次确认发送" text while its armed flag
+    // stayed "1" -- the next click within 5s then sent a real message while
+    // the button looked untouched. Disarm first (v2.21.3).
+    document
+      .querySelectorAll("#verify-buttons .verify-armed")
+      .forEach((button) => {
+        button.dataset.armed = "";
+        button.classList.remove("verify-armed");
+      });
     document.querySelectorAll("[data-i18n]").forEach((element) => {
       const key = element.getAttribute("data-i18n");
       element.textContent = t(key, element.textContent);
@@ -1503,24 +1513,36 @@
     }
     const range = state.historyRange || "7d";
     const kinds = ["resources", "processes", "websites", "events"];
-    // Fetch every kind first (parallel), then trigger the downloads back to
-    // back WITHOUT awaits between them: the old per-kind loop spaced the
+    // Fetch every kind first (in parallel), then trigger the downloads back
+    // to back WITHOUT awaits between them: the old per-kind loop spaced the
     // clicks out with a network round-trip + 250ms each, which pushed the
     // 2nd-4th downloads out of the user-gesture window and got them blocked
     // by the browser's "multiple automatic downloads" guard while the toast
-    // still claimed success (v2.20.32).
+    // still claimed success (v2.20.32). The fetches were still sequential
+    // until v2.21.3 (the comment claimed parallel); Promise.all keeps the
+    // same ordering for the payload list while overlapping the requests.
     let truncated = false;
     const payloads = [];
-    for (const kind of kinds) {
-      let data = null;
-      try {
-        // Use the module-level apiGet: it parses a JSON *string* from the
-        // bridge. Calling bridge.apiGet directly meant a string payload made
-        // every export fail with "导出在 resources 中断（已导出 0 个文件）"
-        // while the data was there (v2.20.20).
-        data = await apiGet("export", { kind, range });
-      } catch (error) {
-        throw exportInterruptError(kind, payloads.length, error);
+    const failures = new Map();
+    const fetched = await Promise.all(
+      kinds.map(async (kind) => {
+        try {
+          // Use the module-level apiGet: it parses a JSON *string* from the
+          // bridge. Calling bridge.apiGet directly meant a string payload made
+          // every export fail with "导出在 resources 中断（已导出 0 个文件）"
+          // while the data was there (v2.20.20).
+          return await apiGet("export", { kind, range });
+        } catch (error) {
+          failures.set(kind, error);
+          return null;
+        }
+      }),
+    );
+    for (let i = 0; i < kinds.length; i += 1) {
+      const kind = kinds[i];
+      const data = fetched[i];
+      if (data === null) {
+        throw exportInterruptError(kind, payloads.length, failures.get(kind));
       }
       if (data && data.db_unavailable) {
         throw new Error(
@@ -1578,8 +1600,15 @@
       // Excel/WPS executes a cell starting with =,+,-,@ as a formula, and
       // event details can carry text returned by probed services. The
       // leading pipe covers the legacy DDE vector (v2.20.0). Leading spaces
-      // and full-width variants bypassed the check (v2.20.5).
-      if (/^[\s\u3000]*[=+\-@\t|＝＋－＠]/.test(text)) text = "'" + text;
+      // and full-width variants bypassed the check (v2.20.5). A plain number
+      // (possibly negative, with a decimal point or exponent) is not a
+      // formula: prefixing it turned an exported -0.5 into the text
+      // "'-0.5" (v2.21.3).
+      if (
+        !/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(text) &&
+        /^[\s\u3000]*[=+\-@\t|＝＋－＠]/.test(text)
+      )
+        text = "'" + text;
       return /[",]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     };
     const lines = [headers.join(",")];
@@ -2450,7 +2479,8 @@
       throw new Error(
         t(
           (data && data.error_code) || "report_build_failed",
-          (data && data.error) || "日报数据构建失败，请稍后重试",
+          (data && (data.error || data.message)) ||
+            "日报数据构建失败，请稍后重试",
         ),
       );
     }

@@ -525,9 +525,11 @@ def test_anomaly_section_discloses_row_cap(tmp_path) -> None:
         day="2026-11-05", history_days=7, span_days=1, sections=["anomaly"]
     )
 
-    # The report reads the day itself and the previous day (cross-midnight
-    # pairing), so both are over the cap.
-    assert view["anomalies"]["data_truncated"] == 2000
+    # The report reads the day itself (5000 cap) and the previous day. Since
+    # v2.21.3 the previous day is also fed by the 20000-row outside-window
+    # lookback, so only the window day discloses a truncation here (6000 > 5000,
+    # but 6000 < 20000 for the previous day).
+    assert view["anomalies"]["data_truncated"] == 1000
     text = build_report_text(view)
     assert "可能有故障未被统计" in text
 

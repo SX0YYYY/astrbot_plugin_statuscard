@@ -93,7 +93,11 @@ def connect_readonly(db_path: Path | str | None = None) -> sqlite3.Connection | 
     if path is None or not path.is_file():
         return None
     try:
-        return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=3)
+        # '?' and '#' are legal filename characters but delimit the query
+        # part of a SQLite URI; percent-encode just those two (SQLite decodes
+        # %HH itself), so mode=ro survives such a data directory (v2.21.3).
+        ro_path = path.as_posix().replace("?", "%3F").replace("#", "%23")
+        return sqlite3.connect(f"file:{ro_path}?mode=ro", uri=True, timeout=3)
     except Exception:
         return None
 
@@ -135,7 +139,14 @@ def fetch_window(
 def fetch_recent(
     connection: sqlite3.Connection, limit: int = 20
 ) -> list[tuple[str, str]]:
-    """The newest ``limit`` ``(created_at, status)`` pairs, newest first."""
+    """The newest ``limit`` ``(created_at, status)`` pairs, newest first.
+
+    Rows whose ``created_at`` is not parseable are dropped: the column is
+    TEXT and a hand-edited/external row sorts ABOVE every real timestamp in
+    the DESC order, where it either inflated the error streak or masked a
+    live one behind a fake "completed" head row (v2.21.3; the same guard
+    exists for ``start_time`` since v2.20.33).
+    """
 
     rows = connection.execute(
         """
@@ -146,7 +157,11 @@ def fetch_recent(
         """,
         (max(1, int(limit)),),
     ).fetchall()
-    return [(str(row[0] or ""), str(row[1] or "")) for row in rows]
+    return [
+        (str(row[0] or ""), str(row[1] or ""))
+        for row in rows
+        if parse_utc_value(row[0]) is not None
+    ]
 
 
 def error_streak(recent: list[tuple[str, str]]) -> int:
@@ -207,7 +222,13 @@ def fetch_recent_full(
         """,
         (max(1, int(limit)),),
     ).fetchall()
-    return [(str(r[0] or ""), str(r[1] or ""), _safe_start_time(r[2])) for r in rows]
+    # Drop rows with an unparseable created_at, same as fetch_recent: a dirty
+    # row always sorts first and blinds the streak probe (v2.21.3).
+    return [
+        (str(r[0] or ""), str(r[1] or ""), _safe_start_time(r[2]))
+        for r in rows
+        if parse_utc_value(r[0]) is not None
+    ]
 
 
 def recent_streak(

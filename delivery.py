@@ -25,7 +25,7 @@ from astrbot.api import logger
 
 from .onebot_receipt import is_action_rejected, send_direct, should_retry_send
 from .platform_support import ensure_group_scene, find_adapter, parse_umo
-from .utils import mask_umo
+from .utils import mask_chat_ids, mask_umo
 
 # Failures that happen before the request can reach the platform: a broken
 # message chain (Comp.Image on a missing file), a framework signature change,
@@ -257,8 +257,8 @@ class DeliveryService:
                     # may use a different send route, and a retry is safe.
                     logger.warning(
                         "目标 %s 的 OneBot 直发被明确拒绝（%s），尝试框架发送",
-                        target,
-                        receipt.error or "未知错误",
+                        mask_umo(target),
+                        mask_chat_ids(receipt.error or "未知错误"),
                     )
                     result.failed_targets.append(target)
                     result.rejected_targets.append(target)
@@ -268,8 +268,8 @@ class DeliveryService:
                     # re-sending would duplicate it.
                     logger.warning(
                         "目标 %s 的 OneBot 直发返回错误（%s），不再重发以免重复",
-                        target,
-                        receipt.error or "未知错误",
+                        mask_umo(target),
+                        mask_chat_ids(receipt.error or "未知错误"),
                     )
                     result.failed_targets.append(target)
                     result.uncertain_targets.append(target)
@@ -362,13 +362,23 @@ class DeliveryService:
                 )
                 if sent:
                     return True, False, False
-                logger.warning("主动%s未找到匹配平台: %s", label, target)
+                # A falsy return has two very different causes: no platform
+                # instance matches the target's prefix, OR the official
+                # adapter dropped the message because its in-memory scene
+                # cache was empty (platform_support.send_by_session returns
+                # None silently). Naming both keeps the operator from chasing
+                # a "wrong platform" that is actually a lost cache (v2.21.3).
+                logger.warning(
+                    "主动%s未找到匹配平台（或官方机器人会话缓存丢失被跳过）: %s",
+                    label,
+                    mask_umo(target),
+                )
                 return False, False, True
             except TimeoutError:
                 logger.warning(
                     "主动发送%s到 %s 超时（60 秒，可能已送达，不再重发以免重复）",
                     label,
-                    target,
+                    mask_umo(target),
                 )
                 return False, True, False
             except Exception as exc:

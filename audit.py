@@ -529,7 +529,21 @@ def run_audit(
             ("alerts.load_per_core_threshold", "每核负载"),
         ):
             try:
-                value = cfg_float(config, key, 1.0)
+                # Defaults match the runtime readers in alerts.py: a missing
+                # key used to audit as 1.0 while the rule actually ran on its
+                # real default (85/90/...), and any future reader of that
+                # default would have drifted (v2.21.3).
+                value = cfg_float(
+                    config,
+                    key,
+                    {
+                        "alerts.cpu_threshold": 85.0,
+                        "alerts.mem_threshold": 90.0,
+                        "alerts.swap_threshold": 90.0,
+                        "alerts.disk_threshold": 85.0,
+                        "alerts.load_per_core_threshold": 2.0,
+                    }[key],
+                )
             except (TypeError, ValueError):
                 continue
             if not math.isfinite(value):

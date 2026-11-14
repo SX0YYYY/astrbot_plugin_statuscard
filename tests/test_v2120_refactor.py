@@ -84,31 +84,10 @@ def test_apply_card_leaves_everything_alone_without_rules() -> None:
     assert "redacted" not in view
 
 
-def test_apply_report_hides_the_qq_section() -> None:
-    section = {
-        "available": True,
-        "days": ["2026-10-20"],
-        "labels": ["10-20"],
-        "yesterday": {"friends": 22},
-        "previous": {},
-        "reset_days": [],
-        "sent_available": True,
-        "snapshot_note": "note",
-        "recv_note": "note",
-        "charts": {"friends": []},
-        "note": "",
-    }
-    Redactor(["qq_stats"]).apply_report(section, "qq")
-    assert section["available"] is False
-    assert section["empty_reason"] == "已按脱敏配置隐藏 QQ 统计"
-    assert section["yesterday"] == {}
-    assert section["charts"] == {}
-
-
-def test_apply_report_hides_the_process_names() -> None:
-    section = {"top": [{"name": "python3", "cpu_text": "1.0%"}]}
-    Redactor(["process"]).apply_report(section, "process")
-    assert section["top"][0]["name"] == HIDDEN
+# Redactor.apply_report was removed with v2.21.3: the daily report's QQ
+# section has been redacted by report_view._qq_section since v2.12.x and the
+# two implementations had drifted apart (the dead one was missing the
+# scope_label key), so keeping it invited one-sided edits.
 
 
 def test_dashboard_host_is_hidden_by_the_hostname_rule() -> None:

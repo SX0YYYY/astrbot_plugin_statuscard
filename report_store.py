@@ -710,6 +710,7 @@ class ReportStore:
         target: str | None = None,
         close_all: bool = False,
         item_key: str | None = None,
+        match_legacy: bool = True,
     ) -> bool:
         """Mark the newest open alert of ``name`` as resolved.
 
@@ -743,13 +744,19 @@ class ReportStore:
             conditions.append("target = ?")
             case_params.append(target)
         if item_key is not None:
-            # Close this item's own NEW rows plus every LEGACY row of the same
-            # triple. A row written by <=2.20.27 has item_key NULL; an
-            # upgrade-in-flight episode must still be closable, otherwise the
-            # daily report keeps it in "unresolved" for the whole retention
-            # window. Rows of another NEW item carry a different key and are
-            # left untouched.
-            conditions.append("(item_key = ? OR item_key IS NULL)")
+            if match_legacy:
+                # Close this item's own NEW rows plus every LEGACY row of the same
+                # triple. A row written by <=2.20.27 has item_key NULL; an
+                # upgrade-in-flight episode must still be closable, otherwise the
+                # daily report keeps it in "unresolved" for the whole retention
+                # window. Rows of another NEW item carry a different key and are
+                # left untouched.
+                conditions.append("(item_key = ? OR item_key IS NULL)")
+            else:
+                # NEW rows only: a same-name survivor shares kind+name+target,
+                # so closing the LEGACY rows here could end a live fault's row
+                # (monitor._prune_state's duplicate_alive branch, v2.21.3).
+                conditions.append("item_key = ?")
             case_params.append(item_key)
         cond_sql = " AND ".join(conditions)
         if close_all:
@@ -808,6 +815,30 @@ class ReportStore:
             LIMIT 1
             """,
             params,
+        )
+        return bool(rows)
+
+    def has_open_keyed_alert(
+        self, kind: str, name: str, target: str, item_key: str
+    ) -> bool:
+        """Whether an OPEN alert row written with this item_key exists.
+
+        Used when the recovery must NOT degrade to the legacy shape (a
+        same-name survivor shares the triple): without a keyed open row a
+        keyed recovery would find nothing to close and would surface in the
+        daily report as an orphan "recovered" line with no episode behind it
+        (reverse audit v2.21.3).
+        """
+
+        rows = self._query(
+            """
+            SELECT 1 FROM events
+            WHERE kind = ? AND name = ? AND COALESCE(target, '') = ?
+              AND status IN ('alert', 'failed')
+              AND resolved_ts IS NULL AND item_key = ?
+            LIMIT 1
+            """,
+            (kind, name, str(target or ""), str(item_key or "")),
         )
         return bool(rows)
 

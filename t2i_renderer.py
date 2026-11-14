@@ -37,24 +37,6 @@ def _percent_to_color(percent: float) -> str:
     return "prog-high"
 
 
-def _auto_convert_unit(
-    value: float,
-    suffix: str = "",
-    with_space: bool = False,
-    unit_index: int | None = None,
-) -> str:
-    units = ["B", "KB", "MB", "GB", "TB"]
-    idx = 0
-    v = float(value or 0)
-    while (unit_index is None) and v >= 1024 and idx < len(units) - 1:
-        v /= 1024
-        idx += 1
-    if unit_index is not None:
-        idx = unit_index
-    sp = " " if with_space else ""
-    return f"{v:.0f}{sp}{units[idx]}{suffix}"
-
-
 def _br_filter(value: Any) -> Markup:
     if value is None:
         return Markup("")
@@ -175,7 +157,6 @@ def build_default_html(
     env = jinja2.Environment(autoescape=jinja2.select_autoescape(["html", "xml"]))
     env.filters.update(
         percent_to_color=_percent_to_color,
-        auto_convert_unit=_auto_convert_unit,
         br=_br_filter,
     )
     template = env.from_string(tmpl)

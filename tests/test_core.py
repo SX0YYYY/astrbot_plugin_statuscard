@@ -23,7 +23,6 @@ from astrbot_plugin_statuscard.collectors import (
 from astrbot_plugin_statuscard.monitor import ServiceMonitor
 from astrbot_plugin_statuscard.state import SCHEMA_VERSION, StateStore
 from astrbot_plugin_statuscard.t2i_renderer import (
-    _auto_convert_unit,
     _br_filter,
     _percent_to_color,
     build_default_html,
@@ -449,12 +448,6 @@ def test_percent_to_color_thresholds() -> None:
     assert _percent_to_color(70) == "prog-medium"
     assert _percent_to_color(89.9) == "prog-medium"
     assert _percent_to_color(90) == "prog-high"
-
-
-def test_auto_convert_unit() -> None:
-    assert _auto_convert_unit(0) == "0B"
-    assert _auto_convert_unit(1536) == "2KB"
-    assert _auto_convert_unit(1536, with_space=True) == "2 KB"
 
 
 def test_br_filter_escapes_html_before_adding_breaks() -> None:

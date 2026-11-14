@@ -678,9 +678,12 @@ main.is-refreshing::after {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent);
 }
 
+/* Never probed yet: neutral grey, deliberately NOT the yellow of
+   "degraded" (failed latest probe but below the threshold) -- the two
+   used to share one colour and were indistinguishable (v2.21.3). */
 .dot.unknown {
-  background: var(--warn);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent);
+  background: var(--faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 18%, transparent);
 }
 
 /* Failed the latest probe but has not reached the alert threshold. */
@@ -1200,6 +1203,13 @@ main.is-refreshing::after {
    row that says "未恢复" looked like a brand-new incident. The accent hue
    is deliberately not the yellow of "failed": the two were almost
    impossible to tell apart. */
+/* Fallback for a status the backend could add later: a bare pill with
+   no colours read as a rendering bug (v2.21.3). */
+.badge.unknown {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .badge.unresolved {
   background: var(--accent-soft);
   color: var(--accent);

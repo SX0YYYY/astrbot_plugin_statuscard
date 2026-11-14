@@ -1467,6 +1467,27 @@ class DailyReporter:
             try:
                 if not self._weekly_enabled():
                     self._weekly_next_run_text = None
+                    # Mirror the daily disable branch: a pending weekly retry
+                    # left behind when the operator disabled the weekly report
+                    # would fire at an arbitrary moment after re-enabling
+                    # without a reload (v2.21.3).
+                    if (
+                        self._weekly_pending is not None
+                        or self._weekly_pending_report_day is not None
+                        or self._weekly_image_pending is not None
+                        or self._weekly_image_report_day is not None
+                    ):
+                        self._weekly_pending = None
+                        self._weekly_pending_report_day = None
+                        self._weekly_image_pending = None
+                        self._weekly_image_report_day = None
+                        self._weekly_retry_count = 0
+                        self._weekly_image_attempts = 0
+                        self._weekly_given_up_week = None
+                        self._weekly_offline_retry_count = 0
+                        self._weekly_offline_retry_ts = 0.0
+                        self._save_delivery_state()
+                        logger.info("周报已关闭，补发排队已清空")
                     await asyncio.sleep(60)
                     continue
                 if self._weekly_image_pending is not None:
@@ -1967,6 +1988,10 @@ class DailyReporter:
             week_key = f"{iso.year}-W{iso.week:02d}"
         if self._weekly_last_sent_week == week_key:
             logger.info("周报 %s 已发送过，跳过重复发送", week_key)
+            # The pending report day was written just before this check; the
+            # success path clears it, this early return did not (v2.21.3).
+            self._weekly_pending_report_day = None
+            self._save_delivery_state()
             return
         if slot and self._weekly_last_sent_slot == slot:
             # A redundant second guard: the same slot must not be delivered
@@ -2033,7 +2058,11 @@ class DailyReporter:
                     self._weekly_last_sent_week = week_key
                     self._weekly_last_sent_slot = slot
                     self._weekly_given_up_week = None
-                    self._record(day, True, "weekly-image unconfirmed")
+                    # Not a confirmed delivery: record it as failed, like the
+                    # daily path, so the send history does not show a clean
+                    # success (the detail still says "unconfirmed",
+                    # v2.21.3).
+                    self._record(day, False, "weekly-image unconfirmed")
                     self._weekly_pending = None
                     self._weekly_pending_report_day = None
                     self._weekly_retry_count = 0
@@ -2079,7 +2108,9 @@ class DailyReporter:
             logger.warning("周报文字发送未确认（无法确认是否送达），已按不重发处理")
             self._weekly_last_sent_week = week_key
             self._weekly_last_sent_slot = slot
-            self._record(day, True, "weekly-text unconfirmed")
+            # Not a confirmed delivery: record it as failed, like the daily
+            # path (v2.21.3).
+            self._record(day, False, "weekly-text unconfirmed")
             self._weekly_pending = None
             self._weekly_pending_report_day = None
             self._weekly_retry_count = 0
@@ -2322,6 +2353,7 @@ class DailyReporter:
             or self._pending_retry_day is not None
             or getattr(self, "_pending_recovery_day", None) is not None
             or bool(getattr(self, "_pending_recovery_since", 0.0))
+            or getattr(self, "_pending_image_retry", None) is not None
             or self._pending_image_retry_report_day is not None
             or self._pending_image_retry_send_day is not None
             # The offline backoff counters: a delivered report means the
@@ -2335,6 +2367,10 @@ class DailyReporter:
         self._pending_retry_day = None
         self._pending_recovery_day = None
         self._pending_recovery_since = 0.0
+        # The retry timestamp itself: the report/send days below were already
+        # cleared, but a leftover timestamp still fired one empty
+        # (report_day=None) run at its due moment (v2.21.3).
+        self._pending_image_retry = None
         self._pending_image_retry_report_day = None
         self._pending_image_retry_send_day = None
         self._offline_retry_count = 0

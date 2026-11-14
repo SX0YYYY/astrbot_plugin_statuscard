@@ -47,7 +47,7 @@ _ADDRESS_RE = re.compile(
     # full-token attempt was rejected (v2.20.32). Real hosts rarely end in a
     # source extension; "example.com:8080" is unaffected.
     r"(?<![\w.$-])"
-    r"(?!\b[A-Za-z][A-Za-z0-9_.-]*\.(?:py|js|ts|mjs|cjs|jsx|tsx|json|md|html|css|sh|bash|yaml|yml|toml|cfg|ini|txt|log|jinja|j2|sql|bat|ps1|rb|go|rs|java|kt|php|c|h|cpp|hpp)\b)"
+    r"(?!\b[A-Za-z][A-Za-z0-9_.-]*\.(?:py|js|ts|mjs|cjs|jsx|tsx|json|md|html|css|sh|bash|yaml|yml|toml|cfg|conf|ini|env|service|timer|txt|log|jinja|j2|sql|bat|ps1|rb|go|rs|java|kt|php|lua|c|h|cpp|hpp)\b)"
     r"(?:\b[A-Za-z][A-Za-z0-9_.-]*|\b(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"  # host:port
     r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"  # IPv4
     r"|https?://" + _URL_STOP + r"+"  # URL
@@ -178,6 +178,7 @@ _HOST_SUFFIXES = {
     "ai",
     "app",
     "arpa",
+    "asia",
     "biz",
     "cc",
     "club",
@@ -190,13 +191,16 @@ _HOST_SUFFIXES = {
     "de",
     "dev",
     "digital",
+    "edu",
     "eu",
     "example",
     "fr",
+    "gov",
     "group",
     "hk",
     "home",
     "info",
+    "int",
     "internal",
     "io",
     "jp",
@@ -209,6 +213,9 @@ _HOST_SUFFIXES = {
     "localhost",
     "me",
     "media",
+    "mil",
+    "mobi",
+    "museum",
     "net",
     "network",
     "online",
@@ -224,6 +231,7 @@ _HOST_SUFFIXES = {
     "support",
     "systems",
     "tech",
+    "tel",
     "test",
     "tools",
     "top",
@@ -231,6 +239,7 @@ _HOST_SUFFIXES = {
     "tw",
     "uk",
     "us",
+    "vip",
     "wiki",
     "work",
     "world",
@@ -420,38 +429,6 @@ class Redactor:
                 bot[key] = None
         view["redacted"] = self.sorted_rules
         return view
-
-    # ------------------------------------------------------------------
-    # daily report
-    # ------------------------------------------------------------------
-
-    def apply_report(self, section: dict[str, Any], name: str) -> dict[str, Any]:
-        """Redact one section of a daily-report view in place.
-
-        The report renders its own sections, so the report knows which
-        section it is and can be redacted precisely.
-        """
-
-        if not self.rules:
-            return section
-        if name == "qq" and self.qq_stats:
-            section["available"] = False
-            section["empty_reason"] = "已按脱敏配置隐藏 QQ 统计"
-            for key in ("days", "labels"):
-                section[key] = []
-            for key in ("yesterday", "previous"):
-                section[key] = {}
-            section["reset_days"] = []
-            section["sent_available"] = False
-            section["snapshot_note"] = None
-            section["recv_note"] = None
-            section["charts"] = {}
-            section["note"] = ""
-        if name == "process" and self.process:
-            for item in section.get("top", []) or []:
-                if isinstance(item, dict):
-                    item["name"] = HIDDEN
-        return section
 
     # ------------------------------------------------------------------
     # web dashboard

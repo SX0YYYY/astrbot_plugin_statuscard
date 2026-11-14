@@ -242,9 +242,11 @@ def known_group_session_ids(
     )
     pattern = f"{escaped}:GroupMessage:%" if platform_id else "%:GroupMessage:%"
     try:
-        connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2
-        )
+        # Percent-encode '?'/'#' exactly like provider_quality.connect_readonly
+        # does: they are legal filename characters but delimit the query part
+        # of a SQLite URI (v2.21.3).
+        ro_path = path.as_posix().replace("?", "%3F").replace("#", "%23")
+        connection = sqlite3.connect(f"file:{ro_path}?mode=ro", uri=True, timeout=2)
         try:
             # Deduplicate in Python, not with ``GROUP BY umo``: AstrBot's
             # ``unique_session`` makes the UMO ``...:sender_group``, so

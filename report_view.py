@@ -1058,7 +1058,10 @@ class DailyReportBuilder:
         window_days = {
             (day - timedelta(days=offset)).isoformat() for offset in range(span)
         }
-        events = self.store.list_events(previous.isoformat(), limit=5000)
+        # Same cap as the outside-window lookback below (20000): both read the
+        # previous day's rows, and a flapping rule over 5000 rows/day used to
+        # make the two loops see DIFFERENT slices of that day (v2.21.3).
+        events = self.store.list_events(previous.isoformat(), limit=20000)
         for offset in range(span):
             boundary = day - timedelta(days=offset)
             events += self.store.list_events(boundary.isoformat(), limit=5000)
@@ -1075,8 +1078,13 @@ class DailyReportBuilder:
         event_row_limit = 5000
         data_truncated = 0
         for day_text in window_days | {previous.isoformat()}:
+            # The previous day is ALSO read by the outside-window lookback at
+            # a 20000-row cap, so its disclosure must use that cap: a 6000-row
+            # previous day is not actually truncated there, and saying so
+            # contradicted the data (reverse audit v2.21.3).
+            day_limit = 20000 if day_text == previous.isoformat() else event_row_limit
             total_rows = sum(self.store.count_events(day_text).values())
-            if total_rows > event_row_limit:
+            if total_rows > day_limit:
                 data_truncated += total_rows - event_row_limit
         events.sort(
             key=lambda item: (
@@ -1228,6 +1236,15 @@ class DailyReportBuilder:
                 continue
             key = _pair_key(event, name)
             stamp = safe_int(event.get("ts") or 0)
+            if stamp <= 0:
+                # A hand-edited/external ts of 0 (or text that safe_int
+                # coerced to 0) would open an epoch episode and drag every
+                # later row of the rule into a "cross-window" "--" duration
+                # (v2.21.3). The render loop drops these rows through the
+                # window check; the pairing loop has no such check, so skip
+                # them here too -- otherwise the next clean row would join
+                # the epoch episode.
+                continue
             if status in {"alert", "failed"}:
                 display_start[(key, stamp)] = _event_start(event)
                 current = open_episode.get(key)
@@ -1337,9 +1354,13 @@ class DailyReportBuilder:
             key = _pair_key(event, name)
             resolved_ts = event.get("resolved_ts")
             started_i = safe_int(event.get("ts") or 0)
-            if _local_dt(started_i, self.tz) is None:
+            if started_i <= 0 or _local_dt(started_i, self.tz) is None:
                 # A corrupt event timestamp must not abort the whole report;
                 # skip the row before any pairing/counting side effect.
+                # ``<= 0`` keeps the render loop in step with the pairing
+                # loop's dirty-row guard: without it a ts=0 row showed as a
+                # phantom "01-01 进行中" line and inflated the headline count
+                # (reverse audit v2.21.3).
                 continue
             outside = str(event.get("day") or "") not in window_days
             if outside:

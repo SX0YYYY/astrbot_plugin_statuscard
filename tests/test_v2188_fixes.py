@@ -9,6 +9,7 @@ UMOs are masked, and the report CSS goes in as a template variable.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import date
 from pathlib import Path
@@ -80,7 +81,9 @@ def test_prune_rules_closes_orphan_episode(tmp_path: Path) -> None:
             }
         },
     )
-    engine._prune_rules({"cpu"})
+    # _prune_rules is async since v2.21.3: the close notices go through the
+    # async _send path.
+    asyncio.run(engine._prune_rules({"cpu"}))
     rules = engine.state.get("alerts")["rules"]
     assert set(rules) == {"cpu"}
     events = store.list_events_range(0, int(time.time()) + 60, limit=10)

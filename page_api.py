@@ -168,6 +168,15 @@ def _normalize_range(raw: Any, default: str) -> str:
     return default
 
 
+def _cpu_count_safe() -> int:
+    """``psutil.cpu_count`` with a fallback; 1 keeps the ratio math honest."""
+
+    try:
+        return psutil.cpu_count(logical=True) or 1
+    except Exception:
+        return 1
+
+
 def _mask_umo(target: Any) -> str:
     """Thin wrapper over the shared :func:."""
 
@@ -702,7 +711,11 @@ class PageApi:
                 "uptime_seconds": uptime_seconds,
                 "cpu": {
                     "percent": round(cached_cpu_percent(), 1),
-                    "count": psutil.cpu_count(logical=True) or 1,
+                    # A restricted /proc can make even cpu_count raise; every
+                    # other psutil read here is guarded, this one was the last
+                    # bare call and took the whole overview route down with
+                    # it (v2.21.3).
+                    "count": _cpu_count_safe(),
                     "load1": load1,
                 },
                 "memory": {
@@ -1099,7 +1112,10 @@ class PageApi:
                 raise
             except Exception as exc:
                 self._verify_inflight.pop(kind, None)
-                self._verify_last[kind] = time.time()
+                # Do NOT charge the cooldown on a failed request, matching the
+                # targets branch: the operator fixes the host/port and retries
+                # immediately, and a 30-second lockout right after the fix
+                # reads like the verification is broken (v2.21.3).
                 return jsonify(
                     {
                         "ok": True,
@@ -1574,11 +1590,15 @@ class PageApi:
                 # Silently building "yesterday" for an unparseable date made
                 # the page look like the jump worked: the header showed the
                 # default day and the user thought they had jumped to it
-                # (v2.20.21).
+                # (v2.20.21). ``error`` carries the text because that is the
+                # field the frontend reads for a failed payload -- ``message``
+                # alone left the real reason under a generic fallback
+                # (v2.21.3).
                 return jsonify(
                     {
                         "ok": False,
                         "error_code": "report_day_invalid",
+                        "error": f"无法识别的日期: {raw_day[:32]}",
                         "message": f"无法识别的日期: {raw_day[:32]}",
                     }
                 )
@@ -1588,6 +1608,7 @@ class PageApi:
                     {
                         "ok": False,
                         "error_code": "report_day_out_of_range",
+                        "error": "日期超出可查询范围（今天往前 30 年以内）",
                         "message": "日期超出可查询范围（今天往前 30 年以内）",
                     }
                 )

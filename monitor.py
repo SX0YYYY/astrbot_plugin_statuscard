@@ -686,6 +686,22 @@ class ServiceMonitor:
                     dependency,
                 )
                 self._suppress_warned.add(dependency)
+            elif (
+                # _find_dependency matches by name and returns the FIRST one;
+                # two monitors may share a name with different targets, and
+                # the dependency then tracks whichever the loop finds first
+                # -- not necessarily the one the operator meant. One warning
+                # so the ambiguity is visible (v2.21.3).
+                sum(1 for other in self.items if str(other.get("name")) == dependency)
+                > 1
+                and dependency not in self._suppress_warned
+            ):
+                logger.warning(
+                    "suppress_when_down=%r 匹配到多个同名监测项，"
+                    "抑制只跟随第一个；请拆分为不同的监测项名称",
+                    dependency,
+                )
+                self._suppress_warned.add(dependency)
 
     def _record_event(
         self,
@@ -695,6 +711,7 @@ class ServiceMonitor:
         status: str,
         item_key: str | None = None,
         started_ts: float | None = None,
+        match_legacy: bool = True,
     ) -> None:
         if self.report_store is None:
             return
@@ -707,10 +724,15 @@ class ServiceMonitor:
             # alert unpaired: the report pairs alert and recovery rows, so the
             # upgrade-window recovery must stay legacy-shaped too.
             # ``resolve_event`` below still receives the key and closes both
-            # NEW and NULL rows.
+            # NEW and NULL rows. ``match_legacy=False`` opts OUT of that
+            # downgrade: used when a same-name survivor shares the triple and
+            # a legacy closure would end the survivor's live fault row
+            # (prune of a removed duplicate, v2.21.3) -- the keyed rows are
+            # still closed precisely.
             if (
                 status == "recovery"
                 and item_key is not None
+                and match_legacy
                 and self.report_store.has_open_legacy_alert(
                     "service", name, redact_url(target)
                 )
@@ -750,6 +772,7 @@ class ServiceMonitor:
                     target=redact_url(target),
                     close_all=True,
                     item_key=item_key,
+                    match_legacy=match_legacy,
                 )
         except Exception:
             logger.exception("记录服务监测事件失败")
@@ -776,7 +799,7 @@ class ServiceMonitor:
         # No early return on an empty item list: clearing every monitor used
         # to leave its latched alerts open in the daily report until the
         # 30-day window rolled over.
-        pending_events: list[tuple[str, str, str, str, str]] = []
+        pending_events: list[tuple[str, str, str, str, str, bool]] = []
         with self.state.section("monitors") as monitors:
             states = monitors.setdefault("items", {})
             if not isinstance(states, dict):
@@ -828,10 +851,28 @@ class ServiceMonitor:
                     for item in self.items
                 )
                 if duplicate_alive:
+                    # A same-name survivor shares kind+name+target, so a
+                    # LEGACY recovery row (item_key NULL) would also close the
+                    # survivor's live fault row. The keyed rows of THIS item
+                    # can still be closed precisely, though: rows written
+                    # since v2.20.28 carry their own item_key, and the
+                    # survivor's rows carry a different one. Only the legacy
+                    # rows of the removed item stay open until retention
+                    # (v2.21.3).
                     logger.info(
-                        "监测项 %r 已移除，但仍有同名同目标的监测项在用，"
-                        "跳过自动关闭事件以免误关幸存项",
+                        "监测项 %r 已移除，同名同目标监测项仍在用；"
+                        "按 item_key 精确关闭本项的行（legacy 行保持不动）",
                         name,
+                    )
+                    pending_events.append(
+                        (
+                            name,
+                            target,
+                            "监测项已移除，自动关闭（同名项仍在用，仅关闭本项记录）",
+                            "recovery",
+                            str(key),
+                            False,
+                        )
                     )
                     continue
 
@@ -878,6 +919,7 @@ class ServiceMonitor:
                         # alert rows of this item were written with, so the
                         # close only touches this item's episode.
                         str(key),
+                        True,
                     )
                 )
         self.state.save()
@@ -885,8 +927,32 @@ class ServiceMonitor:
         # synchronous sqlite INSERT with a 5 s busy timeout; holding the
         # monitor lock across it blocked the sampler and the alert engine
         # whenever the database was slow (2026-11-06 audit).
-        for name, target, detail, status, item_key in pending_events:
-            self._record_event(name, target, detail, status, item_key=item_key)
+        for name, target, detail, status, item_key, match_legacy in pending_events:
+            if (
+                not match_legacy
+                and item_key
+                and not self.report_store.has_open_keyed_alert(
+                    "service", name, redact_url(target), item_key
+                )
+            ):
+                # A keyed recovery with no keyed open row to close would sit
+                # in the report as an orphan "recovered" line next to the
+                # still-open legacy alert (reverse audit v2.21.3). That is
+                # the shape of an episode that predates the item_key column;
+                # keep the baseline "write nothing" then.
+                logger.info(
+                    "监测项 %r 已移除，但该 episode 只有 legacy 行，跳过 keyed 关闭事件",
+                    name,
+                )
+                continue
+            self._record_event(
+                name,
+                target,
+                detail,
+                status,
+                item_key=item_key,
+                match_legacy=match_legacy,
+            )
         logger.info("服务监测清理了 %d 个已失效状态项", len(stale_keys))
 
     async def stop(self) -> None:
@@ -935,6 +1001,7 @@ class ServiceMonitor:
         """
 
         now = time.time()
+        changed = False
         with self.state.section("monitors") as monitors:
             items = monitors.get("items")
             if not isinstance(items, dict):
@@ -944,11 +1011,19 @@ class ServiceMonitor:
                     continue
                 if safe_float(st.get("next_attempt") or 0) > now:
                     st["next_attempt"] = 0
+                    changed = True
                 if (
                     st.get("pending_recovery")
                     and safe_float(st.get("recovery_next_attempt") or 0) > now
                 ):
                     st["recovery_next_attempt"] = 0
+                    changed = True
+        if changed:
+            # _mark_stale_items and _on_summary_abandoned save for the same
+            # reason: without it the nudge lives only in memory, and a crash
+            # before the next save put the queued alerts back onto the full
+            # offline backoff ladder (up to one extra hour, v2.21.3).
+            self.state.save()
 
     async def check_all(self) -> None:
         if not self._targets_for("service"):
@@ -1997,8 +2072,9 @@ class ServiceMonitor:
                             st["recovery_next_attempt"] = now + retry_delay(1)
                             # This notice does not depend on a buffered
                             # summary: an abandoned summary must not
-                            # withdraw it.
-                            st["recovery_awaits_summary"] = False
+                            # withdraw it. pop, not False -- same as the
+                            # resource side (v2.21.3).
+                            st.pop("recovery_awaits_summary", None)
                             logger.warning(
                                 "监测项 %s 恢复通知未送达，已排队稍后补发", name
                             )
@@ -2270,7 +2346,11 @@ class ServiceMonitor:
                         ),
                         url,
                     )
-                return False, f"探测超时（超过 {timeout + 2} 秒）", url
+                # Both timeout paths say "约 {timeout} 秒": the user configured
+                # that number, and the outer bound is only timeout+2 for the
+                # whole probe -- showing "超过 12 秒" for a 10s setting read
+                # like a misconfiguration (v2.21.3).
+                return False, f"探测超时（约 {timeout} 秒未完成）", url
             except httpx.TimeoutException:
                 # httpx raises ReadTimeout/ConnectTimeout, which are NOT the
                 # builtin TimeoutError. The generic branch stringified them as
@@ -2286,7 +2366,7 @@ class ServiceMonitor:
                         ),
                         url,
                     )
-                return False, f"探测超时（超过 {timeout} 秒）", url
+                return False, f"探测超时（约 {timeout} 秒未完成）", url
             except Exception as exc:
                 detail = f"{exc.__class__.__name__}: {exc}"
                 if _looks_like_config_error(detail):
@@ -2311,7 +2391,11 @@ class ServiceMonitor:
                 )
                 writer.close()
                 try:
-                    await writer.wait_closed()
+                    # close() is instant but wait_closed() waits for the
+                    # transport to finish; a half-open peer can park it far
+                    # beyond the configured timeout, and the probe slot with
+                    # it (v2.21.3).
+                    await asyncio.wait_for(writer.wait_closed(), timeout=2)
                 except Exception:
                     pass
                 return True, f"TCP {target} 连接成功", target
@@ -2406,7 +2490,21 @@ class ServiceMonitor:
             try:
                 # Scanning every /proc entry is a synchronous syscall loop;
                 # run it off the event loop like the status-card collector.
-                return await asyncio.to_thread(scan_processes)
+                # A total bound matters here too: an antivirus hook or a
+                # network-mounted /proc can stretch one scan to minutes, and
+                # the 8-slot semaphore then starves every later round into
+                # silence (v2.21.3, same reasoning as the HTTP branch's
+                # wait_for). A timeout is a PROBE_ERROR, not a fault: the
+                # environment is the problem, not the service.
+                return await asyncio.wait_for(
+                    asyncio.to_thread(scan_processes), timeout=timeout + 2
+                )
+            except TimeoutError:
+                return (
+                    False,
+                    f"{PROBE_ERROR_PREFIX}进程扫描超过 {timeout + 2}s 未返回",
+                    pattern,
+                )
             except Exception as exc:
                 detail = f"{exc.__class__.__name__}: {exc}"
                 # A sandboxed/restricted account can fail the whole scan
@@ -2892,7 +2990,10 @@ class ServiceMonitor:
             item_states = {}
         return {
             "enabled": self.enabled,
-            "targets": list(self.targets),
+            # The notification centre takes over when it has a "service"
+            # rule; reporting the legacy list then disagreed with the groups
+            # that actually receive the pushes (v2.21.3).
+            "targets": list(self._targets_for("service")),
             "interval": self.interval,
             "fail_threshold": self.fail_threshold,
             "cooldown": self.cooldown,

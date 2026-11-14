@@ -262,4 +262,6 @@ def test_diag_issue_text_translates_and_falls_back() -> None:
         },
     )
     text = StatusCardPlugin._diag_issue_text(en_plugin, nested, redactor)
-    assert text == 'Monitor item "A": missing the url setting'
+    # The English template gained the {kind} placeholder with v2.21.3 (it
+    # used to drop it while the Chinese one had it).
+    assert text == 'Monitor item "A" (HTTP): missing the url setting'

@@ -1139,7 +1139,9 @@ class StatusCardPlugin(Star):
             yield event.plain_result(tr(self.config, "monitor_no_targets"))
             return
         if self._monitor_test_inflight:
-            yield event.plain_result(tr(self.config, "monitor_testing"))
+            # A dedicated busy text: "正在检测" read as if THIS request had
+            # started (v2.21.3).
+            yield event.plain_result(tr(self.config, "monitor_test_busy"))
             return
         self._monitor_test_inflight = True
         # Probing every item can take minutes (slow HTTP/TCP targets, six

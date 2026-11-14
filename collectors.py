@@ -1609,13 +1609,27 @@ async def collect_bot_info(
                     gcount = len(groups)
                     # Missing member_count used to read as 0, so a platform
                     # that omits the field showed "0 群员" instead of "--".
-                    missing_members = [
-                        g.get("member_count") for g in groups if "member_count" not in g
-                    ]
-                    if groups and len(missing_members) == len(groups):
-                        mcount = None
-                    else:
-                        mcount = sum(int(g.get("member_count") or 0) for g in groups)
+                    # Partial omission had the same flaw in a subtler shape:
+                    # one group WITH the field made the sum look complete
+                    # while every omitted group silently counted as 0
+                    # members (v2.21.3). Report "--" unless EVERY group
+                    # carries the field, and tolerate a non-numeric value in
+                    # one group instead of losing the group count too.
+                    counts: list[int] = []
+                    mcount = None
+                    if groups:
+                        for g in groups:
+                            raw_count = g.get("member_count")
+                            if "member_count" not in g or raw_count is None:
+                                counts = []
+                                break
+                            try:
+                                counts.append(int(raw_count))
+                            except (TypeError, ValueError):
+                                counts = []
+                                break
+                        if counts:
+                            mcount = sum(counts)
                     data["groups"] = gcount
                     data["members"] = mcount
                     store("groups", gcount)

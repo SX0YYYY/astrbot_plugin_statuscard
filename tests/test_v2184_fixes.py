@@ -32,7 +32,6 @@ def _load_macros() -> jinja2.Template:
     # The same filters t2i_renderer registers for the real card render.
     env.filters.update(
         percent_to_color=t2i_renderer._percent_to_color,
-        auto_convert_unit=t2i_renderer._auto_convert_unit,
         br=t2i_renderer._br_filter,
     )
     return env.from_string(source).make_module()

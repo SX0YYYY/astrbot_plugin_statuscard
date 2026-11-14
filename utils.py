@@ -415,10 +415,13 @@ def mask_chat_ids(text: str) -> str:
         keep = min(4, len(value) - 1)
         return "*" * (len(value) - keep) + value[len(value) - keep :]
 
-    # Official-bot openids are 32-char uppercase hex strings; the digit rule
-    # below would leave the letters readable and still leak the chat. Mask
-    # them first, before the digit rule chews their numeric segments.
-    text = re.sub(r"\b[0-9A-F]{16,}\b", _mask_opaque, str(text or ""))
+    # Official-bot openids are 32-char hex strings; the digit rule below
+    # would leave the letters readable and still leak the chat. Mask them
+    # first, before the digit rule chews their numeric segments. Both cases
+    # are accepted: mask_umo lowercases its input, and upstream APIs return
+    # either form -- the old uppercase-only pattern left a lowercase openid
+    # half-visible (v2.21.3).
+    text = re.sub(r"\b[0-9A-Fa-f]{16,}\b", _mask_opaque, str(text or ""))
     # 5 digits too: early QQ accounts (10000-99999) are real chat ids and
     # slipped through the old 6-digit floor (v2.20.32). This is a redaction
     # helper -- over-masking a bare 5-digit number in an error string is
