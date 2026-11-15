@@ -358,7 +358,14 @@ class DeliveryService:
                 # otherwise park a monitor/alert/daily loop on this await.
                 sent = await asyncio.wait_for(
                     self.context.send_message(target, self._build_chain(payload)),
-                    timeout=60,
+                    # 120s, not 60: the official adapter uploads large images
+                    # (the weekly report) through Tencent's servers and a
+                    # slow upload was cut off at 60s on 2026-11-15 -- the
+                    # report was then classified uncertain and never
+                    # resent, so the user lost a whole week's report
+                    # (observation-period finding). A half-open connection
+                    # still costs at most these 120s on a background task.
+                    timeout=120,
                 )
                 if sent:
                     return True, False, False
@@ -376,7 +383,7 @@ class DeliveryService:
                 return False, False, True
             except TimeoutError:
                 logger.warning(
-                    "主动发送%s到 %s 超时（60 秒，可能已送达，不再重发以免重复）",
+                    "主动发送%s到 %s 超时（120 秒，可能已送达，不再重发以免重复）",
                     label,
                     mask_umo(target),
                 )

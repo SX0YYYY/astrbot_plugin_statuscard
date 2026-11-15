@@ -2058,16 +2058,42 @@ class DailyReporter:
                     return
                 if _uncertain(result):
                     logger.warning(
-                        "周报图片发送未确认（无法确认是否送达），已按不重发处理以免重复"
+                        "周报图片发送未确认（无法确认是否送达），不重发图片以免重复"
                     )
                     self._weekly_last_sent_week = week_key
                     self._weekly_last_sent_slot = slot
                     self._weekly_given_up_week = None
-                    # Not a confirmed delivery: record it as failed, like the
-                    # daily path, so the send history does not show a clean
-                    # success (the detail still says "unconfirmed",
-                    # v2.21.3).
-                    self._record(day, False, "weekly-image unconfirmed")
+                    # The image may never have arrived (2026-11-16
+                    # observation: the 11-15 weekly report timed out at 60s
+                    # and the user received nothing). A TEXT SUMMARY is a
+                    # new message, not a re-send of the image, so the
+                    # "never repeat an uncertain delivery" rule stays
+                    # intact: worst case the image did arrive and the user
+                    # also sees the summary (same data, one week apart this
+                    # cost is far smaller than losing the whole report);
+                    # best case the summary is the only copy. Weekly only:
+                    # the daily report is frequent enough that a duplicate
+                    # summary every flaky day would be noise.
+                    text_fallback: Any = None
+                    try:
+                        text_fallback = await self.plugin.send_text(
+                            targets,
+                            build_report_text(view)
+                            + "\n\n（图片版本未确认送达，本条为文字摘要）",
+                            source="weekly_report",
+                        )
+                    except Exception:
+                        logger.exception("周报文字摘要保底发送失败")
+                    if text_fallback is not None and _delivered(text_fallback):
+                        logger.info("周报图片未确认，文字摘要已补发")
+                        self._record(day, True, "weekly-text fallback")
+                    else:
+                        logger.warning("周报文字摘要保底也未送达")
+                        # Not a confirmed delivery: record it as failed, like
+                        # the daily path, so the send history does not show a
+                        # clean success (the detail still says "unconfirmed",
+                        # v2.21.3).
+                        self._record(day, False, "weekly-image unconfirmed")
                     self._weekly_pending = None
                     self._weekly_pending_report_day = None
                     self._weekly_retry_count = 0
