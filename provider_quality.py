@@ -102,6 +102,22 @@ def connect_readonly(db_path: Path | str | None = None) -> sqlite3.Connection | 
         return None
 
 
+def _provider_has_column(connection: sqlite3.Connection, column: str) -> bool:
+    """Whether ``provider_stats`` has an optional column.
+
+    AstrBot's schema includes ``provider_id``, but older databases and the
+    plugin's own test fixtures only carry the original seven columns. Probing
+    keeps one SELECT compatible with both instead of failing a whole report
+    with "no such column: provider_id".
+    """
+
+    try:
+        rows = connection.execute("PRAGMA table_info(provider_stats)").fetchall()
+    except Exception:
+        return False
+    return any(str(row[1] or "") == column for row in rows)
+
+
 def fetch_window(
     connection: sqlite3.Connection,
     start_text: str,
@@ -115,12 +131,21 @@ def fetch_window(
     oldest rows are exactly what is missing, so trend charts must treat
     everything older than ``oldest_kept`` as unknown (a gap) rather than
     reading the missing days as zero.
+
+    The optional eighth column is ``provider_id`` when the table has it
+    (AstrBot >= the provider-stats schema that records it); older databases
+    return seven-column rows and callers must treat the provider as unknown.
     """
 
+    columns = (
+        "created_at, status, provider_model, conversation_id, "
+        "start_time, end_time, time_to_first_token"
+    )
+    if _provider_has_column(connection, "provider_id"):
+        columns += ", provider_id"
     rows = connection.execute(
-        """
-        SELECT created_at, status, provider_model,
-               conversation_id, start_time, end_time, time_to_first_token
+        f"""
+        SELECT {columns}
         FROM provider_stats
         WHERE created_at >= ? AND created_at < ?
         ORDER BY created_at DESC
@@ -288,11 +313,12 @@ def aggregate(
 
     ``rows`` come from :func:`fetch_window` (newest-first, columns in
     ``created_at, status, provider_model, conversation_id, start_time,
-    end_time, time_to_first_token`` order). ``window_keys`` is a set of
-    local ``YYYY-MM-DD`` day strings that limits the headline figures and
-    the per-model / per-conversation tables to the requested window;
-    ``None`` keeps every row. The per-day trend always covers every row so
-    the caller can draw a longer history. ``tz`` converts ``created_at``
+    end_time, time_to_first_token`` order; an optional eighth ``provider_id``
+    column is accepted and missing values become "未知供应商"). ``window_keys``
+    is a set of local ``YYYY-MM-DD`` day strings that limits the headline
+    figures and the per-model / per-conversation tables to the requested
+    window; ``None`` keeps every row. The per-day trend always covers every
+    row so the caller can draw a longer history. ``tz`` converts ``created_at``
     (UTC) into local days.
     """
 
@@ -301,6 +327,7 @@ def aggregate(
     latencies: list[float] = []
     ttfts: list[float] = []
     by_model: dict[str, dict[str, float]] = {}
+    by_provider_model: dict[tuple[str, str], dict[str, Any]] = {}
     by_conversation: dict[str, dict[str, float]] = {}
     by_day: dict[str, dict[str, int]] = {}
 
@@ -381,6 +408,34 @@ def aggregate(
         if status == "completed" and 0 < ttft <= MAX_USABLE_LATENCY:
             ttfts.append(ttft)
 
+        # Provider x model detail (v2.22.0). The provider id is whatever
+        # AstrBot stored in provider_stats.provider_id; an older schema or a
+        # blank value groups under "未知供应商" instead of hiding the row.
+        provider = str((row[7] if len(row) > 7 else "") or "").strip()
+        provider = provider or "未知供应商"
+        group = by_provider_model.setdefault(
+            (provider, model),
+            {
+                "calls": 0,
+                "completed_n": 0,
+                "errors": 0,
+                "aborted": 0,
+                "latencies": [],
+                "ttfts": [],
+            },
+        )
+        group["calls"] += 1
+        if status == "completed":
+            group["completed_n"] += 1
+            if latency > 0:
+                group["latencies"].append(latency)
+            if 0 < ttft <= MAX_USABLE_LATENCY:
+                group["ttfts"].append(ttft)
+        elif status == "error":
+            group["errors"] += 1
+        elif status == "aborted":
+            group["aborted"] += 1
+
         conv = str(row[3] or "").strip()
         if ":" in conv:
             # AstrBot may store a UMO ("aiocqhttp:GroupMessage:123456789")
@@ -445,6 +500,45 @@ def aggregate(
             }
         )
 
+    provider_models_out: list[dict[str, Any]] = []
+    for (provider, model), stats in sorted(
+        by_provider_model.items(), key=lambda pair: pair[1]["calls"], reverse=True
+    ):
+        # Same denominator as the headline rate: cancellations are not a
+        # provider/model failure, so they stay out of the rate.
+        attempts = stats["completed_n"] + stats["errors"]
+        group_latencies = sorted(stats["latencies"])
+        group_ttfts = sorted(stats["ttfts"])
+        provider_models_out.append(
+            {
+                "provider": provider,
+                "model": model,
+                "name": f"{provider} / {model}",
+                "calls": int(stats["calls"]),
+                "completed": int(stats["completed_n"]),
+                "errors": int(stats["errors"]),
+                "aborted": int(stats["aborted"]),
+                "success_rate": (
+                    stats["completed_n"] / attempts * 100.0 if attempts else None
+                ),
+                "fail_rate": (stats["errors"] / attempts * 100.0 if attempts else None),
+                "avg_latency": (
+                    sum(group_latencies) / len(group_latencies)
+                    if group_latencies
+                    else None
+                ),
+                "p50_latency": _percentile(group_latencies, 0.50),
+                "p95_latency": _percentile(group_latencies, 0.95),
+                "avg_ttft": (
+                    sum(group_ttfts) / len(group_ttfts) if group_ttfts else None
+                ),
+                "p50_ttft": _percentile(group_ttfts, 0.50),
+                "p95_ttft": _percentile(group_ttfts, 0.95),
+                "latency_n": len(group_latencies),
+                "ttft_n": len(group_ttfts),
+            }
+        )
+
     return {
         "total": total,
         "completed": completed,
@@ -458,6 +552,7 @@ def aggregate(
         "avg_ttft": avg_ttft,
         "p95_ttft": _percentile(ttfts, 0.95),
         "by_model": models_out,
+        "by_provider_model": provider_models_out,
         "by_conversation": conversations_out,
         "by_day": by_day,
     }

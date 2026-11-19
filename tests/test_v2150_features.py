@@ -75,7 +75,18 @@ def test_weekly_sections_follow_daily_by_default(tmp_path: Path) -> None:
     reporter = DailyReporter(
         _OkPlugin(), ReportStore(tmp_path / "r.db"), _report_config()
     )
-    assert reporter._weekly_sections() == reporter._sections()
+    # v2.22.0: the weekly report follows the daily sections and appends the
+    # weekly-only insight block; the daily report itself is unchanged.
+    assert reporter._weekly_sections() == [*reporter._sections(), "insight"]
+
+
+def test_weekly_sections_empty_daily_stays_empty(tmp_path: Path) -> None:
+    config = _report_config()
+    config["daily_report"]["sections"] = []
+    reporter = DailyReporter(_OkPlugin(), ReportStore(tmp_path / "r.db"), config)
+    # An operator who explicitly emptied the daily list keeps an empty weekly
+    # list: "nothing selected" must stay reachable.
+    assert reporter._weekly_sections() == []
 
 
 def test_weekly_sections_independent(tmp_path: Path) -> None:

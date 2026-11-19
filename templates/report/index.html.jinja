@@ -63,6 +63,25 @@
       <div class="summary-item"><span>接收{% if d.summary.span_days > 1 %}（{{ d.summary.last_day_label }}）{% endif %}</span><strong>{{ d.summary.recv_text }}</strong></div>
     </section>
 
+    {% if "insight" in d.sections and d.insights %}
+    <section class="section">
+      <div class="section-head">
+        <h2>本期洞察</h2>
+        <span>{{ d.window_label }} · 自动结论</span>
+      </div>
+      {% if d.insights.available %}
+      <ul class="insight-list">
+        {% for item in d.insights.lines %}
+        <li>{{ item.text }}</li>
+        {% endfor %}
+      </ul>
+      <p class="note">{{ d.insights.note }}</p>
+      {% else %}
+      <div class="empty">{{ d.insights.empty_reason }}</div>
+      {% endif %}
+    </section>
+    {% endif %}
+
     {% if "resource" in d.sections and d.resources %}
     <section class="section">
       <div class="section-head">
@@ -281,17 +300,20 @@
           <div class="stat-value">{{ d.provider_quality.stats.streak_text }}</div>
         </div>
       </div>
-      {% if d.provider_quality.top_models %}
-      <table class="model-table">
-        <thead><tr><th>模型</th><th>调用</th><th>失败</th><th>失败率</th><th>平均延迟</th></tr></thead>
+      {% set model_rows = d.provider_quality.provider_models or d.provider_quality.top_models %}
+      {% if model_rows %}
+      <table class="model-table compact-table">
+        <thead><tr><th>供应商</th><th>模型</th><th>调用</th><th>成功率</th><th>P50</th><th>P95</th><th>首字</th></tr></thead>
         <tbody>
-          {% for model in d.provider_quality.top_models %}
+          {% for model in model_rows %}
           <tr>
-            <td>{{ model.name }}</td>
+            <td>{{ model.provider or "--" }}</td>
+            <td>{{ model.model or model.name }}</td>
             <td>{{ model.calls_text }}</td>
-            <td>{{ model.errors_text }}</td>
-            <td>{{ model.fail_rate_text }}</td>
-            <td>{{ model.avg_latency_text }}</td>
+            <td>{{ model.success_rate_text or "--" }}</td>
+            <td>{{ model.p50_latency_text or "--" }}</td>
+            <td>{{ model.p95_latency_text or "--" }}</td>
+            <td>{{ model.avg_ttft_text or "--" }}</td>
           </tr>
           {% endfor %}
         </tbody>

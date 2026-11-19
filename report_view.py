@@ -60,6 +60,7 @@ VALID_SECTIONS = (
     "website",
     "process",
     "provider",
+    "insight",
 )
 DEFAULT_SECTIONS = ("resource", "anomaly", "qq", "token")
 
@@ -582,6 +583,10 @@ class DailyReportBuilder:
             view["process"] = self._process_section(
                 target, previous, history_days, span, day_label=day_label
             )
+        if "insight" in selected:
+            # Computed after the sections above on purpose: the insight only
+            # reads what they already built, it never queries the store again.
+            view["insights"] = self._insight_section(view, span)
         view["summary"] = self._summary(view, span)
         return view
 
@@ -1796,6 +1801,38 @@ class DailyReportBuilder:
             head = kept_covering + (rest[-keep_n:] if keep_n else [])
             dropped_in_window = max(0, len(items) - len(head))
             items = unresolved_items + head
+        # Per-name / per-kind episode counts for the insight section. Built
+        # from the FULL episode list (before the display cut) so a noisy rule
+        # cannot disappear from "most unstable" just because its row was
+        # trimmed from the table. One row is one episode by construction.
+        by_name: dict[str, dict[str, Any]] = {}
+        by_kind: dict[str, dict[str, Any]] = {}
+        for item in items:
+            name = str(item.get("name") or "--")
+            name_entry = by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "kind_slug": str(item.get("kind_slug") or ""),
+                    "count": 0,
+                    "unresolved": 0,
+                },
+            )
+            name_entry["count"] += 1
+            kind_slug = str(item.get("kind_slug") or "")
+            kind_entry = by_kind.setdefault(
+                kind_slug,
+                {
+                    "kind": str(item.get("kind") or "事件"),
+                    "kind_slug": kind_slug,
+                    "count": 0,
+                    "unresolved": 0,
+                },
+            )
+            kind_entry["count"] += 1
+            if item.get("status_key") == "unresolved":
+                name_entry["unresolved"] += 1
+                kind_entry["unresolved"] += 1
         return {
             "available": bool(items),
             "empty_reason": (
@@ -1820,6 +1857,19 @@ class DailyReportBuilder:
                 "monitors": self._monitor_count(),
                 "resource_rules": RRULE_COUNT,
             },
+            # Aggregates for the insight section (full window, not truncated).
+            "by_name": sorted(
+                by_name.values(),
+                key=lambda entry: (
+                    -entry["count"],
+                    -entry["unresolved"],
+                    entry["name"],
+                ),
+            )[:5],
+            "by_kind": sorted(
+                by_kind.values(),
+                key=lambda entry: (-entry["count"], entry["kind_slug"]),
+            )[:5],
         }
 
     def _monitor_count(self) -> int:
@@ -2595,6 +2645,162 @@ class DailyReportBuilder:
             ),
         }
 
+    def _insight_section(self, view: dict[str, Any], span: int = 1) -> dict[str, Any]:
+        """Derive conclusion lines from data the selected sections already built.
+
+        Pure consumer: it never queries the store again, so adding this section
+        cannot slow the weekly build or touch the anomaly pairing logic. If the
+        user deselects the source sections, the insight simply carries fewer
+        lines (or reports that there is not enough data).
+        """
+
+        lines: list[dict[str, Any]] = []
+        resources = view.get("resources") or {}
+        anomalies = view.get("anomalies") or {}
+        provider = view.get("provider_quality") or {}
+        yesterday = resources.get("yesterday") or {}
+        previous = resources.get("previous") or {}
+        scope = str(view.get("window_label") or "")
+
+        # 1) Disk trend. Percent points keep the comparison meaningful across
+        #    windows; a relative percentage on a low base reads like a spike.
+        disk_now = _numeric((yesterday.get("disk") or {}).get("avg"))
+        disk_prev = _numeric((previous.get("disk") or {}).get("avg"))
+        peak_over = int((yesterday.get("disk") or {}).get("peak_over") or 0)
+        if disk_now is not None:
+            if disk_prev is not None:
+                diff = disk_now - disk_prev
+                if diff >= 1.0:
+                    text = (
+                        f"磁盘较上期上升 {diff:+.1f}pp，当前均值 {disk_now:.1f}%，"
+                        "需关注增长趋势"
+                    )
+                    code = "disk_up"
+                elif diff <= -1.0:
+                    text = f"磁盘较上期下降 {diff:+.1f}pp，当前均值 {disk_now:.1f}%"
+                    code = "disk_down"
+                else:
+                    text = f"磁盘基本持平，当前均值 {disk_now:.1f}%"
+                    code = "disk_flat"
+                if peak_over:
+                    text += f"；本期 {peak_over} 次峰值超过阈值"
+                lines.append({"code": code, "text": text})
+            elif peak_over:
+                lines.append(
+                    {
+                        "code": "disk_peak",
+                        "text": (
+                            f"磁盘本期 {peak_over} 次峰值超过阈值，"
+                            f"当前均值 {disk_now:.1f}%"
+                        ),
+                    }
+                )
+
+        # 2) Fastest growing percentage metric. Disk is excluded because the
+        #    conclusion above already covers its trend; 1-minute load is
+        #    excluded because its unit is not comparable with a percent metric.
+        growth_key = ""
+        growth_best = 0.0
+        for key in ("cpu", "ram", "swap"):
+            now_value = _numeric((yesterday.get(key) or {}).get("avg"))
+            prev_value = _numeric((previous.get(key) or {}).get("avg"))
+            if now_value is None or prev_value is None:
+                continue
+            diff = now_value - prev_value
+            if diff > growth_best:
+                growth_key, growth_best = key, diff
+        if growth_key and growth_best >= 1.0:
+            stat = yesterday.get(growth_key) or {}
+            lines.append(
+                {
+                    "code": "growth",
+                    "text": (
+                        f"增长最快：{RESOURCE_LABELS.get(growth_key, growth_key)} "
+                        f"{growth_best:+.1f}pp"
+                        f"（{stat.get('delta_text') or '--'}），"
+                        f"当前均值 {stat.get('avg_text') or '--'}"
+                    ),
+                }
+            )
+
+        # 3) Most unstable monitor/rule and 4) the noisiest alert source.
+        raw_by_name = anomalies.get("by_name")
+        by_name = (
+            [item for item in raw_by_name if isinstance(item, dict)]
+            if isinstance(raw_by_name, list)
+            else []
+        )
+        if by_name:
+            top = by_name[0]
+            extra = f"，未恢复 {top['unresolved']} 项" if top.get("unresolved") else ""
+            lines.append(
+                {
+                    "code": "unstable",
+                    "text": (
+                        f"最不稳定：{top.get('name') or '--'}"
+                        f"（本期 {top.get('count') or 0} 次{extra}）"
+                    ),
+                }
+            )
+        raw_by_kind = anomalies.get("by_kind")
+        by_kind = (
+            [item for item in raw_by_kind if isinstance(item, dict)]
+            if isinstance(raw_by_kind, list)
+            else []
+        )
+        if by_kind:
+            top_kind = by_kind[0]
+            lines.append(
+                {
+                    "code": "noise",
+                    "text": (
+                        f"告警最多来自：{top_kind.get('kind') or '事件'}"
+                        f"（{top_kind.get('count') or 0} 次）"
+                    ),
+                }
+            )
+
+        # 5) LLM quality, only when the provider section was selected.
+        raw_provider_models = provider.get("provider_models") or provider.get(
+            "top_models"
+        )
+        provider_models = (
+            [item for item in raw_provider_models if isinstance(item, dict)]
+            if isinstance(raw_provider_models, list)
+            else []
+        )
+        if provider_models:
+            worst = max(
+                provider_models,
+                key=lambda item: _numeric(item.get("fail_rate")) or 0.0,
+            )
+            fail_rate = _numeric(worst.get("fail_rate"))
+            if fail_rate and fail_rate > 0:
+                lines.append(
+                    {
+                        "code": "llm",
+                        "text": (
+                            f"LLM 失败率最高：{worst.get('name') or worst.get('model')}"
+                            f"（{worst.get('fail_rate_text') or f'{fail_rate:.1f}%'}）"
+                        ),
+                    }
+                )
+
+        if not lines:
+            return {
+                "available": False,
+                "empty_reason": (
+                    f"{scope}数据不足以生成洞察" if scope else "数据不足以生成洞察"
+                ),
+                "lines": [],
+            }
+        return {
+            "available": True,
+            "empty_reason": None,
+            "lines": lines[:5],
+            "note": "结论由本期资源与异常数据自动生成，仅作趋势提示。",
+        }
+
     def _provider_quality_section(
         self, day: date, history_days: int, span: int = 1
     ) -> dict[str, Any]:
@@ -2613,6 +2819,7 @@ class DailyReportBuilder:
                 "empty_reason_code": "reason_no_provider_db",
                 "stats": {},
                 "top_models": [],
+                "provider_models": [],
                 "top_conversations": [],
                 "trend": None,
                 "note": "",
@@ -2631,6 +2838,7 @@ class DailyReportBuilder:
                 "empty_reason_code": "reason_provider_query_failed",
                 "stats": {},
                 "top_models": [],
+                "provider_models": [],
                 "top_conversations": [],
                 "trend": None,
                 "note": "",
@@ -2645,6 +2853,7 @@ class DailyReportBuilder:
                 "empty_reason_code": "reason_no_llm_calls",
                 "stats": {},
                 "top_models": [],
+                "provider_models": [],
                 "top_conversations": [],
                 "trend": None,
                 "note": "",
@@ -2663,6 +2872,7 @@ class DailyReportBuilder:
                 "empty_reason_code": "reason_llm_data_broken",
                 "stats": {},
                 "top_models": [],
+                "provider_models": [],
                 "top_conversations": [],
                 "trend": None,
                 "note": "",
@@ -2734,6 +2944,32 @@ class DailyReportBuilder:
                     "avg_latency_text": _fmt_seconds(model["avg_latency"]),
                 }
             )
+        # Provider x model table (v2.22.0). Capped at 8 rows so the wider
+        # table stays readable at the 650px template width.
+        provider_models = []
+        for model in stats.get("by_provider_model", [])[:8]:
+            provider_models.append(
+                {
+                    "provider": model["provider"],
+                    "model": model["model"],
+                    "name": model["name"],
+                    "calls_text": _fmt_num(model["calls"]),
+                    "success_rate_text": (
+                        f"{model['success_rate']:.1f}%"
+                        if model["success_rate"] is not None
+                        else "--"
+                    ),
+                    "fail_rate": model["fail_rate"],
+                    "fail_rate_text": (
+                        f"{model['fail_rate']:.1f}%"
+                        if model["fail_rate"] is not None
+                        else "--"
+                    ),
+                    "p50_latency_text": _fmt_seconds(model["p50_latency"]),
+                    "p95_latency_text": _fmt_seconds(model["p95_latency"]),
+                    "avg_ttft_text": _fmt_seconds(model["avg_ttft"]),
+                }
+            )
         top_conversations = []
         for conv in stats["by_conversation"][:5]:
             top_conversations.append(
@@ -2779,6 +3015,7 @@ class DailyReportBuilder:
                 "streak_text": _fmt_num(streak),
             },
             "top_models": top_models,
+            "provider_models": provider_models,
             "top_conversations": top_conversations,
             "trend": trend,
             "note": note,
@@ -2856,6 +3093,19 @@ def build_report_text(view: dict[str, Any]) -> str:
     ]
     if not sections:
         lines.append("未选择日报内容（daily_report.sections 为空）。")
+    # Insights go right after the header on purpose: the text fallback is
+    # truncated at a line boundary near 2000 characters, so a block placed at
+    # the tail would be the first thing lost on a busy week.
+    insights = view.get("insights") or {}
+    if "insight" in sections:
+        insight_lines = insights.get("lines") or []
+        if insight_lines:
+            lines.append("本期洞察:")
+            lines.extend(f"· {item.get('text')}" for item in insight_lines)
+        else:
+            lines.append(
+                f"本期洞察: {insights.get('empty_reason') or '暂无可分析数据'}"
+            )
     # Weekly reports mix single-day figures (resource/QQ snapshot) with
     # window aggregates (Token/website/process), so each line carries the
     # scope it is actually computed over.
@@ -2955,8 +3205,29 @@ def build_report_text(view: dict[str, Any]) -> str:
         if quality.get("available"):
             stats = quality.get("stats") or {}
             models = quality.get("top_models") or []
+            provider_models = quality.get("provider_models") or []
             model_note = ""
-            if models:
+            if provider_models:
+                busiest = provider_models[0]
+                model_note = (
+                    f"；最忙 {busiest.get('name', '--')}"
+                    f"（{busiest.get('calls_text', '--')} 次）"
+                )
+                worst_rate = max(
+                    (
+                        item
+                        for item in provider_models
+                        if item.get("fail_rate") is not None
+                    ),
+                    key=lambda item: item["fail_rate"],
+                    default=None,
+                )
+                if worst_rate is not None and worst_rate["fail_rate"] > 0:
+                    model_note += (
+                        f"；失败率最高 {worst_rate.get('name')}"
+                        f"（{worst_rate.get('fail_rate_text')}）"
+                    )
+            elif models:
                 model_note = "；最忙模型 " + models[0].get("name", "--")
             lines.append(
                 "LLM 质量({}): {} 次调用，成功率 {}，平均延迟 {}，TTFT {}{}".format(

@@ -1111,7 +1111,13 @@ class DailyReporter:
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, list) or not raw:
-            return self._sections()
+            # Follow the daily sections and add the weekly-only insight block
+            # (v2.22.0). A user who explicitly emptied the daily list keeps an
+            # empty weekly list: "nothing selected" must stay reachable.
+            daily = self._sections()
+            if daily and "insight" not in daily:
+                return [*daily, "insight"]
+            return daily
         allowed = {str(item) for item in raw if isinstance(item, str)}
         weekly = [item for item in VALID_SECTIONS if item in allowed]
         return weekly or self._sections()

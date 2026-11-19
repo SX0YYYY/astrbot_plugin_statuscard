@@ -414,6 +414,19 @@ body {
 
 
 
+.insight-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.insight-list li {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .note {
   margin: 10px 2px 0;
   color: #94a3b8;
@@ -479,6 +492,7 @@ body {
 [data-theme="dark"] .event-kind,
 [data-theme="dark"] .event-detail,
 [data-theme="dark"] .event-duration,
+[data-theme="dark"] .insight-list li,
 [data-theme="dark"] .note {
   color: #94a3b8;
 }

@@ -1846,6 +1846,7 @@ class PageApi:
                 else (1 if sections_cfg else 0)
             ),
             "summary": view.get("summary"),
+            "insights": view.get("insights"),
             "resources": view.get("resources"),
             "anomalies": view.get("anomalies"),
             "qq": view.get("qq"),

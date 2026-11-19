@@ -2014,6 +2014,18 @@
           "</p></div>",
       );
     }
+    const insights = data.insights || {};
+    if (insights.lines && insights.lines.length) {
+      blocks.push(
+        '<div class="detail-block"><h3>' +
+          esc(t("report_insight", "本期洞察")) +
+          "</h3>" +
+          insights.lines
+            .map((item) => '<p class="muted">· ' + esc(item.text) + "</p>")
+            .join("") +
+          "</div>",
+      );
+    }
     const resources = data.resources || {};
     if (resources.available && resources.yesterday) {
       const yesterday = resources.yesterday;
@@ -2252,6 +2264,40 @@
             )
             .join("") +
           "</div>" +
+          (quality.provider_models && quality.provider_models.length
+            ? '<div class="table-wrap"><table class="table"><thead><tr><th>' +
+              esc(t("table_provider", "供应商")) +
+              "</th><th>" +
+              esc(t("table_model", "模型")) +
+              "</th><th>" +
+              esc(t("table_calls", "调用")) +
+              "</th><th>" +
+              esc(t("quality_success", "成功率")) +
+              "</th><th>P50</th><th>P95</th><th>" +
+              esc(t("quality_ttft", "首字延迟")) +
+              "</th></tr></thead><tbody>" +
+              quality.provider_models
+                .map(
+                  (model) =>
+                    "<tr><td>" +
+                    esc(model.provider || "--") +
+                    "</td><td>" +
+                    esc(model.model || model.name || "--") +
+                    "</td><td>" +
+                    esc(model.calls_text || "--") +
+                    "</td><td>" +
+                    esc(model.success_rate_text || "--") +
+                    "</td><td>" +
+                    esc(model.p50_latency_text || "--") +
+                    "</td><td>" +
+                    esc(model.p95_latency_text || "--") +
+                    "</td><td>" +
+                    esc(model.avg_ttft_text || "--") +
+                    "</td></tr>",
+                )
+                .join("") +
+              "</tbody></table></div>"
+            : "") +
           (quality.top_models && quality.top_models.length
             ? '<div class="table-wrap"><table class="table"><thead><tr><th>' +
               esc(t("table_model", "模型")) +
