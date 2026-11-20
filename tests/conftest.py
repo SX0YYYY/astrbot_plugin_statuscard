@@ -82,6 +82,15 @@ def _install_command_layer_stubs() -> None:
             def get_platform_name(self) -> str:
                 return "aiocqhttp"
 
+            # The LLM-tool handlers (v2.24.0) call these; the real
+            # implementations are sync methods on the event (verified across
+            # 4.26.7/4.27.0/4.29.4). Tests subclass or monkeypatch them.
+            def is_admin(self) -> bool:
+                return False
+
+            def get_sender_id(self) -> str:
+                return ""
+
         class _PermissionType:
             ADMIN = "ADMIN"
             MEMBER = "MEMBER"
@@ -111,6 +120,13 @@ def _install_command_layer_stubs() -> None:
 
             @staticmethod
             def regex(_pattern):
+                return lambda fn: fn
+
+            @staticmethod
+            def llm_tool(_name=None, **_kwargs):
+                # v2.24.0: the real decorator registers the tool with the
+                # framework's global FuncCall registry; in tests it is a
+                # transparent pass-through so main.py still imports.
                 return lambda fn: fn
 
         event_module.AstrMessageEvent = AstrMessageEvent  # type: ignore[attr-defined]

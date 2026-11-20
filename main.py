@@ -37,6 +37,7 @@ from .collectors import (
 from .delivery import DeliveryResult, DeliveryService
 from .heartbeat import HeartbeatServer
 from .i18n import tr
+from .llm_tools import StatusCardToolService
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
 from .page_api import PageApi
@@ -134,6 +135,12 @@ class StatusCardPlugin(Star):
         # the monitor so the handler can match names against the normalized
         # items; it only writes state, so it needs no aggregator/targets.
         self.heartbeat = HeartbeatServer(self.state, self.config, self.monitor)
+        # Read-only data source behind the three LLM tools; shares the
+        # monitor's normalized items and the report store, never probes or
+        # sends (v2.24.0).
+        self._tool_service = StatusCardToolService(
+            self.config, self.state, self.report_store, self.monitor
+        )
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         # One "立即检测" at a time: two concurrent runs each probed all 16
@@ -1904,6 +1911,94 @@ class StatusCardPlugin(Star):
         # guard; this trailing stop_event() is kept as the v2.5.1 second line
         # of defence and is safe only after every yield.
         event.stop_event()
+
+    # ------------------------------------------------------------------
+    # LLM tools (v2.24.0)
+    #
+    # Contract notes (verified against AstrBot 4.26.7/4.27.0/4.29.4 source):
+    # - The decorator only takes ``name``; the docstring's first paragraph
+    #   becomes the tool description and EVERY ``Args:`` parameter needs a
+    #   ``name(type): description`` line -- a missing type raises ValueError
+    #   at import time and the whole plugin fails to load.
+    # - The handler MUST be ``async def`` and returns a str. It must NOT be
+    #   an async generator: the guarded-tool path consumes generators to the
+    #   last yield and the MessageEventResult semantics do not apply here.
+    # - The framework logs the raw arguments at INFO, so parameters stay
+    #   enum/boolean/number typed; no free text, no secrets.
+    # - Permission is checked inside the handler (the framework's own tool
+    #   permission defaults to "member"), exactly like the chat commands.
+    # ------------------------------------------------------------------
+
+    @filter.llm_tool(name="statuscard_get_server_status")
+    async def llm_tool_get_server_status(
+        self,
+        event: AstrMessageEvent,
+        include_processes: bool = True,
+        include_websites: bool = True,
+        top_n: int = 5,
+    ) -> str:
+        """读取服务器当前状态摘要：CPU、内存、SWAP、磁盘占用、运行时间，可选进程列表与服务监测最新状态。
+
+        Args:
+            include_processes(boolean): 是否包含内存占用最高的进程列表，默认 true。
+            include_websites(boolean): 是否包含服务监测项的最新探测状态，默认 true。
+            top_n(number): 进程与监测项各最多返回几条，1 到 20，默认 5。
+        """
+        if not self._is_operator(event):
+            return "权限不足：该工具仅限管理员使用。"
+        try:
+            return await self._tool_service.get_server_status(
+                include_processes, include_websites, top_n
+            )
+        except Exception as exc:
+            logger.warning("LLM 工具 get_server_status 失败: %s", exc)
+            return "读取服务器状态失败，请稍后再试。"
+
+    @filter.llm_tool(name="statuscard_query_events")
+    async def llm_tool_query_events(
+        self,
+        event: AstrMessageEvent,
+        days: int = 7,
+        limit: int = 50,
+        status: str = "",
+        kind: str = "",
+    ) -> str:
+        """查询最近几天的监测事件（服务故障/恢复、资源告警、掉线等）。
+
+        Args:
+            days(number): 查询最近几天的记录，1 到 90，默认 7。
+            limit(number): 最多返回几条，1 到 200，默认 50。
+            status(string): 可选过滤：alert（告警）、recovery（恢复）、failed；留空返回全部。
+            kind(string): 可选过滤：service（服务监测）、resource（资源告警）、offline（掉线）；留空返回全部。
+        """
+        if not self._is_operator(event):
+            return "权限不足：该工具仅限管理员使用。"
+        try:
+            return await self._tool_service.query_events(days, limit, status, kind)
+        except Exception as exc:
+            logger.warning("LLM 工具 query_events 失败: %s", exc)
+            return "查询事件失败，请稍后再试。"
+
+    @filter.llm_tool(name="statuscard_get_uptime_summary")
+    async def llm_tool_get_uptime_summary(
+        self,
+        event: AstrMessageEvent,
+        days: int = 7,
+        scope: str = "service",
+    ) -> str:
+        """汇总最近几天的服务可用性：故障次数、恢复次数、未恢复项与故障最多的监测项。
+
+        Args:
+            days(number): 汇总最近几天的记录，1 到 90，默认 7。
+            scope(string): 范围：service（仅服务监测，默认）或 all（全部事件类型）。
+        """
+        if not self._is_operator(event):
+            return "权限不足：该工具仅限管理员使用。"
+        try:
+            return await self._tool_service.get_uptime_summary(days, scope)
+        except Exception as exc:
+            logger.warning("LLM 工具 get_uptime_summary 失败: %s", exc)
+            return "汇总可用性失败，请稍后再试。"
 
 
 def _format_missed(text: str, params: dict) -> bool:
