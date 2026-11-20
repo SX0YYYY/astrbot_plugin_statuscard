@@ -244,9 +244,12 @@ class AlertEngine:
         self.platform_id = str(
             cfg_get(config, "alerts.platform_id", "default") or "default"
         )
-        self.targets = normalize_targets(
-            cfg_get(config, "alerts.targets", []), self.platform_id
-        )
+        # Keep the raw list so ``refresh_platform`` can re-apply the UMO prefix
+        # after AstrBot's platform instances exist (platform_mode=auto). A
+        # full UMO the operator pasted is preserved verbatim by
+        # ``normalize_targets``; only bare group numbers follow the platform.
+        self._raw_targets = cfg_get(config, "alerts.targets", [])
+        self.targets = normalize_targets(self._raw_targets, self.platform_id)
         self._monitor_task: asyncio.Task | None = None
         self._provider_task: asyncio.Task | None = None
         self._daily_task: asyncio.Task | None = None
@@ -628,10 +631,32 @@ class AlertEngine:
     # targets / sending
     # ------------------------------------------------------------------
 
+    def refresh_platform(self, platform_id: str) -> bool:
+        """Adopt the platform resolved at runtime (platform_mode=auto).
+
+        Returns True when the id actually changed. Bare group numbers get the
+        new UMO prefix; a full UMO the operator pasted stays exactly as
+        written (changing it silently could point at the wrong chat).
+        """
+
+        new_id = str(platform_id or "").strip()
+        if not new_id or new_id == self.platform_id:
+            return False
+        previous = self.platform_id
+        self.platform_id = new_id
+        self.targets = normalize_targets(self._raw_targets, new_id)
+        logger.info(
+            "告警平台已自动适配：%s → %s（目标 %d 个）",
+            previous,
+            new_id,
+            len(self.targets),
+        )
+        return True
+
     def _targets_for(self, kind: str) -> list[str]:
         """Push targets for one kind; None from the center means legacy."""
 
-        picked = resolve_targets(self.config, kind)
+        picked = resolve_targets(self.config, kind, self.platform_id)
         return self.targets if picked is None else picked
 
     async def _send(

@@ -667,6 +667,25 @@
           }
         }
       },
+      "platform_mode": {
+        "description": "平台模式",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "official",
+          "onebot"
+        ],
+        "labels": [
+          "自动（推荐）",
+          "QQ 官方机器人",
+          "OneBot / NapCat"
+        ],
+        "condition": {
+          "show_advanced": true
+        },
+        "hint": "自动：优先使用下面的平台实例 ID；该实例不存在时自动改用当前运行中的平台（先 OneBot 后官方）。OneBot/官方：强制按类型选择。切换平台后无需改配置，保存并重载插件即可；推送目标可直接填群号（OneBot）。"
+      },
       "platform_id": {
         "description": "平台实例 ID",
         "type": "string",
@@ -674,7 +693,7 @@
         "condition": {
           "show_advanced": true
         },
-        "hint": "OneBot 通常保持 default；QQ 官方机器人必须填平台实例 ID（例如 Q官弗洛洛，不是 default），否则定时状态图、日报与告警会找不到平台而发送失败。可在「状态卡诊断」查看当前平台实例 ID。"
+        "hint": "OneBot 通常保持 default；QQ 官方机器人必须填平台实例 ID（例如 Q官弗洛洛，不是 default），否则定时状态图、日报与告警会找不到平台而发送失败。可在「状态卡诊断」查看当前平台实例 ID。平台模式为「自动」时，此 ID 失效会自动改用当前运行平台。"
       },
       "self_id": {
         "description": "掉线检测的机器人 QQ 号",

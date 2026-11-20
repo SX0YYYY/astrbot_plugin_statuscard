@@ -24,7 +24,7 @@ from .collectors import (
     resolve_targets,
 )
 from .monitor import KIND_LABELS, REQUIRED_FIELDS
-from .platform_support import is_official_platform
+from .platform_support import is_official_platform, pick_platform_id
 from .redactor import RULES as REDACT_RULES
 from .utils import mask_chat_ids, normalize_targets, redact_url
 
@@ -193,7 +193,18 @@ def run_audit(
     """
 
     issues: list[AuditIssue] = []
-    platform_id = str(cfg_get(config, "alerts.platform_id", "default") or "default")
+    configured_platform_id = str(
+        cfg_get(config, "alerts.platform_id", "default") or "default"
+    )
+    # platform_mode=auto (the default) follows the live instance when the
+    # configured id is gone. Resolving here keeps the audit from warning
+    # about a switch the runtime already handled; with no live instance the
+    # configured id comes back and the stale value is still reported.
+    platform_id = pick_platform_id(
+        configured_platform_id,
+        cfg_get(config, "alerts.platform_mode", "auto"),
+        platform_instances or {},
+    )
     alerts_on = cfg_bool(config, "alerts.enabled", False)
     monitors_on = cfg_bool(config, "monitors.enabled", False)
     daily_on = cfg_bool(config, "daily_report.enabled", False)

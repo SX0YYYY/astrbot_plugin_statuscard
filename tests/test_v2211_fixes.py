@@ -226,6 +226,9 @@ def test_audit_checks_platform_for_daily_summary_only() -> None:
                 "enabled": False,
                 "daily_summary": {"enabled": True, "time": "20:00"},
                 "platform_id": "default",
+                # Forced OneBot without a live OneBot instance: the auto
+                # fallback cannot rescue it, so the mismatch is still reported.
+                "platform_mode": "onebot",
             },
             "daily_report": {},
         },
@@ -241,6 +244,7 @@ def test_audit_checks_platform_for_provider_watch_only() -> None:
                 "enabled": False,
                 "provider_watch": {"enabled": True},
                 "platform_id": "default",
+                "platform_mode": "onebot",
             },
             "daily_report": {},
         },

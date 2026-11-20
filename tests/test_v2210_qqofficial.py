@@ -281,6 +281,9 @@ def test_audit_reports_platform_mismatch_and_missing_prefix() -> None:
         "alerts": {
             "enabled": True,
             "platform_id": "default",
+            # Forced OneBot: no such live instance exists, so the auto fallback
+            # cannot rescue the stale id and the audit must still report it.
+            "platform_mode": "onebot",
             "targets": ["default:GroupMessage:461961169"],
         }
     }

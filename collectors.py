@@ -1807,13 +1807,19 @@ def effective_media_source(
     )
 
 
-def resolve_targets(config: Any, kind: str) -> list[str] | None:
+def resolve_targets(
+    config: Any, kind: str, platform_id: str | None = None
+) -> list[str] | None:
     """Push targets for one notification kind, or None for the legacy path.
 
     The notification center (``notify.rules``) takes over all push targets
     once at least one enabled rule matches ``kind``; returning ``None`` lets
     the caller keep its legacy behaviour (the three per-module target lists
     that fall back to ``alerts.targets``).
+
+    ``platform_id`` overrides ``alerts.platform_id`` for the UMO prefix; the
+    runtime passes its platform-auto resolved id so a bare group number
+    follows the platform that is actually running.
     """
 
     cfg = cfg_get(config, "notify.rules", None)
@@ -1855,7 +1861,9 @@ def resolve_targets(config: Any, kind: str) -> list[str] | None:
             active.append(rule)
     if not active:
         return None
-    platform_id = str(cfg_get(config, "alerts.platform_id", "default") or "default")
+    platform_id = str(
+        platform_id or cfg_get(config, "alerts.platform_id", "default") or "default"
+    )
     picked: list[str] = []
     for rule in active:
         target = str(cfg_get(rule, "target", "") or "").strip()

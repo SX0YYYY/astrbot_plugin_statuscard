@@ -637,6 +637,12 @@ class DailyReporter:
         self.plugin = plugin
         self.store = store
         self.config = config
+        # Bare group numbers in the report targets follow this id; it starts
+        # as the configured value and is refreshed once AstrBot's platform
+        # instances exist (platform_mode=auto).
+        self.platform_id = str(
+            cfg_get(config, "alerts.platform_id", "default") or "default"
+        )
         self.builder = DailyReportBuilder(store, config)
         self._task: asyncio.Task | None = None
         self._running = False
@@ -1122,16 +1128,29 @@ class DailyReporter:
         weekly = [item for item in VALID_SECTIONS if item in allowed]
         return weekly or self._sections()
 
+    def refresh_platform(self, platform_id: str) -> bool:
+        """Adopt the platform resolved at runtime (platform_mode=auto)."""
+
+        new_id = str(platform_id or "").strip()
+        if not new_id or new_id == self.platform_id:
+            return False
+        self.platform_id = new_id
+        return True
+
     def _targets(self, kind: str = "daily") -> list[str]:
-        picked = resolve_targets(self.config, kind)
+        # ``platform_id`` is set by __init__; tests that bypass it (and old
+        # pickled doubles) fall back to the configured value.
+        platform_id = str(
+            getattr(self, "platform_id", None)
+            or cfg_get(self.config, "alerts.platform_id", "default")
+            or "default"
+        )
+        picked = resolve_targets(self.config, kind, platform_id)
         if picked is not None:
             return picked
         raw = cfg_get(self.config, "daily_report.targets", [])
         if not raw:
             raw = cfg_get(self.config, "alerts.targets", [])
-        platform_id = str(
-            cfg_get(self.config, "alerts.platform_id", "default") or "default"
-        )
         return normalize_targets(raw, platform_id)
 
     def _build_view(

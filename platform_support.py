@@ -22,8 +22,11 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .utils import cfg_get
+
 SUPPORTED_PLATFORMS = ("aiocqhttp", "qq_official", "qq_official_webhook")
 OFFICIAL_PLATFORMS = ("qq_official", "qq_official_webhook")
+PLATFORM_MODES = ("auto", "official", "onebot")
 OFFICIAL_LABEL = "QQ 官方机器人"
 
 
@@ -141,6 +144,63 @@ def adapter_running(inst: Any) -> bool | None:
     if value is None:
         return None
     return str(value).strip().lower() == "running"
+
+
+def pick_platform_id(
+    configured: object,
+    mode: object,
+    instances: dict[str, str] | None,
+) -> str:
+    """Choose the platform instance id the plugin should push through.
+
+    ``instances`` maps live instance ids to adapter names. ``auto`` keeps the
+    configured id while it still exists (zero behaviour change for everyone
+    who never switches platforms); when it no longer exists it falls back to
+    the first OneBot instance, then the official bot. ``onebot`` / ``official``
+    force that type. With no live instance the configured id is returned, so
+    the existing audit warning still points at the stale value.
+    """
+
+    configured_id = str(configured or "default")
+    selected_mode = normalize_platform_name(mode) or "auto"
+    if selected_mode not in PLATFORM_MODES:
+        selected_mode = "auto"
+    table = instances or {}
+    if selected_mode == "auto" and configured_id in table:
+        # Keep the operator's explicit choice while it is alive. This is what
+        # makes the new option a no-op for every existing installation.
+        return configured_id
+    if selected_mode == "onebot":
+        order: tuple[str, ...] = ("aiocqhttp",)
+    elif selected_mode == "official":
+        order = OFFICIAL_PLATFORMS
+    else:
+        order = ("aiocqhttp", *OFFICIAL_PLATFORMS)
+    for name in order:
+        for inst_id, platform_name in table.items():
+            if normalize_platform_name(platform_name) == name:
+                return str(inst_id)
+    return configured_id
+
+
+def resolve_platform_id(context: Any, config: Any) -> str:
+    """Resolve ``alerts.platform_id`` against the currently running adapters.
+
+    ``initialize()`` runs before AstrBot creates its platform instances, so
+    callers must treat this as a runtime lookup (after start-up / on reload)
+    rather than a value to cache forever.
+    """
+
+    configured = cfg_get(config, "alerts.platform_id", "default")
+    mode = cfg_get(config, "alerts.platform_mode", "auto")
+    instances: dict[str, str] = {}
+    for inst in _iter_instances(context):
+        if adapter_running(inst) is False:
+            continue
+        inst_id = adapter_platform_id(inst)
+        if inst_id:
+            instances[inst_id] = adapter_platform_name(inst)
+    return pick_platform_id(configured, mode, instances)
 
 
 def parse_umo(umo: object) -> tuple[str, str, str] | None:

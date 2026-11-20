@@ -45,6 +45,7 @@ from .platform_support import (
     find_official_adapter,
     is_official_platform,
     known_group_session_ids,
+    resolve_platform_id,
 )
 from .redactor import Redactor, read_rules
 from .report import DailyReporter, ReportCollector
@@ -367,6 +368,26 @@ class StatusCardPlugin(Star):
         else:
             logger.info("配置体检：未发现问题")
 
+    async def _apply_platform_auto(self) -> None:
+        """Adopt the platform that is actually running (platform_mode=auto).
+
+        ``initialize()`` runs before AstrBot creates its platform instances,
+        so the components start with the configured id. This pass runs after
+        the adapters exist: when the configured id is gone (the operator
+        switched between OneBot and the official bot) the components move to
+        the live instance and bare group numbers get its UMO prefix.
+        """
+
+        resolved = resolve_platform_id(self.context, self.config)
+        if not resolved or resolved == getattr(self.alerts, "platform_id", ""):
+            return
+        self.alerts.refresh_platform(resolved)
+        self.monitor.refresh_platform(resolved)
+        self.daily_report.refresh_platform(resolved)
+        # The delivery service caches the id at construction; rebuild it so
+        # the OneBot-direct path follows the new instance.
+        self._delivery = None
+
     async def _refresh_audit_after_platforms(self) -> None:
         """Re-run the audit once platform adapters exist.
 
@@ -378,6 +399,7 @@ class StatusCardPlugin(Star):
 
         try:
             await asyncio.sleep(60)
+            await self._apply_platform_auto()
             issues = await asyncio.wait_for(
                 asyncio.to_thread(
                     run_audit,
@@ -963,7 +985,7 @@ class StatusCardPlugin(Star):
                 self.state,
                 self._onebot_client,
                 self._build_message_chain,
-                str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
+                str(getattr(self.alerts, "platform_id", "") or ""),
             )
         return self._delivery
 
@@ -972,7 +994,7 @@ class StatusCardPlugin(Star):
 
         return _get_aiocqhttp_client(
             self.context,
-            str(cfg_get(self.config, "alerts.platform_id", "default") or ""),
+            str(getattr(self.alerts, "platform_id", "") or ""),
         )
 
     @staticmethod
@@ -1283,7 +1305,9 @@ class StatusCardPlugin(Star):
                 event_platform_id = str(event.get_platform_id() or "")
             except Exception:
                 event_platform_id = ""
-            platform_id = event_platform_id or configured_platform_id
+            platform_id = event_platform_id or getattr(
+                self.alerts, "platform_id", configured_platform_id
+            )
             if is_official_platform(platform):
                 # The instance id is normally a readable name, but a migration
                 # mistake can paste a group openid here; mask_chat_ids only

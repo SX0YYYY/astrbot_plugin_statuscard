@@ -450,8 +450,11 @@ class PageApi:
         }
 
     def _platform(self) -> str:
+        alerts_engine = getattr(self.plugin, "alerts", None)
         instance_id = str(
-            cfg_get(self.plugin.config, "alerts.platform_id", "default") or "default"
+            getattr(alerts_engine, "platform_id", None)
+            or cfg_get(self.plugin.config, "alerts.platform_id", "default")
+            or "default"
         )
         # Show the adapter type (qq_official / aiocqhttp) instead of the
         # instance id: after switching bots the dashboard otherwise still
@@ -819,8 +822,11 @@ class PageApi:
         # (v2.20.8).
         plugin = self.plugin
         if kind == "targets":
+            alerts_engine = getattr(plugin, "alerts", None)
             platform_id = str(
-                cfg_get(plugin.config, "alerts.platform_id", "default") or "default"
+                getattr(alerts_engine, "platform_id", None)
+                or cfg_get(plugin.config, "alerts.platform_id", "default")
+                or "default"
             )
             merged: list[str] = []
             # Verify exactly what real notifications would use: resolve each
@@ -840,7 +846,11 @@ class PageApi:
                 ("daily_image", "alerts.targets"),
             )
             for notify_kind, legacy_key in legacy_by_kind:
-                picked = resolve_targets(plugin.config, notify_kind)
+                picked = resolve_targets(
+                    plugin.config,
+                    notify_kind,
+                    platform_id,
+                )
                 if picked is None:
                     raw = cfg_get(plugin.config, legacy_key, [])
                     if isinstance(raw, str):

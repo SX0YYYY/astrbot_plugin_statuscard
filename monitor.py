@@ -220,6 +220,9 @@ class ServiceMonitor:
         targets = cfg_get(config, "monitors.targets", [])
         if not targets:
             targets = cfg_get(config, "alerts.targets", [])
+        # Keep the raw list so a runtime platform switch can re-apply the UMO
+        # prefix to bare group numbers (platform_mode=auto).
+        self._raw_targets = targets
         self.targets = normalize_targets(targets, self.platform_id)
         # Items dropped by _normalize_items (unknown type, exact duplicate).
         # The audit reads this list: otherwise a typo in a monitor type was
@@ -2728,8 +2731,18 @@ class ServiceMonitor:
             return str(item.get("unit") or "")
         return redact_url(str(item.get("target") or ""))
 
+    def refresh_platform(self, platform_id: str) -> bool:
+        """Adopt the platform resolved at runtime (platform_mode=auto)."""
+
+        new_id = str(platform_id or "").strip()
+        if not new_id or new_id == self.platform_id:
+            return False
+        self.platform_id = new_id
+        self.targets = normalize_targets(self._raw_targets, new_id)
+        return True
+
     def _targets_for(self, kind: str = "service") -> list[str]:
-        picked = resolve_targets(self.config, kind)
+        picked = resolve_targets(self.config, kind, self.platform_id)
         return self.targets if picked is None else picked
 
     async def _send(self, text: str) -> DeliveryResult:
