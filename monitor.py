@@ -43,6 +43,7 @@ KIND_LABELS = {
     "docker": "Docker",
     "process": "进程",
     "systemd": "systemd",
+    "heartbeat": "心跳",
 }
 
 REQUIRED_FIELDS = {
@@ -51,6 +52,7 @@ REQUIRED_FIELDS = {
     "docker": "container",
     "process": "pattern",
     "systemd": "unit",
+    "heartbeat": "token",
 }
 
 # Probe failures that mean the probe itself is misconfigured (missing binary,
@@ -314,6 +316,23 @@ class ServiceMonitor:
                     config_error = f"端口 {item.get('port')!r} 不是有效的 1–65535 端口"
                     config_error_code = "invalid_port"
                     config_error_params = {"port": str(item.get("port"))}
+            elif kind == "heartbeat":
+                # The probe clamps out-of-range values back into range, so a
+                # mis-typed period/grace must surface as a config error here
+                # (and in the audit), not as a silently "fixed" item.
+                raw_period = item.get("period_seconds")
+                period = cfg_int(item, "period_seconds", 60)
+                if raw_period is not None and period < 1:
+                    config_error = f"心跳周期 {raw_period!r} 必须是不小于 1 的秒数"
+                    config_error_code = "invalid_period"
+                    config_error_params = {"period": str(raw_period)}
+                else:
+                    raw_grace = item.get("grace_seconds")
+                    grace = cfg_int(item, "grace_seconds", 60)
+                    if raw_grace is not None and grace < 0:
+                        config_error = f"宽限时间 {raw_grace!r} 不能是负数"
+                        config_error_code = "invalid_grace"
+                        config_error_params = {"grace": str(raw_grace)}
             if config_error:
                 # A misconfigured probe would fail on every round and hit the
                 # alert cooldown as a fake "service down"; keep it visible as
@@ -663,6 +682,7 @@ class ServiceMonitor:
         # with a dict under the store's lock keeps start-up from crashing.
         with self.state.section("monitors"):
             pass
+        self._seed_heartbeat_baselines()
         self._mark_stale_items()
         self._running = True
         self._is_silenced()
@@ -674,6 +694,51 @@ class ServiceMonitor:
             self.interval,
             self.fail_threshold,
         )
+
+    def _seed_heartbeat_baselines(self) -> None:
+        """Record when monitoring started watching each heartbeat reporter.
+
+        Without a baseline a reporter that has never checked in (freshly
+        configured item, or the reporter itself is down since before the
+        plugin restart) has no deadline: the probe would either report
+        PROBE_ERROR forever or alert on a restart that happened while the
+        reporter was already expected to speak. ``heartbeat_first_seen``
+        gives the probe a horizon: first alert at start + period + grace.
+        """
+
+        heartbeat_items = [
+            item
+            for item in self.items
+            if str(item.get("__template_key")) == "heartbeat"
+            and not item.get("config_error")
+        ]
+        if not heartbeat_items:
+            return
+        seeded = 0
+        now = time.time()
+        with self.state.section("monitors") as monitors:
+            heartbeat = monitors.get("heartbeat")
+            if not isinstance(heartbeat, dict):
+                heartbeat = {}
+                monitors["heartbeat"] = heartbeat
+            for item in heartbeat_items:
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                entry = heartbeat.get(name)
+                if not isinstance(entry, dict):
+                    entry = {}
+                    heartbeat[name] = entry
+                if not safe_float(entry.get("last_heartbeat") or 0) and not (
+                    safe_float(entry.get("heartbeat_first_seen") or 0)
+                ):
+                    entry["heartbeat_first_seen"] = now
+                    seeded += 1
+        if seeded:
+            # A few fsynced writes at start-up are fine inline; the seed runs
+            # once per start(), not per probe round.
+            self.state.save()
+            logger.info("心跳监测基线已写入：%d 个未上报的心跳项", seeded)
 
     def _validate_suppression(self) -> None:
         if not cfg_bool(self.config, "monitors.suppress_duplicates", False):
@@ -796,6 +861,8 @@ class ServiceMonitor:
             return str(item.get("pattern") or "").strip().lower()
         if kind == "systemd":
             return str(item.get("unit") or "").strip()
+        if kind == "heartbeat":
+            return str(item.get("name") or "").strip()
         return ""
 
     def _prune_state(self) -> None:
@@ -809,6 +876,20 @@ class ServiceMonitor:
                 states = {}
                 monitors["items"] = states
             valid_keys = {self._item_key(item) for item in self.items}
+            # Heartbeat records of removed/renamed reporters have no item key
+            # to prune; drop them here so a renamed reporter does not leave
+            # its old record in state.json forever.
+            heartbeat = monitors.get("heartbeat")
+            if isinstance(heartbeat, dict):
+                valid_names = {
+                    str(item.get("name") or "").strip()
+                    for item in self.items
+                    if str(item.get("__template_key")) == "heartbeat"
+                }
+                for gone in [
+                    name for name in heartbeat if str(name) not in valid_names
+                ]:
+                    heartbeat.pop(gone, None)
             stale_keys = [key for key in states if key not in valid_keys]
             if not stale_keys:
                 return
@@ -1544,6 +1625,16 @@ class ServiceMonitor:
                     # the outage duration and render "故障开始: 1970-…" when
                     # the state had no start at all (v2.20.24 audit).
                     st["since"] = now
+                    if str(item.get("__template_key")) == "heartbeat":
+                        # A heartbeat outage really began when the agreed
+                        # period+grace elapsed with no beat, which is up to a
+                        # full probe interval BEFORE the first failing probe;
+                        # the probe loop only notices it on its next round.
+                        # Using the probe moment would over-report the
+                        # duration (the mirror image of the v2.20.24 fix).
+                        deadline = self._heartbeat_deadline(item)
+                        if deadline and deadline < now:
+                            st["since"] = deadline
             # A fault latched inside the cooldown was recorded but never
             # pushed. If it is still failing when the cooldown expires the
             # operator has never seen it: push the alert now, mirroring the
@@ -2218,6 +2309,42 @@ class ServiceMonitor:
         raw = detail[len(CONFIG_ERROR_PREFIX) :]
         return raw if _looks_like_transient_probe_error(raw) else detail
 
+    def _heartbeat_entry(self, name: str) -> dict[str, Any]:
+        """The persisted heartbeat record for one reporter name."""
+
+        monitors = self.state.get("monitors", {}) or {}
+        if not isinstance(monitors, dict):
+            return {}
+        heartbeat = monitors.get("heartbeat")
+        if not isinstance(heartbeat, dict):
+            return {}
+        entry = heartbeat.get(name)
+        return entry if isinstance(entry, dict) else {}
+
+    def _heartbeat_deadline(self, item: dict[str, Any]) -> float:
+        """When the probe decides a reporter is dead: anchor + period + grace.
+
+        Shared by the probe branch and ``_check_item`` so the episode start
+        cannot drift from the decision the detail text reports. The anchor is
+        the last heartbeat when one exists, and falls back to the
+        start-up baseline (``heartbeat_first_seen``) for a reporter that has
+        NEVER checked in -- the probe branch judges that case on the same
+        numbers, so must the episode start.
+        """
+
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return 0.0
+        entry = self._heartbeat_entry(name)
+        last = safe_float(entry.get("last_heartbeat") or 0)
+        first = safe_float(entry.get("heartbeat_first_seen") or 0)
+        anchor = last or first
+        if not anchor:
+            return 0.0
+        period = max(1, cfg_int(item, "period_seconds", 60))
+        grace = max(0, cfg_int(item, "grace_seconds", 60))
+        return anchor + period + grace
+
     async def _probe(self, item: dict[str, Any]) -> tuple[bool, str, str]:
         kind = str(item.get("__template_key") or "")
         timeout = max(1, min(60, cfg_int(item, "timeout_seconds", 10)))
@@ -2601,6 +2728,49 @@ class ServiceMonitor:
                     detail = CONFIG_ERROR_PREFIX + detail
                 return False, detail, unit
 
+        if kind == "heartbeat":
+            name = str(item.get("name") or "").strip()
+            if not name:
+                return False, "名称未配置", "-"
+            period = max(1, cfg_int(item, "period_seconds", 60))
+            grace = max(0, cfg_int(item, "grace_seconds", 60))
+            entry = self._heartbeat_entry(name)
+            now = time.time()
+            last = safe_float(entry.get("last_heartbeat") or 0)
+            if not last:
+                first = safe_float(entry.get("heartbeat_first_seen") or 0)
+                if not first:
+                    # The baseline is written by start(); a probe that runs
+                    # without it means the loop started before the seed (or
+                    # the state was wiped). Not a fault: skip the round.
+                    return (
+                        False,
+                        f"{PROBE_ERROR_PREFIX}心跳基线未初始化（等待监测启动）",
+                        name,
+                    )
+                deadline = first + period + grace
+                if now <= deadline:
+                    # The reporter has not checked in yet, but the plugin has
+                    # only just started: the dead man's switch fires only
+                    # after the agreed period+grace elapsed with no beat.
+                    return (
+                        True,
+                        f"等待首次心跳（宽限还剩 {max(0, int(deadline - now))}s）",
+                        name,
+                    )
+                return False, f"从未收到心跳（启动基线已超 {period}+{grace}s）", name
+            deadline = last + period + grace
+            if now <= deadline:
+                return True, f"心跳正常（{int(now - last)}s 前上报）", name
+            return (
+                False,
+                (
+                    f"心跳超时：距上次上报已 {format_duration(now - last)}"
+                    f"（阈值 {period}+{grace}s）"
+                ),
+                name,
+            )
+
         return False, f"未知监测类型: {kind}", "-"
 
     @staticmethod
@@ -2665,6 +2835,16 @@ class ServiceMonitor:
                 str(item.get("unit") or ""),
                 timeout,
             )
+        if kind == "heartbeat":
+            # Deliberately WITHOUT the token: rotating a reporter's token is
+            # an operational change, not a different check, and must not move
+            # the item to a fresh state slot (or drop its live episode).
+            return (
+                kind,
+                name,
+                str(max(1, cfg_int(item, "period_seconds", 60))),
+                str(max(0, cfg_int(item, "grace_seconds", 60))),
+            )
         return (kind, name)
 
     @staticmethod
@@ -2695,6 +2875,10 @@ class ServiceMonitor:
                 target = str(item.get("pattern") or "")
             elif kind == "systemd":
                 target = str(item.get("unit") or "")
+            elif kind == "heartbeat":
+                # The reporter name IS the identity; nothing else belongs in
+                # the persisted key (the token must never land in state.json).
+                target = ""
             else:
                 target = ""
             # Keep credentials out of state.json: the key is persisted and also
@@ -2729,6 +2913,10 @@ class ServiceMonitor:
             return str(item.get("pattern") or "")
         if kind == "systemd":
             return str(item.get("unit") or "")
+        if kind == "heartbeat":
+            # The reporter name is what the operator configured; there is no
+            # URL/host to redact, and the token must never appear here.
+            return str(item.get("name") or "")
         return redact_url(str(item.get("target") or ""))
 
     def refresh_platform(self, platform_id: str) -> bool:

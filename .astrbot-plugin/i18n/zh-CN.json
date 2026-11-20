@@ -308,7 +308,15 @@
         "verify_webhook_unreachable": "无法连接到 Webhook 监听地址：请确认 host/port 与插件进程状态。",
         "verifying": "验证中…",
         "webhook_disabled": "Komari Webhook 未启用",
-        "webhook_not_running": "Webhook 未在监听（可能启动失败，详见日志）"
+        "webhook_not_running": "Webhook 未在监听（可能启动失败，详见日志）",
+        "monitor_kind_heartbeat": "心跳",
+        "audit_heartbeat_items_no_server": "存在「心跳」类型的监测项，但「心跳接收服务」未启用：心跳永远不会被记录，监测项会一直告警「从未收到心跳」。请开启「服务监测 → 心跳接收服务」。",
+        "audit_heartbeat_server_no_items": "心跳接收服务已启用，但没有配置任何「心跳」类型的监测项：上报的数据不会被任何监测项消费。请添加心跳监测项，或关闭心跳接收服务。",
+        "audit_heartbeat_server_no_token": "心跳接收服务已启用且勾选了「强制要求 Token」，但没有一个心跳监测项填写了 Token，所有上报都会被拒绝（服务会拒绝启动）。请给心跳监测项填写 Token。",
+        "audit_heartbeat_server_open_no_token": "心跳监听所有网卡（{host}）但没有启用 Token 鉴权（未勾选「强制要求 Token」），出于安全考虑会拒绝启动。请勾选「强制要求 Token」并给心跳监测项填写 Token，或改回 127.0.0.1。",
+        "audit_heartbeat_server_conflict": "心跳接收服务与 Komari Webhook 监听同一地址和端口（{host}:{port}），两者只能有一个启动成功，另一个会启动失败。请改用不同端口。",
+        "monitor_config_error_invalid_period": "心跳周期 {period} 必须是不小于 1 的秒数",
+        "monitor_config_error_invalid_grace": "宽限时间 {grace} 不能是负数"
       },
       "title": "服务器状态看板"
     }

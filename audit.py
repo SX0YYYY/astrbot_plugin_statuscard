@@ -20,6 +20,7 @@ from .collectors import (
     cfg_bool,
     cfg_float,
     cfg_get,
+    cfg_int,
     notify_rules_active,
     resolve_targets,
 )
@@ -144,7 +145,41 @@ def _monitor_config_errors(config: Any) -> list[dict[str, str]]:
                         "error_params": {"port": str(port)},
                     }
                 )
+        elif kind == "heartbeat":
+            # Mirror of the runtime _normalize_items checks so the audit and
+            # the probe loop cannot disagree about what is broken.
+            raw_period = item.get("period_seconds")
+            period = _cfg_int_like(raw_period, 60)
+            if raw_period is not None and period < 1:
+                problems.append(
+                    {
+                        "name": name,
+                        "kind": KIND_LABELS[kind],
+                        "error": f"心跳周期 {raw_period!r} 必须是不小于 1 的秒数",
+                        "error_code": "invalid_period",
+                        "error_params": {"period": str(raw_period)},
+                    }
+                )
+                continue
+            raw_grace = item.get("grace_seconds")
+            grace = _cfg_int_like(raw_grace, 60)
+            if raw_grace is not None and grace < 0:
+                problems.append(
+                    {
+                        "name": name,
+                        "kind": KIND_LABELS[kind],
+                        "error": f"宽限时间 {raw_grace!r} 不能是负数",
+                        "error_code": "invalid_grace",
+                        "error_params": {"grace": str(raw_grace)},
+                    }
+                )
     return problems
+
+
+def _cfg_int_like(raw: Any, default: int) -> int:
+    """Same numeric coercion the runtime cfg_int applies (booleans reject)."""
+
+    return cfg_int({"v": raw}, "v", default)
 
 
 def _monitor_unsupported_types(config: Any) -> list[dict[str, str]]:
@@ -174,6 +209,41 @@ def _monitor_unsupported_types(config: Any) -> list[dict[str, str]]:
             }
         )
     return problems
+
+
+def _heartbeat_items(config: Any) -> list[dict[str, Any]]:
+    """Enabled heartbeat monitor items as configured (no runtime available)."""
+
+    items = cfg_get(config, "monitors.items", []) or []
+    if not isinstance(items, list):
+        return []
+    return [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and cfg_bool(item, "enabled", True)
+        and str(item.get("__template_key") or item.get("type") or "").lower()
+        == "heartbeat"
+    ]
+
+
+def _heartbeat_broken(item: dict[str, Any]) -> bool:
+    """Same three conditions the runtime normalizer rejects items on.
+
+    The raw config entries carry no ``config_error`` field (that is added at
+    runtime), so the audit recomputes the decision instead of filtering on a
+    field that is always absent -- otherwise a token that lives only on a
+    broken item silently passed this check while the runtime listener
+    refused to start (reverse audit P3-2).
+    """
+
+    if not str(item.get("token") or "").strip():
+        return True
+    raw_period = item.get("period_seconds")
+    if raw_period is not None and _cfg_int_like(raw_period, 60) < 1:
+        return True
+    raw_grace = item.get("grace_seconds")
+    return bool(raw_grace is not None and _cfg_int_like(raw_grace, 60) < 0)
 
 
 def run_audit(
@@ -457,6 +527,98 @@ def run_audit(
                     {"host": webhook_host},
                 )
             )
+    if cfg_bool(config, "monitors.heartbeat_server.enabled", False):
+        heartbeat_cfg_items = _heartbeat_items(config)
+        hb_tokens = [
+            str(item.get("token") or "").strip()
+            for item in heartbeat_cfg_items
+            if not _heartbeat_broken(item)
+        ]
+        require_token = cfg_bool(
+            config, "monitors.heartbeat_server.require_token", True
+        )
+        # Same refusal conditions the runtime listener enforces (per-item
+        # tokens: the server itself holds none, so "no token anywhere" means
+        # every report would be rejected).
+        if require_token and not any(hb_tokens):
+            issues.append(
+                AuditIssue(
+                    "error",
+                    "heartbeat_server_no_token",
+                    "心跳接收服务已启用且勾选了「强制要求 Token」，但没有一个心跳监测项"
+                    "填写了 Token，所有上报都会被拒绝（服务会拒绝启动）。请给心跳监测项"
+                    "填写 Token。",
+                )
+            )
+        hb_host = (
+            str(
+                cfg_get(config, "monitors.heartbeat_server.host", "127.0.0.1") or ""
+            ).strip()
+            or "127.0.0.1"
+        )
+        hb_host_norm = hb_host.strip("[]").lower()
+        if hb_host_norm in {"0.0.0.0", "::", "0:0:0:0:0:0:0:0"} and not require_token:
+            issues.append(
+                AuditIssue(
+                    "error",
+                    "heartbeat_server_open_no_token",
+                    f"心跳监听所有网卡（{hb_host}）但没有启用 Token 鉴权"
+                    "（未勾选「强制要求 Token」），出于安全考虑会拒绝启动。"
+                    "请勾选「强制要求 Token」并给心跳监测项填写 Token，"
+                    "或改回 127.0.0.1。",
+                    {"host": hb_host},
+                )
+            )
+        if not heartbeat_cfg_items:
+            issues.append(
+                AuditIssue(
+                    "warning",
+                    "heartbeat_server_no_items",
+                    "心跳接收服务已启用，但没有配置任何「心跳」类型的监测项："
+                    "上报的数据不会被任何监测项消费。请添加心跳监测项，"
+                    "或关闭心跳接收服务。",
+                )
+            )
+        # A port collision kills one of the two listeners at start-up with
+        # only a log line; surface it here.
+        if cfg_bool(config, "alerts.komari_webhook.enabled", False):
+            komari_host = (
+                str(
+                    cfg_get(config, "alerts.komari_webhook.host", "127.0.0.1") or ""
+                ).strip()
+                or "127.0.0.1"
+            )
+            komari_port = cfg_int(config, "alerts.komari_webhook.port", 9968)
+            hb_port = cfg_int(config, "monitors.heartbeat_server.port", 9969)
+            if (
+                komari_host.strip("[]").lower() == hb_host_norm
+                and komari_port == hb_port
+            ):
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        "heartbeat_server_conflict",
+                        "心跳接收服务与 Komari Webhook 监听同一地址和端口"
+                        f"（{hb_host}:{hb_port}），两者只能有一个启动成功，"
+                        "另一个会启动失败。请改用不同端口。",
+                        {"host": hb_host, "port": str(hb_port)},
+                    )
+                )
+    heartbeat_enabled_items = [
+        item for item in _heartbeat_items(config) if not item.get("config_error")
+    ]
+    if heartbeat_enabled_items and not cfg_bool(
+        config, "monitors.heartbeat_server.enabled", False
+    ):
+        issues.append(
+            AuditIssue(
+                "warning",
+                "heartbeat_items_no_server",
+                "存在「心跳」类型的监测项，但「心跳接收服务」未启用：心跳永远不会"
+                "被记录，监测项会一直告警「从未收到心跳」。请开启"
+                "「服务监测 → 心跳接收服务」。",
+            )
+        )
     if cfg_bool(config, "alerts.offline_broadcast.enabled", False) and not cfg_bool(
         config, "alerts.enabled", False
     ):

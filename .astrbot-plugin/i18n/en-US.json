@@ -308,7 +308,15 @@
         "verify_webhook_unreachable": "Cannot reach the webhook listener: check host/port and that the plugin process is running.",
         "verifying": "Checking…",
         "webhook_disabled": "Komari Webhook is not enabled",
-        "webhook_not_running": "Webhook is not listening (it may have failed to start; see the log)"
+        "webhook_not_running": "Webhook is not listening (it may have failed to start; see the log)",
+        "monitor_kind_heartbeat": "heartbeat",
+        "audit_heartbeat_items_no_server": "A heartbeat monitor item exists but the heartbeat receiver is off: no beat will ever be recorded and the item will keep alerting \"no heartbeat ever received\". Enable Service monitoring -> heartbeat receiver.",
+        "audit_heartbeat_server_no_items": "The heartbeat receiver is on, but no heartbeat monitor item is configured: incoming reports are consumed by nothing. Add a heartbeat item or turn the receiver off.",
+        "audit_heartbeat_server_no_token": "The heartbeat receiver is on with \"require token\" enabled, but no heartbeat item has a token, so every report would be rejected (the receiver refuses to start). Set a token on the heartbeat items.",
+        "audit_heartbeat_server_open_no_token": "The heartbeat receiver listens on all interfaces ({host}) without token authentication (\"require token\" is off); it will refuse to start for safety. Enable \"require token\" and set a token on the heartbeat items, or bind 127.0.0.1.",
+        "audit_heartbeat_server_conflict": "The heartbeat receiver and the Komari webhook listen on the same address and port ({host}:{port}); only one can start and the other will fail. Use a different port.",
+        "monitor_config_error_invalid_period": "heartbeat period {period} must be at least 1 second",
+        "monitor_config_error_invalid_grace": "heartbeat grace {grace} must not be negative"
       },
       "title": "System Dashboard"
     }

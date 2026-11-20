@@ -1023,7 +1023,7 @@
         "description": "监测目标列表",
         "type": "template_list",
         "default": [],
-        "hint": "支持 HTTP、TCP、Docker、进程、systemd 五种模板；HTTP/TCP/Docker/systemd 可单独设置超时，HTTP 可设期望状态码。",
+        "hint": "支持 HTTP、TCP、Docker、进程、systemd、心跳六种模板；HTTP/TCP/Docker/systemd 可单独设置超时，HTTP 可设期望状态码。",
         "templates": {
           "http": {
             "name": "网站 / 接口",
@@ -1256,6 +1256,113 @@
                 },
                 "hint": "默认 10 秒；网站或服务较慢时调大，超时按失败计数。"
               }
+            }
+          },
+          "heartbeat": {
+            "name": "心跳（Dead Man's Switch）",
+            "items": {
+              "name": {
+                "description": "显示名称",
+                "type": "string",
+                "default": "",
+                "hint": "例如 数据库备份脚本。外部程序上报时必须在 body 里携带同名 name。"
+              },
+              "token": {
+                "description": "心跳 Token",
+                "type": "string",
+                "default": "",
+                "secret": true,
+                "hint": "外部程序用请求头 Authorization: Bearer <token> 上报；Token 只用于比对，不写入状态文件或日志。"
+              },
+              "period_seconds": {
+                "description": "心跳周期（秒）",
+                "type": "int",
+                "default": 60,
+                "slider": {
+                  "min": 10,
+                  "max": 3600,
+                  "step": 5
+                },
+                "hint": "外部程序每隔多久上报一次；应与程序自身的上报周期一致。"
+              },
+              "grace_seconds": {
+                "description": "宽限时间（秒）",
+                "type": "int",
+                "default": 60,
+                "slider": {
+                  "min": 0,
+                  "max": 3600,
+                  "step": 5
+                },
+                "hint": "超过「周期+宽限」仍未收到心跳才算故障；网络抖动或程序偶发超时可调大。"
+              },
+              "enabled": {
+                "description": "启用",
+                "type": "bool",
+                "default": true
+              },
+              "show_advanced": {
+                "description": "显示高级选项",
+                "type": "bool",
+                "default": false
+              }
+            }
+          }
+        },
+        "heartbeat_server": {
+          "description": "心跳接收服务",
+          "type": "object",
+          "condition": {
+            "show_advanced": true
+          },
+          "hint": "本机监听一个 HTTP 端点接收外部程序的心跳上报；使用心跳监测项时必须开启。普通用户不需要配置。",
+          "items": {
+            "enabled": {
+              "description": "启用心跳接收服务",
+              "type": "bool",
+              "default": false,
+              "hint": "接收外部程序的心跳并写入监测状态；默认关闭。只写状态，不会主动发消息。"
+            },
+            "host": {
+              "description": "监听地址",
+              "type": "string",
+              "default": "127.0.0.1",
+              "condition": {
+                "enabled": true
+              },
+              "hint": "建议保持 127.0.0.1，只允许本机访问。"
+            },
+            "port": {
+              "description": "监听端口",
+              "type": "int",
+              "default": 9969,
+              "slider": {
+                "min": 1,
+                "max": 65535,
+                "step": 1
+              },
+              "condition": {
+                "enabled": true
+              },
+              "hint": "本机监听端口；默认 9969（与 Komari Webhook 的 9968 分开）。"
+            },
+            "path": {
+              "description": "上报路径",
+              "type": "string",
+              "default": "/heartbeat",
+              "condition": {
+                "enabled": true
+              },
+              "hint": "心跳上报路径；默认 /heartbeat。"
+            },
+            "require_token": {
+              "description": "强制要求 Token",
+              "type": "bool",
+              "default": true,
+              "condition": {
+                "enabled": true
+              },
+              "hint": "开启后必须配置 Token，否则拒绝启动；默认开启，关闭后请务必只监听 127.0.0.1。"
             }
           }
         }

@@ -35,6 +35,7 @@ from .collectors import (
     uploaded_file_path,
 )
 from .delivery import DeliveryResult, DeliveryService
+from .heartbeat import HeartbeatServer
 from .i18n import tr
 from .local_card import render_fallback_card
 from .monitor import ServiceMonitor
@@ -129,6 +130,10 @@ class StatusCardPlugin(Star):
             report_store=self.report_store,
             aggregator=self._alert_aggregator,
         )
+        # Heartbeat listener for the Dead Man's Switch probes. Created after
+        # the monitor so the handler can match names against the normalized
+        # items; it only writes state, so it needs no aggregator/targets.
+        self.heartbeat = HeartbeatServer(self.state, self.config, self.monitor)
         self._status_cooldown: dict[str, float] = {}
         self._status_inflight: set[str] = set()
         # One "立即检测" at a time: two concurrent runs each probed all 16
@@ -329,6 +334,7 @@ class StatusCardPlugin(Star):
             ("daily_report", self.daily_report.start),
             ("alerts", self.alerts.start),
             ("monitor", self.monitor.start),
+            ("heartbeat", self.heartbeat.start),
         ):
             try:
                 start()
@@ -426,6 +432,7 @@ class StatusCardPlugin(Star):
             ("daily_report", self.daily_report.stop),
             ("report", self.report.stop),
             ("monitor", self.monitor.stop),
+            ("heartbeat", self.heartbeat.stop),
             ("alerts", self.alerts.stop),
             ("aggregator", self._alert_aggregator.stop),
             ("sampler", self.sampler.stop),
