@@ -16,6 +16,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 from astrbot_plugin_statuscard import audit as audit_module
+from astrbot_plugin_statuscard.collectors import now_in_timezone
 from astrbot_plugin_statuscard.delivery import DeliveryResult
 from astrbot_plugin_statuscard.heartbeat import HeartbeatServer
 from astrbot_plugin_statuscard.monitor import (
@@ -224,10 +225,18 @@ def test_alert_then_recovery_round_trip(tmp_path: Path) -> None:
     store = ReportStore(tmp_path / "report.db")
     monitor, plugin = _live_monitor(tmp_path, store)
 
+    # The event rows carry the day in the CONFIG timezone (Asia/Shanghai),
+    # not the runner's local zone: CI runs in UTC, where the two days
+    # disagree around midnight.
+    def _report_day() -> str:
+        return now_in_timezone({"display": {"timezone": "Asia/Shanghai"}}).strftime(
+            "%Y-%m-%d"
+        )
+
     def _rows(status: str) -> list[dict]:
         return [
             r
-            for r in store.list_events(time.strftime("%Y-%m-%d", time.localtime()))
+            for r in store.list_events(_report_day())
             if r["status"] == status and r["kind"] == "service"
         ]
 
@@ -687,7 +696,11 @@ def test_alert_push_goes_through_the_shared_send_path(tmp_path: Path) -> None:
     assert "心跳" in plugin.pushed[0], plugin.pushed[0]
     rows = [
         r
-        for r in store.list_events(time.strftime("%Y-%m-%d", time.localtime()))
+        for r in store.list_events(
+            now_in_timezone({"display": {"timezone": "Asia/Shanghai"}}).strftime(
+                "%Y-%m-%d"
+            )
+        )
         if r["kind"] == "service"
     ]
     assert rows and rows[-1]["name"] == "备份脚本", rows
